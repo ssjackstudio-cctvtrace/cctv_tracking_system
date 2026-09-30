@@ -5,6 +5,8 @@ import { supabase } from './lib/supabase'
 export const TABLES = {
   branch: 'branch',
   camera: 'camera',
+  member: 'member',
+  memberFaceTemplate: 'member_face_template',
   visit: 'visit',
   cctvEvent: 'cctv_event',
   recognitionEvent: 'recognition_event',

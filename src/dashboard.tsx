@@ -133,7 +133,7 @@ function Overview() {
   const [branches, setBranches] = useState<BranchOption[]>([])
   const [dates, setDates] = useState<DateOption[]>([])
   const [branch, setBranch] = useState('') // '' = all branches
-  const [date, setDate] = useState('') // '' = all dates (YYYY-MM-DD)
+  const [date, setDate] = useState(() => dateKey(new Date().toISOString())) // starts on today; '' = all dates (YYYY-MM-DD)
 
   const [counts, setCounts] = useState<{ inCount: number | null; outCount: number | null; dealed: number | null }>({
     inCount: null,
@@ -228,7 +228,7 @@ function Overview() {
             aria-label="Filter by date"
             value={date}
             min={dates.length ? dates[dates.length - 1].key : undefined}
-            max={dates.length ? dates[0].key : undefined}
+            max={dates.length && dates[0].key > dateKey(new Date().toISOString()) ? dates[0].key : dateKey(new Date().toISOString())}
             onChange={(e) => setDate(e.target.value)}
           />
           <span className="ds-datefilter-label">

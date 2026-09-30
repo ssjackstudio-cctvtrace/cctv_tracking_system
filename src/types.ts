@@ -72,3 +72,23 @@ export type Transaction = {
   status: 'Dealed' | 'Not Detected'
   transaction_date: string
 }
+
+export type Member = {
+  member_id: string
+  member_no: string
+  full_name: string
+  phone_number: string | null
+  email: string | null
+  consent_pdpa: boolean
+  status: 'Active' | 'Inactive' | 'Terminated'
+  joined_at: string
+}
+
+export type MemberFaceTemplate = {
+  face_template_id: string
+  member_id: string
+  embedding: string | number[] // pgvector column; PostgREST returns it as text like "[0.1,0.2,...]"
+  consent_biometric: boolean
+  consent_at: string
+  revoked_at: string | null
+}
