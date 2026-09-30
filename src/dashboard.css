@@ -1,0 +1,98 @@
+/* Dashboard theme (shared with cctv_trace_design.html) */
+.ds {
+  --ds-ink: #10202b;
+  --ds-ink-2: #18303f;
+  --ds-line: #2a4454;
+  --ds-paper: #f3f5f4;
+  --ds-card: #ffffff;
+  --ds-text: #16242d;
+  --ds-muted: #5d7079;
+  --ds-lens: #f2a93b;
+  --ds-signal: #2fbf9b;
+  display: grid;
+  grid-template-columns: 250px 1fr;
+  min-height: 100vh;
+  background: var(--ds-paper);
+  color: var(--ds-text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.ds-side {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ds-ink);
+  color: #e6eef1;
+  padding: 1.25rem 1rem;
+}
+
+.ds-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.25rem 0.5rem 1.25rem;
+  border-bottom: 1px solid var(--ds-line);
+}
+.ds-logo { width: 42px; height: 42px; flex: none; }
+.ds-brand-name { font-weight: 700; font-size: 1.05rem; line-height: 1.15; }
+.ds-brand-sub { font-size: 0.8rem; color: #9db2bb; }
+
+.ds-nav { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1.25rem; }
+.ds-nav button {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: 0 8px 8px 0;
+  background: transparent;
+  color: #b9cad1;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ds-nav button:hover { background: var(--ds-ink-2); color: #fff; }
+.ds-nav button:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: -2px; }
+.ds-nav button.active {
+  background: var(--ds-ink-2);
+  color: #fff;
+  border-left-color: var(--ds-lens);
+}
+.ds-nav svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.ds-live {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+  color: #9db2bb;
+}
+.ds-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ds-signal); }
+
+.ds-main { padding: 1.75rem 2rem; min-width: 0; }
+.ds-main h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
+.ds-lead { margin: 0 0 1.5rem; color: var(--ds-muted); }
+
+.ds-stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.ds-stat { background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; border-top: 3px solid var(--ds-lens); }
+.ds-stat:nth-child(even) { border-top-color: var(--ds-signal); }
+.ds-stat small { color: var(--ds-muted); }
+.ds-stat strong { display: block; margin-top: 0.25rem; font-size: 1.9rem; }
+
+.ds-panel { margin-top: 1rem; background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; }
+.ds-panel h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+.ds-empty { padding: 2rem 0; text-align: center; color: var(--ds-muted); }
+
+@media (max-width: 760px) {
+  .ds { grid-template-columns: 1fr; }
+  .ds-side { position: static; height: auto; }
+  .ds-nav { flex-direction: row; flex-wrap: wrap; }
+  .ds-live { display: none; }
+  .ds-main { padding: 1rem; }
+}

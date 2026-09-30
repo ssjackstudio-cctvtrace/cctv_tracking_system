@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="465 130 270 270">
+  <rect x="465" y="130" width="270" height="270" rx="58" fill="#ffffff"/>
+  <g fill="none" stroke="#111111" stroke-width="13" stroke-linejoin="miter">
+    <!-- top-right arc -->
+    <path d="M562 158A113 113 0 0 1 712 292"/>
+    <!-- bottom-left arc -->
+    <path d="M668 352A113 113 0 0 1 487 240"/>
+    <!-- diagonal slash with small tick -->
+    <path d="M512 208L538 178L668 352"/>
+  </g>
+</svg>

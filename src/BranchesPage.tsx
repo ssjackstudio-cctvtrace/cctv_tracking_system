@@ -5,7 +5,7 @@ import type { Branch, BranchEditable } from './types'
 import BranchCard from './BranchCard'
 
 const COLUMNS =
-  'branch_id, branch_name, formatted_address, postal_code, city, state, latitude, longitude'
+  'branch_id, branch_name, house_unit, street, township, formatted_address, postal_code, city, state, country, google_place_id, latitude, longitude, created_at'
 
 export default function BranchesPage() {
   const [branches, setBranches] = useState<Branch[]>([])
@@ -38,12 +38,12 @@ export default function BranchesPage() {
   }, [])
 
   // 3. Update
-  async function handleSave(id: number, changes: BranchEditable): Promise<boolean> {
+  async function handleSave(branchId: string, changes: BranchEditable): Promise<boolean> {
     setBusy(true)
     const { data, error } = await supabase
       .from('branch')
       .update(changes)
-      .eq('id', id)
+      .eq('branch_id', branchId)
       .select(COLUMNS)
     setBusy(false)
 
@@ -57,7 +57,9 @@ export default function BranchesPage() {
       return false
     }
 
-    setBranches((prev) => prev.map((b) => (b.id === id ? (data[0] as Branch) : b)))
+    setBranches((prev) =>
+      prev.map((b) => (b.branch_id === branchId ? (data[0] as Branch) : b)),
+    )
     setMessage('')
     return true
   }
@@ -70,8 +72,8 @@ export default function BranchesPage() {
     const { data, error } = await supabase
       .from('branch')
       .delete()
-      .eq('id', branch.id)
-      .select('id')
+      .eq('branch_id', branch.branch_id)
+      .select('branch_id')
     setBusy(false)
 
     if (error) {
@@ -83,7 +85,7 @@ export default function BranchesPage() {
       return
     }
 
-    setBranches((prev) => prev.filter((b) => b.id !== branch.id))
+    setBranches((prev) => prev.filter((b) => b.branch_id !== branch.branch_id))
     setMessage('')
   }
 
@@ -133,12 +135,12 @@ export default function BranchesPage() {
 
       {message && <p className="error">{message}</p>}
       {loading && <p>Loading branches…</p>}
-      {!loading && branches.length === 0 && <p>No branches found.</p>}
+      {!loading && branches.length === 0 && !message && <p>No branches found.</p>}
 
       <div className="grid">
         {branches.map((b) => (
           <BranchCard
-            key={b.id}
+            key={b.branch_id}
             branch={b}
             isAdmin={!!session}
             busy={busy}

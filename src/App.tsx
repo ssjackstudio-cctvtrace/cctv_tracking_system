@@ -1,5 +1,5 @@
-import BranchesPage from './BranchesPage'
+import Dashboard from './dashboard'
 
 export default function App() {
-  return <BranchesPage />
+  return <Dashboard />
 }
