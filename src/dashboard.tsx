@@ -2,13 +2,22 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
 import BranchesPage from './BranchesPage'
+import BranchFormPage from './Branchformpage'
 import CameraPage from './Camerapage'
 import EventsPage, { CctvEventsTable } from './Eventspage'
 import VisitsPage from './Visitspage'
 import TransactionsPage from './Transactionspage'
+import NewBranchPage from './NewBranchPage'
 import './dashboard.css'
 
 type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'visits' | 'transactions'
+// Sub-pages of Branch (sidebar keeps "Branch" highlighted on these)
+type ViewKey = PageKey | 'branchAdd' | 'branchManage'
+
+const SUB_TITLES: Partial<Record<ViewKey, string>> = {
+  branchAdd: 'Add Branch',
+  branchManage: 'Branch Management',
+}
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: <path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z" /> },
@@ -78,7 +87,14 @@ function Overview() {
 }
 
 export default function Dashboard() {
-  const [page, setPage] = useState<PageKey>('dashboard')
+  const [page, setPage] = useState<ViewKey>('dashboard')
+  const [branchId, setBranchId] = useState<string | null>(null)
+  const activeNav: PageKey = page === 'branchAdd' || page === 'branchManage' ? 'branch' : page
+
+  useEffect(() => {
+    const label = SUB_TITLES[page] ?? NAV.find((n) => n.key === page)?.label
+    document.title = label ? `${label} | JackStudio CCTV Tracking` : 'JackStudio CCTV Tracking'
+  }, [page])
 
   return (
     <div className="ds">
@@ -108,8 +124,8 @@ export default function Dashboard() {
           {NAV.map((n) => (
             <button
               key={n.key}
-              className={page === n.key ? 'active' : ''}
-              aria-current={page === n.key ? 'page' : undefined}
+              className={activeNav === n.key ? 'active' : ''}
+              aria-current={activeNav === n.key ? 'page' : undefined}
               onClick={() => setPage(n.key)}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">{n.icon}</svg>
@@ -123,7 +139,17 @@ export default function Dashboard() {
 
       <main className="ds-main">
         {page === 'dashboard' && <Overview />}
-        {page === 'branch' && <BranchesPage />}
+        {page === 'branch' && (
+          <BranchesPage
+            onAdd={() => setPage('branchAdd')}
+            onManage={(id) => {
+              setBranchId(id)
+              setPage('branchManage')
+            }}
+          />
+        )}
+        {page === 'branchAdd' && <NewBranchPage onBack={() => setPage('branch')} />}
+        {page === 'branchManage' && <BranchFormPage branchId={branchId} onBack={() => setPage('branch')} />}
         {page === 'camera' && <CameraPage />}
         {page === 'events' && <EventsPage />}
         {page === 'visits' && <VisitsPage />}

@@ -1,0 +1,65 @@
+/* New Branch page (uses the theme variables from dashboard.css) */
+.nb-back { margin-bottom: 1rem; }
+.nb-title { display: flex; align-items: center; gap: 0.6rem; }
+
+.nb-panel { display: flex; flex-direction: column; gap: 1rem; }
+
+.nb-field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; color: var(--ds-muted); }
+.nb-field input {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ds-text);
+  font: inherit;
+  font-size: 0.95rem;
+}
+.nb-field input:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.nb-field input[readonly] { background: #f3f5f4; }
+
+.nb-autocomplete { min-height: 2.6rem; }
+.nb-hint { color: var(--ds-muted); }
+
+.nb-map { height: 340px; border: 1px solid #c9d3d0; border-radius: 6px; background: #e4e9e8; }
+
+.nb-grid { display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.nb-span2 { grid-column: 1 / -1; }
+@media (max-width: 760px) {
+  .nb-grid { grid-template-columns: 1fr; }
+}
+
+/* Marker on the map: branch name above a dot */
+.nb-pin { display: flex; flex-direction: column; align-items: center; gap: 2px; transform: translateY(2px); }
+.nb-pin-label {
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  background: var(--ds-ink, #10202b);
+  color: #fff;
+  font: 600 0.8rem 'Segoe UI', system-ui, sans-serif;
+  white-space: nowrap;
+}
+.nb-pin-dot { width: 16px; height: 16px; border-radius: 50%; background: #f2a93b; border: 3px solid #10202b; box-shadow: 0 0 0 2px #fff; }
+
+/* Save button pinned to the bottom right of the page */
+.nb-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+  padding: 0.75rem 0;
+  background: var(--ds-paper);
+}
+.nb-save {
+  padding: 0.65rem 1.4rem;
+  border: 0;
+  border-radius: 6px;
+  background: #000;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.nb-save:hover:not(:disabled) { background: #222; }
+.nb-save:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
+.nb-save:disabled { opacity: 0.6; cursor: not-allowed; }
