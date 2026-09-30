@@ -11,16 +11,18 @@
   --ds-signal: #2fbf9b;
   display: grid;
   grid-template-columns: 250px 1fr;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  grid-template-rows: minmax(0, 1fr);
   background: var(--ds-paper);
   color: var(--ds-text);
   font-family: 'Segoe UI', system-ui, sans-serif;
 }
 
 .ds-side {
-  position: sticky;
-  top: 0;
-  height: 100vh;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   background: var(--ds-ink);
@@ -75,7 +77,7 @@
 }
 .ds-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ds-signal); }
 
-.ds-main { padding: 1.75rem 2rem; min-width: 0; }
+.ds-main { padding: 1.75rem 2rem; min-width: 0; min-height: 0; overflow-y: auto; }
 .ds-main h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
 .ds-lead { margin: 0 0 1.5rem; color: var(--ds-muted); }
 
@@ -90,9 +92,34 @@
 .ds-empty { padding: 2rem 0; text-align: center; color: var(--ds-muted); }
 
 @media (max-width: 760px) {
-  .ds { grid-template-columns: 1fr; }
+  .ds { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .ds-side { position: static; height: auto; }
   .ds-nav { flex-direction: row; flex-wrap: wrap; }
   .ds-live { display: none; }
   .ds-main { padding: 1rem; }
 }
+
+/* Dashboard filters (branch + date) */
+.ds-filters { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+.ds-filters select {
+  min-width: 220px;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+}
+.ds-filters select:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+@media (max-width: 760px) {
+  .ds-filters select { flex: 1 1 100%; min-width: 0; }
+}
+
+/* Dashboard date picker */
+.ds-datefilter { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.ds-datefilter input[type='date'] { padding: 0.5rem 0.8rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; }
+.ds-datefilter input[type='date']:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.ds-datefilter-label { color: var(--ds-muted); font-size: 0.9rem; }
+.ds-datefilter-clear { padding: 0.4rem 0.75rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.ds-datefilter-clear:hover { background: var(--ds-paper); }
+@media (max-width: 760px) { .ds-datefilter { flex: 1 1 100%; } }
