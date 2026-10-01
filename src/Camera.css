@@ -1,0 +1,229 @@
+/* Camera page and Camera Details page */
+
+.cam-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 16px;
+}
+
+.cam-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.cam-filter select {
+  min-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+}
+
+.cam-toggle,
+.cam-expand,
+.cam-back {
+  padding: 8px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.cam-toggle:hover,
+.cam-expand:hover,
+.cam-back:hover {
+  background: #f1f5f9;
+}
+
+/* LIVE label with blinking red dot */
+.cam-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #dc2626;
+}
+
+.cam-live-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #dc2626;
+  animation: cam-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes cam-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Camera cards: 2 per row collapsed, 4 per row expanded */
+.cam-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.cam-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.cam-grid--4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+  .cam-grid--4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .cam-grid--2,
+  .cam-grid--4 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cam-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-card-title {
+  font-weight: 600;
+}
+
+.cam-expand {
+  align-self: flex-start;
+}
+
+/* Screen (16:9) */
+.cam-screen {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.cam-screen img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.cam-screen--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+
+/* Camera Details page */
+.cam-back {
+  margin-bottom: 12px;
+}
+
+.cam-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 800px) {
+  .cam-detail {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cam-info {
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.cam-info-row:last-child {
+  border-bottom: none;
+}
+
+.cam-info dt {
+  color: #64748b;
+}
+
+.cam-info dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-all;
+}
+
+.cam-count-note {
+  margin: 0 0 8px;
+  color: #64748b;
+}
+
+.cam-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 560px) {
+  .cam-counts {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cam-count-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-count-label {
+  color: #64748b;
+}
+
+.cam-count-value {
+  font-size: 2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.cam-error {
+  color: #dc2626;
+}

@@ -81,11 +81,46 @@
 .ds-main h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
 .ds-lead { margin: 0 0 1.5rem; color: var(--ds-muted); }
 
-.ds-stats { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+/* 4 cards per row on a wide screen, 2 per row when the window is narrower */
+.ds-stats { display: grid; gap: 1rem; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .ds-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .ds-stat { background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; border-top: 3px solid var(--ds-lens); }
 .ds-stat:nth-child(even) { border-top-color: var(--ds-signal); }
 .ds-stat small { color: var(--ds-muted); }
 .ds-stat strong { display: block; margin-top: 0.25rem; font-size: 1.9rem; }
+/* People In = green, People Out = red, People Still Inside = yellow */
+.ds-stat.ds-stat--in { border: 2px solid #22a55a; }
+.ds-stat.ds-stat--out { border: 2px solid #d64545; }
+.ds-stat.ds-stat--inside { border: 2px solid #e8b923; }
+/* Total on the same line as the label, Male / Female rows underneath */
+.ds-stat-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
+.ds-stat-row strong { margin-top: 0; }
+.ds-stat-sub {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.3rem 0 0.3rem 0.75rem;
+  border-top: 1px solid #e3e9e7;
+  font-size: 0.9rem;
+  color: var(--ds-muted);
+}
+.ds-stat-sub span:last-child { color: var(--ds-text); font-weight: 600; }
+
+/* Latest events: tabs on the left, "more" button on the right */
+.ds-tabbar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.ds-tabbar .tabs { margin-bottom: 0; }
+.ds-more {
+  margin-left: auto;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--ds-ink);
+  border-radius: 6px;
+  background: var(--ds-ink);
+  color: #fff;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.ds-more:hover { background: var(--ds-ink-2); }
+.ds-more:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
 
 .ds-panel { margin-top: 1rem; background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; }
 .ds-panel h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }

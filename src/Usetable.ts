@@ -110,9 +110,12 @@ export function useTypedTable<K extends TableName>(
 
 // ---------- Insert / update / delete ----------
 // Each returns an error message, or '' when it worked.
+// The columns are checked by the function parameters above. Inside, the values
+// are passed to Supabase as plain objects / strings, because Supabase's own
+// types cannot work out RowOf[K] while K is still generic.
 
 export async function insertRow<K extends TableName>(table: K, row: Partial<RowOf[K]>) {
-  const { error } = await supabase.from(table).insert(row)
+  const { error } = await supabase.from(table as string).insert(row as Record<string, unknown>)
   return error ? error.message : ''
 }
 
@@ -121,12 +124,18 @@ export async function updateRow<K extends TableName>(
   id: string,
   changes: Partial<RowOf[K]>,
 ) {
-  const { error } = await supabase.from(table).update(changes).eq(PRIMARY_KEY[table], id)
+  const { error } = await supabase
+    .from(table as string)
+    .update(changes as Record<string, unknown>)
+    .eq(PRIMARY_KEY[table] as string, id)
   return error ? error.message : ''
 }
 
 export async function deleteRow<K extends TableName>(table: K, id: string) {
-  const { error } = await supabase.from(table).delete().eq(PRIMARY_KEY[table], id)
+  const { error } = await supabase
+    .from(table as string)
+    .delete()
+    .eq(PRIMARY_KEY[table] as string, id)
   return error ? error.message : ''
 }
 

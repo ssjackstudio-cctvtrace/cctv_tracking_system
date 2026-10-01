@@ -4,15 +4,14 @@ import { TABLES } from './Usetable'
 import BranchesPage from './BranchesPage'
 import EditBranchPage from './Editbranch'
 import CameraPage from './Camerapage'
-import EventsPage from './Eventspage'
-import VisitsPage from './Visitspage'
+import EventsPage, { type EventTab } from './Eventspage'
 import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
-type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'visits' | 'members' | 'transactions'
+type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'members' | 'transactions'
 // Sub-pages of Branch (sidebar keeps "Branch" highlighted on these)
 type ViewKey = PageKey | 'branchAdd' | 'branchEdit'
 
@@ -26,7 +25,6 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'branch', label: 'Branch', icon: <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" /> },
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
   { key: 'events', label: 'Event', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
-  { key: 'visits', label: 'Visit', icon: <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /> },
   { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
@@ -48,13 +46,35 @@ type BranchOption = { branch_id: string; branch_name: string }
 type DateOption = { key: string; label: string }
 type Range = readonly [string, string] | null
 
+type Gender = 'Male' | 'Female'
+
 type LatestEvent = {
   cctv_event_id: string
   direction: string
   confidence: number
   event_time: string
   camera: { camera_name: string } | null
-  visit: { visit_type: string } | null
+  visit: { visit_type: string; est_gender: string; est_age: number | null } | null
+}
+
+type LatestRecognition = {
+  recognition_event_id: string
+  match_score: number
+  result: string
+  event_time: string
+  camera: { camera_name: string } | null
+  member_face_template: { member: { member_no: string } | null } | null
+  visit: { est_gender: string; est_age: number | null } | null
+}
+
+type Counts = {
+  inCount: number | null
+  inMale: number | null
+  inFemale: number | null
+  outCount: number | null
+  outMale: number | null
+  outFemale: number | null
+  dealed: number | null
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -96,12 +116,17 @@ async function loadTimes(table: string, column: string): Promise<string[]> {
   return out
 }
 
-// Number of cctv_event rows with the given direction (branch = camera's branch)
-function eventCount(direction: 'In' | 'Out', branch: string, range: Range) {
+// Number of cctv_event rows with the given direction (branch = camera's branch),
+// optionally only for one estimated gender of the visit
+function eventCount(direction: 'In' | 'Out', branch: string, range: Range, gender?: Gender) {
   let q = supabase
     .from(TABLES.cctvEvent)
-    .select('cctv_event_id, camera!inner(branch_id)', { count: 'exact', head: true })
+    .select(
+      gender ? 'cctv_event_id, camera!inner(branch_id), visit!inner(est_gender)' : 'cctv_event_id, camera!inner(branch_id)',
+      { count: 'exact', head: true },
+    )
     .eq('direction', direction)
+  if (gender) q = q.eq('visit.est_gender', gender)
   if (branch) q = q.eq('camera.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q
@@ -118,31 +143,54 @@ function dealedCount(branch: string, range: Range) {
   return q
 }
 
-// select ca.camera_name, v.visit_type, cc.direction, cc.confidence, cc.event_time
-// from cctv_event cc join camera ca on ... join visit v on ...  (latest 50)
+// select ca.camera_name, cc.direction, cc.confidence, v.visit_type, v.est_gender, v.est_age, cc.event_time
+// from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id  (latest 50)
 function latestEvents(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.cctvEvent)
     .select(
-      'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, branch_id), visit!inner(visit_type)',
+      'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, branch_id), visit!inner(visit_type, est_gender, est_age)',
     )
   if (branch) q = q.eq('camera.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q.order('event_time', { ascending: false }).limit(50)
 }
 
-function Overview() {
+// select ca.camera_name, m.member_no, v.est_gender, v.est_age, re.match_score, re.result, re.event_time
+// from recognition_event re join camera ca on re.camera_id = ca.camera_id
+// join member_face_template mft on re.face_template_id = mft.face_template_id
+// join member m on mft.member_id = m.member_id join visit v on re.visit_id = v.visit_id  (latest 50)
+function latestRecognitions(branch: string, range: Range) {
+  let q = supabase
+    .from(TABLES.recognitionEvent)
+    .select(
+      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, branch_id), member_face_template!inner(member!inner(member_no)), visit!inner(est_gender, est_age)',
+    )
+  if (branch) q = q.eq('camera.branch_id', branch)
+  if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
+  return q.order('event_time', { ascending: false }).limit(50)
+}
+
+const diff = (a: number | null, b: number | null) => (a !== null && b !== null ? a - b : null)
+
+function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
   const [branches, setBranches] = useState<BranchOption[]>([])
   const [dates, setDates] = useState<DateOption[]>([])
-  const [branch, setBranch] = useState('') // '' = all branches
+  const [branch, setBranch] = useState('') // set to the first branch once the branches are loaded
   const [date, setDate] = useState(() => dateKey(new Date().toISOString())) // starts on today; '' = all dates (YYYY-MM-DD)
 
-  const [counts, setCounts] = useState<{ inCount: number | null; outCount: number | null; dealed: number | null }>({
+  const [counts, setCounts] = useState<Counts>({
     inCount: null,
+    inMale: null,
+    inFemale: null,
     outCount: null,
+    outMale: null,
+    outFemale: null,
     dealed: null,
   })
   const [events, setEvents] = useState<LatestEvent[]>([])
+  const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
+  const [eventTab, setEventTab] = useState<EventTab>('cctv')
   const [loading, setLoading] = useState(true)
   const [filterError, setFilterError] = useState('')
   const [error, setError] = useState('')
@@ -158,13 +206,21 @@ function Overview() {
       .then(([b, eventTimes, transactionTimes]) => {
         if (cancelled) return
         if (b.error) setFilterError(b.error.message)
-        else setBranches((b.data ?? []) as BranchOption[])
+        else {
+          const list = (b.data ?? []) as BranchOption[]
+          setBranches(list)
+          if (list.length) setBranch((cur) => cur || list[0].branch_id)
+          else setLoading(false)
+        }
 
         const keys = Array.from(new Set([...eventTimes, ...transactionTimes].map(dateKey))).sort().reverse()
         setDates(keys.map((key) => ({ key, label: fmtDate(new Date(`${key}T00:00:00`)) })))
       })
       .catch((err: unknown) => {
-        if (!cancelled) setFilterError(err instanceof Error ? err.message : 'Failed to load the filters')
+        if (!cancelled) {
+          setFilterError(err instanceof Error ? err.message : 'Failed to load the filters')
+          setLoading(false)
+        }
       })
     return () => {
       cancelled = true
@@ -173,6 +229,7 @@ function Overview() {
 
   // Numbers + latest events, reloaded whenever a filter changes
   useEffect(() => {
+    if (!branch) return // wait until a branch is selected
     let cancelled = false
     setLoading(true)
     setError('')
@@ -180,19 +237,31 @@ function Overview() {
 
     Promise.all([
       eventCount('In', branch, range),
+      eventCount('In', branch, range, 'Male'),
+      eventCount('In', branch, range, 'Female'),
       eventCount('Out', branch, range),
+      eventCount('Out', branch, range, 'Male'),
+      eventCount('Out', branch, range, 'Female'),
       dealedCount(branch, range),
       latestEvents(branch, range),
-    ]).then(([inRes, outRes, dealRes, evRes]) => {
+      latestRecognitions(branch, range),
+    ]).then(([inRes, inMaleRes, inFemaleRes, outRes, outMaleRes, outFemaleRes, dealRes, evRes, recRes]) => {
       if (cancelled) return
-      const failed = [inRes, outRes, dealRes, evRes].find((r) => r.error)
+      const failed = [inRes, inMaleRes, inFemaleRes, outRes, outMaleRes, outFemaleRes, dealRes, evRes, recRes].find(
+        (r) => r.error,
+      )
       if (failed?.error) setError(failed.error.message)
       setCounts({
         inCount: inRes.error ? null : inRes.count,
+        inMale: inMaleRes.error ? null : inMaleRes.count,
+        inFemale: inFemaleRes.error ? null : inFemaleRes.count,
         outCount: outRes.error ? null : outRes.count,
+        outMale: outMaleRes.error ? null : outMaleRes.count,
+        outFemale: outFemaleRes.error ? null : outFemaleRes.count,
         dealed: dealRes.error ? null : dealRes.count,
       })
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
+      setRecognitions(recRes.error ? [] : ((recRes.data ?? []) as unknown as LatestRecognition[]))
       setLoading(false)
     })
     return () => {
@@ -200,13 +269,22 @@ function Overview() {
     }
   }, [branch, date])
 
-  const inside =
-    counts.inCount !== null && counts.outCount !== null ? counts.inCount - counts.outCount : null
-
-  const stats: { label: string; value: number | null }[] = [
-    { label: 'People In', value: counts.inCount },
-    { label: 'People Out', value: counts.outCount },
-    { label: 'People Still Inside', value: inside },
+  const stats: {
+    label: string
+    value: number | null
+    male?: number | null
+    female?: number | null
+    tone?: 'in' | 'out' | 'inside'
+  }[] = [
+    { label: 'People In', value: counts.inCount, male: counts.inMale, female: counts.inFemale, tone: 'in' },
+    { label: 'People Out', value: counts.outCount, male: counts.outMale, female: counts.outFemale, tone: 'out' },
+    {
+      label: 'People Still Inside',
+      value: diff(counts.inCount, counts.outCount),
+      male: diff(counts.inMale, counts.outMale),
+      female: diff(counts.inFemale, counts.outFemale),
+      tone: 'inside',
+    },
     { label: 'Transactions Dealed', value: counts.dealed },
   ]
 
@@ -217,7 +295,6 @@ function Overview() {
 
       <div className="ds-filters">
         <select aria-label="Filter by branch" value={branch} onChange={(e) => setBranch(e.target.value)}>
-          <option value="">All branches</option>
           {branches.map((b) => (
             <option key={b.branch_id} value={b.branch_id}>
               {b.branch_name}
@@ -249,29 +326,78 @@ function Overview() {
 
       <section className="ds-stats">
         {stats.map((s) => (
-          <div className="ds-stat" key={s.label}>
-            <small>{s.label}</small>
-            <strong>{s.value ?? '—'}</strong>
+          <div className={s.tone ? `ds-stat ds-stat--${s.tone}` : 'ds-stat'} key={s.label}>
+            <div className="ds-stat-row">
+              <small>{s.label}</small>
+              <strong>{s.value ?? '—'}</strong>
+            </div>
+            {s.tone && (
+              <>
+                <div className="ds-stat-sub">
+                  <span>Male:</span>
+                  <span>{s.male ?? '—'}</span>
+                </div>
+                <div className="ds-stat-sub">
+                  <span>Female:</span>
+                  <span>{s.female ?? '—'}</span>
+                </div>
+              </>
+            )}
           </div>
         ))}
       </section>
 
       <section className="ds-panel">
         <h2>Latest events (top 50)</h2>
-        <DataTable
-          rows={events}
-          loading={loading}
-          error=""
-          emptyMessage="No CCTV events found."
-          rowKey={(r) => r.cctv_event_id}
-          columns={[
-            { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
-            { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
-            { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
-            { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
-            { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
-          ]}
-        />
+        <div className="ds-tabbar">
+          <div className="tabs">
+            <button className={eventTab === 'cctv' ? 'active' : ''} onClick={() => setEventTab('cctv')}>
+              CCTV Event
+            </button>
+            <button className={eventTab === 'recognition' ? 'active' : ''} onClick={() => setEventTab('recognition')}>
+              Recognition Event
+            </button>
+          </div>
+          <button type="button" className="ds-more" onClick={() => onMoreEvents(eventTab)}>
+            {eventTab === 'cctv' ? 'Click for more CCTV events' : 'Click for more recognition events'}
+          </button>
+        </div>
+
+        {eventTab === 'cctv' ? (
+          <DataTable
+            rows={events}
+            loading={loading}
+            error=""
+            emptyMessage="No CCTV events found."
+            rowKey={(r) => r.cctv_event_id}
+            columns={[
+              { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+              { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+              { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
+              { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
+              { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+              { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+              { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
+            ]}
+          />
+        ) : (
+          <DataTable
+            rows={recognitions}
+            loading={loading}
+            error=""
+            emptyMessage="No recognition events found."
+            rowKey={(r) => r.recognition_event_id}
+            columns={[
+              { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+              { header: 'Member no.', render: (r) => r.member_face_template?.member?.member_no ?? '—' },
+              { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+              { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+              { header: 'Match score', render: (r) => `${Number(r.match_score).toFixed(2)}%` },
+              { header: 'Result', render: (r) => <Badge text={r.result} /> },
+              { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
+            ]}
+          />
+        )}
       </section>
     </>
   )
@@ -280,6 +406,7 @@ function Overview() {
 export default function Dashboard() {
   const [page, setPage] = useState<ViewKey>('dashboard')
   const [branchId, setBranchId] = useState<string | null>(null)
+  const [eventsTab, setEventsTab] = useState<EventTab>('cctv') // tab EventsPage opens on
   const activeNav: PageKey = page === 'branchAdd' || page === 'branchEdit' ? 'branch' : page
 
   const mainRef = useRef<HTMLElement>(null)
@@ -320,7 +447,10 @@ export default function Dashboard() {
               key={n.key}
               className={activeNav === n.key ? 'active' : ''}
               aria-current={activeNav === n.key ? 'page' : undefined}
-              onClick={() => setPage(n.key)}
+              onClick={() => {
+                if (n.key === 'events') setEventsTab('cctv')
+                setPage(n.key)
+              }}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">{n.icon}</svg>
               {n.label}
@@ -332,7 +462,14 @@ export default function Dashboard() {
       </aside>
 
       <main className="ds-main" ref={mainRef}>
-        {page === 'dashboard' && <Overview />}
+        {page === 'dashboard' && (
+          <Overview
+            onMoreEvents={(tab) => {
+              setEventsTab(tab)
+              setPage('events')
+            }}
+          />
+        )}
         {page === 'branch' && (
           <BranchesPage
             onAdd={() => setPage('branchAdd')}
@@ -345,8 +482,7 @@ export default function Dashboard() {
         {page === 'branchAdd' && <NewBranchPage onBack={() => setPage('branch')} />}
         {page === 'branchEdit' && branchId && <EditBranchPage branchId={branchId} onBack={() => setPage('branch')} />}
         {page === 'camera' && <CameraPage />}
-        {page === 'events' && <EventsPage />}
-        {page === 'visits' && <VisitsPage />}
+        {page === 'events' && <EventsPage initialTab={eventsTab} />}
         {page === 'members' && <MemberPage />}
         {page === 'transactions' && <TransactionsPage />}
       </main>
