@@ -6,12 +6,13 @@ import EditBranchPage from './Editbranch'
 import CameraPage from './Camerapage'
 import EventsPage from './Eventspage'
 import VisitsPage from './Visitspage'
+import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
-type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'visits' | 'transactions'
+type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'visits' | 'members' | 'transactions'
 // Sub-pages of Branch (sidebar keeps "Branch" highlighted on these)
 type ViewKey = PageKey | 'branchAdd' | 'branchEdit'
 
@@ -26,6 +27,7 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
   { key: 'events', label: 'Event', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
   { key: 'visits', label: 'Visit', icon: <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8" /> },
+  { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
 
@@ -345,6 +347,7 @@ export default function Dashboard() {
         {page === 'camera' && <CameraPage />}
         {page === 'events' && <EventsPage />}
         {page === 'visits' && <VisitsPage />}
+        {page === 'members' && <MemberPage />}
         {page === 'transactions' && <TransactionsPage />}
       </main>
     </div>
