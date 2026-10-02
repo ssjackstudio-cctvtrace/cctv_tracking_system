@@ -227,3 +227,107 @@
 .cam-error {
   color: #dc2626;
 }
+/* Count line editor (Camera Details page) */
+.cam-line {
+  margin: 0 0 24px;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-line h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.cam-line-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.cam-line-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cam-line-save {
+  padding: 8px 16px;
+  border: 1px solid #10202b;
+  border-radius: 8px;
+  background: #10202b;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.cam-line-save:disabled,
+.cam-line-actions .cam-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cam-line-canvas {
+  position: relative;
+  max-width: 900px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0f172a;
+  user-select: none;
+}
+
+.cam-line-canvas--editing {
+  cursor: crosshair;
+  outline: 2px solid #f2a93b;
+}
+
+.cam-line-canvas img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.cam-line-canvas svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cam-line-path {
+  stroke: #facc15;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-line-arrow {
+  stroke: #22c55e;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-line-arrowhead {
+  fill: #22c55e;
+}
+
+.cam-line-dot {
+  fill: #facc15;
+}
+
+.cam-line-in {
+  position: absolute;
+  transform: translate(-50%, -140%);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #22c55e;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  pointer-events: none;
+}

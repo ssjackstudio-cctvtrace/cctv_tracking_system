@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import './tables.css'
+import './Tables.css'
 
 export type Column<T> = { header: string; render: (row: T) => ReactNode }
 

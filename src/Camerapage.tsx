@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { TABLES, useTable } from './Usetable'
 import type { Branch, Camera } from './types'
-import CameraDetails, { CameraScreen, canCapture } from './CameraDetails'
+import CameraDetails, { CameraScreen, canCapture } from './Cameradetails'
 import './Camera.css'
 
 // Branch selected when the page opens

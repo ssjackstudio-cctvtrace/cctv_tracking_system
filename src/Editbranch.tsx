@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import type { Branch } from './types'
 import './Branches.css'
-import './NewBranch.css'
+import './Newbranch.css'
 
 const COLUMNS =
   'branch_id, branch_name, house_unit, street, township, formatted_address, postal_code, city, state, country, google_place_id, latitude, longitude, created_at'

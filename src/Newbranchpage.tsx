@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { supabase } from './lib/supabase'
 import './Branches.css'
-import './NewBranch.css'
+import './Newbranch.css'
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined
 // Advanced markers need a map ID. DEMO_MAP_ID works for development;

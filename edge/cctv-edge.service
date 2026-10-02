@@ -1,0 +1,20 @@
+# systemd service: starts the edge program at boot and restarts it if it stops.
+# Install on the edge box (change User and paths if yours differ):
+#   sudo cp cctv-edge.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cctv-edge
+# Logs:  journalctl -u cctv-edge -f
+[Unit]
+Description=CCTV Tracking System edge program
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cctv_tracking_system/edge
+ExecStart=/home/ubuntu/cctv_tracking_system/edge/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

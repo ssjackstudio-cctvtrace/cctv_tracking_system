@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Edge box program (edge/)
+edge/.venv/
+__pycache__/
+*.pt
+*_rknn_model/
+edge/*.mp4

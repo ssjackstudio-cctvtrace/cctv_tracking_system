@@ -1,0 +1,7 @@
+# Edge box program (Python 3.10 – 3.12)
+ultralytics>=8.3      # YOLO person detection + ByteTrack tracking (also runs the RKNN model on the RK3588)
+opencv-python>=4.9    # reads the RTSP stream
+numpy
+requests              # talks to Supabase REST / Storage
+python-dotenv         # reads edge/.env
+lap>=0.5              # needed by ByteTrack
