@@ -9,6 +9,7 @@ type Props = { onSignIn: (name: string, password: string) => Promise<string | nu
 export default function LoginPage({ onSignIn }: Props) {
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false) // true only while the eye is held down
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -44,7 +45,7 @@ export default function LoginPage({ onSignIn }: Props) {
         )}
 
         <label className="lg-field">
-          Admin name
+          Admin Name
           <input
             type="text"
             autoComplete="username"
@@ -57,14 +58,46 @@ export default function LoginPage({ onSignIn }: Props) {
 
         <label className="lg-field">
           Password
-          <input
-            type="password"
-            autoComplete="current-password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="e.g: abc123"
-          />
+          <span className="lg-pw">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="e.g: abc123"
+            />
+            {/* Press and hold to show the password; let go to hide it again */}
+            <button
+              type="button"
+              className="lg-eye"
+              aria-label="Hold to show password"
+              title="Hold to show password"
+              aria-pressed={showPassword}
+              onPointerDown={(e) => {
+                e.preventDefault() // keep the cursor in the password box
+                setShowPassword(true)
+              }}
+              onPointerUp={() => setShowPassword(false)}
+              onPointerLeave={() => setShowPassword(false)}
+              onPointerCancel={() => setShowPassword(false)}
+              onKeyDown={(e) => {
+                if (e.key === ' ' || e.key === 'Enter') {
+                  e.preventDefault()
+                  setShowPassword(true)
+                }
+              }}
+              onKeyUp={() => setShowPassword(false)}
+              onBlur={() => setShowPassword(false)}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+                <circle cx="12" cy="12" r="3" />
+                {!showPassword && <path d="M3 3l18 18" />}
+              </svg>
+            </button>
+          </span>
         </label>
 
         <button type="submit" className="lg-submit" disabled={busy}>

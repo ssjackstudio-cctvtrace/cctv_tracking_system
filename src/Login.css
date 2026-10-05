@@ -56,6 +56,34 @@
 }
 .lg-field input:focus-visible { outline: 2px solid #f2a93b; outline-offset: 1px; }
 
+/* Password box with the press-and-hold eye button on the right */
+.lg-pw { position: relative; display: block; }
+.lg-pw input { padding-right: 2.75rem; }
+.lg-eye {
+  position: absolute;
+  top: calc(50% + 0.175rem); /* input has a small top margin */
+  right: 0.35rem;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #5d7079;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.lg-eye:hover { background: #f3f5f4; color: #16242d; }
+.lg-eye:focus-visible { outline: 2px solid #f2a93b; outline-offset: 1px; }
+.lg-eye[aria-pressed='true'] { color: #16242d; }
+.lg-eye svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
 .lg-submit {
   width: 100%;
   margin-top: 0.5rem;
