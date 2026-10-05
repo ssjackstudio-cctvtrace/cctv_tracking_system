@@ -331,3 +331,92 @@
   font-weight: 700;
   pointer-events: none;
 }
+
+/* Toolbar buttons: Expand view + Add camera */
+.cam-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cam-add {
+  padding: 8px 14px;
+  border: 1px solid #10202b;
+  border-radius: 8px;
+  background: #10202b;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.cam-add:hover {
+  background: #18303f;
+}
+
+/* Status line under each camera screen */
+.cam-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.cam-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.cam-status--ok {
+  color: #15803d;
+}
+
+.cam-status--wait {
+  color: #b45309;
+}
+
+.cam-status--off {
+  color: #64748b;
+}
+
+/* Add Camera form */
+.cam-form .nb-field select {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ds-text);
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.cam-form .nb-field select:focus-visible {
+  outline: 2px solid var(--ds-lens);
+  outline-offset: 1px;
+}
+
+.cam-form .nb-field :disabled {
+  background: #f3f5f4;
+}
+
+.cam-saved p {
+  margin: 0 0 0.5rem;
+}
+
+.cam-saved-id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.cam-saved-id code {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  word-break: break-all;
+}

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
 import BranchesPage from './BranchesPage'
@@ -11,14 +12,16 @@ import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
+// Each sidebar page has its own web address, e.g. /camera
 type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'members' | 'transactions'
-// Sub-pages of Branch (sidebar keeps "Branch" highlighted on these)
-type ViewKey = PageKey | 'branchAdd' | 'branchEdit'
 
-const SUB_TITLES: Partial<Record<ViewKey, string>> = {
-  branchAdd: 'Add Branch',
-  branchEdit: 'Edit Branch',
-}
+// Titles for sub-pages (the sidebar keeps the parent page highlighted on these)
+const SUB_TITLES: { match: RegExp; title: string }[] = [
+  { match: /^\/branch\/new$/, title: 'Add Branch' },
+  { match: /^\/branch\/[^/]+\/edit$/, title: 'Edit Branch' },
+  { match: /^\/camera\/new$/, title: 'Add Camera' },
+  { match: /^\/camera\/[^/]+$/, title: 'Camera Details' },
+]
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: <path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z" /> },
@@ -403,58 +406,57 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
   )
 }
 
+// /branch/:branchId/edit
+function EditBranchRoute() {
+  const { branchId } = useParams()
+  const navigate = useNavigate()
+  if (!branchId) return <Navigate to="/branch" replace />
+  return <EditBranchPage branchId={branchId} onBack={() => navigate('/branch')} />
+}
+
+// /events or /events?tab=recognition
+function EventsRoute() {
+  const [params] = useSearchParams()
+  const tab: EventTab = params.get('tab') === 'recognition' ? 'recognition' : 'cctv'
+  return <EventsPage key={tab} initialTab={tab} />
+}
+
 export default function Dashboard() {
-  const [page, setPage] = useState<ViewKey>('dashboard')
-  const [branchId, setBranchId] = useState<string | null>(null)
-  const [eventsTab, setEventsTab] = useState<EventTab>('cctv') // tab EventsPage opens on
-  const activeNav: PageKey = page === 'branchAdd' || page === 'branchEdit' ? 'branch' : page
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const section = pathname.split('/')[1] || 'dashboard'
+  const activeNav = (NAV.some((n) => n.key === section) ? section : 'dashboard') as PageKey
 
   const mainRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
-    const label = SUB_TITLES[page] ?? NAV.find((n) => n.key === page)?.label
+    const label = SUB_TITLES.find((t) => t.match.test(pathname))?.title ?? NAV.find((n) => n.key === activeNav)?.label
     document.title = label ? `${label} | JackStudio CCTV Tracking` : 'JackStudio CCTV Tracking'
     mainRef.current?.scrollTo({ top: 0 })
-  }, [page])
+  }, [pathname, activeNav])
 
   return (
     <div className="ds">
       <aside className="ds-side">
-        <div
-          className="ds-brand"
-          role="button"
-          tabIndex={0}
-          aria-label="Go to dashboard"
-          style={{ cursor: 'pointer' }}
-          onClick={() => setPage('dashboard')}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault()
-              setPage('dashboard')
-            }
-          }}
-        >
+        <Link className="ds-brand" to="/dashboard" aria-label="Go to dashboard">
           <Logo />
           <div>
             <div className="ds-brand-name">JackStudio</div>
             <div className="ds-brand-sub">CCTV Tracking</div>
           </div>
-        </div>
+        </Link>
 
         <nav className="ds-nav" aria-label="Main">
           {NAV.map((n) => (
-            <button
+            <NavLink
               key={n.key}
+              to={`/${n.key}`}
               className={activeNav === n.key ? 'active' : ''}
               aria-current={activeNav === n.key ? 'page' : undefined}
-              onClick={() => {
-                if (n.key === 'events') setEventsTab('cctv')
-                setPage(n.key)
-              }}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">{n.icon}</svg>
               {n.label}
-            </button>
+            </NavLink>
           ))}
         </nav>
 
@@ -462,29 +464,33 @@ export default function Dashboard() {
       </aside>
 
       <main className="ds-main" ref={mainRef}>
-        {page === 'dashboard' && (
-          <Overview
-            onMoreEvents={(tab) => {
-              setEventsTab(tab)
-              setPage('events')
-            }}
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route
+            path="/dashboard"
+            element={
+              <Overview
+                onMoreEvents={(tab) => navigate(tab === 'recognition' ? '/events?tab=recognition' : '/events')}
+              />
+            }
           />
-        )}
-        {page === 'branch' && (
-          <BranchesPage
-            onAdd={() => setPage('branchAdd')}
-            onManage={(id) => {
-              setBranchId(id)
-              setPage('branchEdit')
-            }}
+          <Route
+            path="/branch"
+            element={
+              <BranchesPage
+                onAdd={() => navigate('/branch/new')}
+                onManage={(id) => navigate(`/branch/${id}/edit`)}
+              />
+            }
           />
-        )}
-        {page === 'branchAdd' && <NewBranchPage onBack={() => setPage('branch')} />}
-        {page === 'branchEdit' && branchId && <EditBranchPage branchId={branchId} onBack={() => setPage('branch')} />}
-        {page === 'camera' && <CameraPage />}
-        {page === 'events' && <EventsPage initialTab={eventsTab} />}
-        {page === 'members' && <MemberPage />}
-        {page === 'transactions' && <TransactionsPage />}
+          <Route path="/branch/new" element={<NewBranchPage onBack={() => navigate('/branch')} />} />
+          <Route path="/branch/:branchId/edit" element={<EditBranchRoute />} />
+          <Route path="/camera/*" element={<CameraPage />} />
+          <Route path="/events" element={<EventsRoute />} />
+          <Route path="/members" element={<MemberPage />} />
+          <Route path="/transactions" element={<TransactionsPage />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
       </main>
     </div>
   )

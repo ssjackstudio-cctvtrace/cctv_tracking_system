@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { TABLES, useTable } from './Usetable'
 import type { Branch, Camera } from './types'
-import CameraDetails, { CameraScreen, canCapture } from './Cameradetails'
+import CameraDetails, { CameraScreen, canCapture, formatLongDate } from './Cameradetails'
+import NewCameraPage from './Newcamerapage'
 import './Camera.css'
 
 // Branch selected when the page opens
@@ -10,12 +12,25 @@ const DEFAULT_BRANCH = 'aeon bukit tinggi'
 // How often the camera list (last_seen_at, snapshot URL) is refreshed
 const LIST_REFRESH_MS = 15_000
 
+// Why a screen shows (or does not show) a picture, under each camera
+function screenStatus(cam: Camera): { text: string; tone: 'ok' | 'wait' | 'off' } {
+  if (cam.active_status !== 'Active') return { text: 'Inactive', tone: 'off' }
+  if (!cam.edge_device_id) return { text: 'No edge box linked to this camera', tone: 'off' }
+  if (canCapture(cam)) return { text: 'Live: picture updates every few seconds', tone: 'ok' }
+  if (!cam.last_snapshot_url) return { text: 'Waiting for the edge box to send the first picture', tone: 'wait' }
+  return { text: `Edge box offline (last seen ${formatLongDate(cam.last_seen_at)})`, tone: 'off' }
+}
+
 export default function CameraPage() {
   const cams = useTable<Camera>(TABLES.camera, 'camera_name', true, 500)
   const branches = useTable<Branch>(TABLES.branch, 'branch_name', true, 500)
   const [branchId, setBranchId] = useState('')
   const [expanded, setExpanded] = useState(false)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Sub-pages have their own address: /camera/new and /camera/<camera id>
+  const navigate = useNavigate()
+  const sub = useParams()['*'] ?? ''
+  const adding = sub === 'new'
+  const selectedId = sub && !adding ? sub : null
 
   // Pick AEON Bukit Tinggi by default, or the first branch if it does not exist
   useEffect(() => {
@@ -31,8 +46,23 @@ export default function CameraPage() {
     return () => clearInterval(timer)
   }, [reload])
 
+  if (adding) {
+    return (
+      <NewCameraPage
+        branches={branches.rows}
+        defaultBranchId={branchId}
+        onBack={() => navigate('/camera')}
+        onSaved={(cam) => {
+          setBranchId(cam.branch_id) // show the new camera's branch when going back
+          reload()
+        }}
+      />
+    )
+  }
+
   const selected = cams.rows.find((c) => c.camera_id === selectedId)
-  if (selected) return <CameraDetails camera={selected} onBack={() => setSelectedId(null)} />
+  if (selected) return <CameraDetails camera={selected} onBack={() => navigate('/camera')} />
+  if (selectedId && cams.loading && cams.rows.length === 0) return <p className="ds-lead">Loading camera…</p>
 
   const branchCams = cams.rows.filter((c) => c.branch_id === branchId)
 
@@ -51,9 +81,14 @@ export default function CameraPage() {
             ))}
           </select>
         </label>
-        <button type="button" className="cam-toggle" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? 'Collapse view' : 'Expand view'}
-        </button>
+        <div className="cam-toolbar-actions">
+          <button type="button" className="cam-toggle" onClick={() => setExpanded((v) => !v)}>
+            {expanded ? 'Collapse view' : 'Expand view'}
+          </button>
+          <button type="button" className="cam-add" onClick={() => navigate('/camera/new')}>
+            + Add camera
+          </button>
+        </div>
       </div>
 
       <div className="cam-live">
@@ -65,18 +100,19 @@ export default function CameraPage() {
       {cams.loading && cams.rows.length === 0 ? (
         <p className="ds-lead">Loading cameras…</p>
       ) : branchCams.length === 0 ? (
-        <p className="ds-lead">No cameras found for this branch.</p>
+        <p className="ds-lead">No cameras found for this branch. Click "+ Add camera" to add one.</p>
       ) : (
         <div className={`cam-grid ${expanded ? 'cam-grid--4' : 'cam-grid--2'}`}>
           {branchCams.map((cam) => (
             <div className="cam-card" key={cam.camera_id}>
               <div className="cam-card-title">{cam.camera_name}</div>
               <CameraScreen camera={cam} />
+              <span className={`cam-status cam-status--${screenStatus(cam).tone}`}>{screenStatus(cam).text}</span>
               {canCapture(cam) && (
                 <button
                   type="button"
                   className="cam-expand"
-                  onClick={() => setSelectedId(cam.camera_id)}
+                  onClick={() => navigate(`/camera/${cam.camera_id}`)}
                 >
                   Expand camera
                 </button>

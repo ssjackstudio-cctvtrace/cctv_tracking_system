@@ -31,6 +31,8 @@
 }
 
 .ds-brand {
+  text-decoration: none;
+  color: inherit;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -42,7 +44,8 @@
 .ds-brand-sub { font-size: 0.8rem; color: #9db2bb; }
 
 .ds-nav { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1.25rem; }
-.ds-nav button {
+.ds-nav button,
+.ds-nav a {
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -56,10 +59,15 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
+  text-decoration: none;
+  box-sizing: border-box;
 }
-.ds-nav button:hover { background: var(--ds-ink-2); color: #fff; }
-.ds-nav button:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: -2px; }
-.ds-nav button.active {
+.ds-nav button:hover,
+.ds-nav a:hover { background: var(--ds-ink-2); color: #fff; }
+.ds-nav button:focus-visible,
+.ds-nav a:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: -2px; }
+.ds-nav button.active,
+.ds-nav a.active {
   background: var(--ds-ink-2);
   color: #fff;
   border-left-color: var(--ds-lens);
