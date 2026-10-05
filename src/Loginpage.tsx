@@ -51,6 +51,7 @@ export default function LoginPage({ onSignIn }: Props) {
             required
             value={name}
             onChange={(e) => setName(e.target.value)}
+            placeholder="e.g: admin"
           />
         </label>
 
@@ -62,6 +63,7 @@ export default function LoginPage({ onSignIn }: Props) {
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            placeholder="e.g: abc123"
           />
         </label>
 
