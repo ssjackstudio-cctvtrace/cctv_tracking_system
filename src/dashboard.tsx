@@ -32,7 +32,7 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
 
-function Logo() {
+export function Logo() {
   return (
     <svg className="ds-logo" viewBox="465 130 270 270" aria-hidden="true">
       <rect x="465" y="130" width="270" height="270" rx="58" fill="#ffffff" />
@@ -421,7 +421,9 @@ function EventsRoute() {
   return <EventsPage key={tab} initialTab={tab} />
 }
 
-export default function Dashboard() {
+type DashboardProps = { adminName: string; onSignOut: () => void }
+
+export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const section = pathname.split('/')[1] || 'dashboard'
@@ -479,6 +481,13 @@ export default function Dashboard() {
         </nav>
 
         <div className="ds-live"><i /> System online</div>
+
+        <div className="ds-account">
+          <span className="ds-account-name" title={adminName}>{adminName}</span>
+          <button type="button" className="ds-signout" onClick={onSignOut}>
+            Sign out
+          </button>
+        </div>
       </aside>
 
       <main className="ds-main" ref={mainRef}>

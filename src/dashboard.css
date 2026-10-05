@@ -111,7 +111,8 @@
 .ds--collapsed .ds-brand { flex: none; padding: 0.25rem 0; }
 .ds--collapsed .ds-brand-text,
 .ds--collapsed .ds-nav,
-.ds--collapsed .ds-live { display: none; }
+.ds--collapsed .ds-live,
+.ds--collapsed .ds-account { display: none; }
 
 .ds-live {
   margin-top: auto;
@@ -123,6 +124,30 @@
   color: #9db2bb;
 }
 .ds-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ds-signal); }
+
+/* Signed-in admin + sign out, at the bottom of the sidebar */
+.ds-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--ds-line);
+  font-size: 0.85rem;
+}
+.ds-account-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e6eef1; }
+.ds-signout {
+  flex: none;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--ds-line);
+  border-radius: 6px;
+  background: transparent;
+  color: #b9cad1;
+  font: inherit;
+  cursor: pointer;
+}
+.ds-signout:hover { background: var(--ds-ink-2); color: #fff; }
+.ds-signout:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
 
 .ds-main { padding: 1.75rem 2rem; min-width: 0; min-height: 0; overflow-y: auto; }
 .ds-main h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }

@@ -1,0 +1,75 @@
+/* Admin sign-in page (same colours as the dashboard) */
+.lg {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem 1rem;
+  box-sizing: border-box;
+  background: #10202b;
+  color: #16242d;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.lg-card {
+  width: 100%;
+  max-width: 380px;
+  box-sizing: border-box;
+  padding: 2rem 1.75rem;
+  border-radius: 10px;
+  background: #ffffff;
+  border-top: 4px solid #f2a93b;
+}
+
+.lg-brand { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }
+.lg-brand .ds-logo { width: 42px; height: 42px; flex: none; }
+.lg-brand .ds-logo rect { fill: #10202b; }
+.lg-brand .ds-logo g { stroke: #ffffff; }
+.lg-brand-name { font-weight: 700; font-size: 1.05rem; line-height: 1.15; }
+.lg-brand-sub { font-size: 0.8rem; color: #5d7079; }
+
+.lg-card h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+.lg-lead { margin: 0 0 1.25rem; color: #5d7079; font-size: 0.92rem; }
+
+.lg-error {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: #fdecec;
+  color: #a12a2a;
+  font-size: 0.9rem;
+}
+
+.lg-field { display: block; margin-bottom: 1rem; font-size: 0.9rem; color: #5d7079; }
+.lg-field input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.35rem;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #16242d;
+  font: inherit;
+  font-size: 1rem;
+}
+.lg-field input:focus-visible { outline: 2px solid #f2a93b; outline-offset: 1px; }
+
+.lg-submit {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.7rem 1rem;
+  border: 0;
+  border-radius: 6px;
+  background: #10202b;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lg-submit:hover { background: #18303f; }
+.lg-submit:focus-visible { outline: 2px solid #f2a93b; outline-offset: 2px; }
+.lg-submit:disabled { opacity: 0.7; cursor: default; }
+
+.lg-loading { color: #9db2bb; }
