@@ -18,11 +18,13 @@
   background: var(--ds-paper);
   color: var(--ds-text);
   font-family: 'Segoe UI', system-ui, sans-serif;
+  transition: grid-template-columns 0.25s ease;
 }
 
 .ds-side {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   background: var(--ds-ink);
@@ -30,15 +32,25 @@
   padding: 1.25rem 1rem;
 }
 
+/* Logo + name on the left, sidebar toggle on the right */
+.ds-side-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--ds-line);
+}
 .ds-brand {
   text-decoration: none;
   color: inherit;
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.25rem 0.5rem 1.25rem;
-  border-bottom: 1px solid var(--ds-line);
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
 }
+.ds-brand-text { min-width: 0; white-space: nowrap; }
 .ds-logo { width: 42px; height: 42px; flex: none; }
 .ds-brand-name { font-weight: 700; font-size: 1.05rem; line-height: 1.15; }
 .ds-brand-sub { font-size: 0.8rem; color: #9db2bb; }
@@ -73,6 +85,33 @@
   border-left-color: var(--ds-lens);
 }
 .ds-nav svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Sidebar show / hide button */
+.ds-toggle {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #b9cad1;
+  cursor: pointer;
+}
+.ds-toggle:hover { background: var(--ds-ink-2); color: #fff; }
+.ds-toggle:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: -2px; }
+.ds-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Hidden sidebar: narrow strip with only the logo and the toggle */
+.ds.ds--collapsed { grid-template-columns: 76px 1fr; }
+.ds--collapsed .ds-side { padding: 1.25rem 0.5rem; }
+.ds--collapsed .ds-side-head { flex-direction: column; gap: 0.75rem; }
+.ds--collapsed .ds-brand { flex: none; padding: 0.25rem 0; }
+.ds--collapsed .ds-brand-text,
+.ds--collapsed .ds-nav,
+.ds--collapsed .ds-live { display: none; }
 
 .ds-live {
   margin-top: auto;
@@ -140,6 +179,10 @@
   .ds-nav { flex-direction: row; flex-wrap: wrap; }
   .ds-live { display: none; }
   .ds-main { padding: 1rem; }
+  /* Phone: sidebar sits on top, so hiding it just keeps the top bar */
+  .ds.ds--collapsed { grid-template-columns: 1fr; }
+  .ds--collapsed .ds-side { padding: 1rem; }
+  .ds--collapsed .ds-side-head { flex-direction: row; padding-bottom: 0; border-bottom: 0; }
 }
 
 /* Dashboard filters (branch + date) */

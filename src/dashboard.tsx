@@ -428,6 +428,7 @@ export default function Dashboard() {
   const activeNav = (NAV.some((n) => n.key === section) ? section : 'dashboard') as PageKey
 
   const mainRef = useRef<HTMLElement>(null)
+  const [sideOpen, setSideOpen] = useState(true) // sidebar starts shown
 
   useEffect(() => {
     const label = SUB_TITLES.find((t) => t.match.test(pathname))?.title ?? NAV.find((n) => n.key === activeNav)?.label
@@ -436,17 +437,34 @@ export default function Dashboard() {
   }, [pathname, activeNav])
 
   return (
-    <div className="ds">
+    <div className={sideOpen ? 'ds' : 'ds ds--collapsed'}>
       <aside className="ds-side">
-        <Link className="ds-brand" to="/dashboard" aria-label="Go to dashboard">
-          <Logo />
-          <div>
-            <div className="ds-brand-name">JackStudio</div>
-            <div className="ds-brand-sub">CCTV Tracking</div>
-          </div>
-        </Link>
+        <div className="ds-side-head">
+          <Link className="ds-brand" to="/dashboard" aria-label="Go to dashboard">
+            <Logo />
+            <div className="ds-brand-text">
+              <div className="ds-brand-name">JackStudio</div>
+              <div className="ds-brand-sub">CCTV Tracking</div>
+            </div>
+          </Link>
+          <button
+            type="button"
+            className="ds-toggle"
+            aria-label={sideOpen ? 'Hide sidebar' : 'Show sidebar'}
+            title={sideOpen ? 'Hide sidebar' : 'Show sidebar'}
+            aria-expanded={sideOpen}
+            aria-controls="ds-nav"
+            onClick={() => setSideOpen((v) => !v)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M9 4v16" />
+              <path d={sideOpen ? 'M15.5 10 13.5 12l2 2' : 'M13.5 10l2 2-2 2'} />
+            </svg>
+          </button>
+        </div>
 
-        <nav className="ds-nav" aria-label="Main">
+        <nav className="ds-nav" id="ds-nav" aria-label="Main">
           {NAV.map((n) => (
             <NavLink
               key={n.key}
