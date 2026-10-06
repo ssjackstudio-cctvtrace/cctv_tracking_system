@@ -434,7 +434,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
 
   useEffect(() => {
     const label = SUB_TITLES.find((t) => t.match.test(pathname))?.title ?? NAV.find((n) => n.key === activeNav)?.label
-    document.title = label ? `${label} | JackStudio CCTV Tracking` : 'JackStudio CCTV Tracking'
+    document.title = label ? `${label} | JackStudio Retail System Tracking` : 'JackStudio Retail System Tracking'
     mainRef.current?.scrollTo({ top: 0 })
   }, [pathname, activeNav])
 
@@ -446,7 +446,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
             <Logo />
             <div className="ds-brand-text">
               <div className="ds-brand-name">JackStudio</div>
-              <div className="ds-brand-sub">CCTV Tracking</div>
+              <div className="ds-brand-sub">Retail System Tracking</div>
             </div>
           </Link>
           <button

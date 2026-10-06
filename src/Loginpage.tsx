@@ -31,7 +31,7 @@ export default function LoginPage({ onSignIn }: Props) {
           <Logo />
           <div>
             <div className="lg-brand-name">JackStudio</div>
-            <div className="lg-brand-sub">CCTV Tracking</div>
+            <div className="lg-brand-sub">Retail System Tracking</div>
           </div>
         </div>
 
