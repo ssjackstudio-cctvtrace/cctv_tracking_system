@@ -4,9 +4,12 @@ import './Login.css'
 
 // Admin sign-in only. There is no sign-up: admins are added by hand
 // into the public.admin table in Supabase.
-type Props = { onSignIn: (name: string, password: string) => Promise<string | null> }
+type Props = {
+  onSignIn: (name: string, password: string) => Promise<string | null>
+  notice?: string // e.g. "Your session has ended…"
+}
 
-export default function LoginPage({ onSignIn }: Props) {
+export default function LoginPage({ onSignIn, notice }: Props) {
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false) // true only while the eye is held down
@@ -37,6 +40,12 @@ export default function LoginPage({ onSignIn }: Props) {
 
         <h1>Admin sign in</h1>
         <p className="lg-lead">Sign in with your admin account to continue.</p>
+
+        {!error && notice && (
+          <p className="lg-error" role="alert">
+            {notice}
+          </p>
+        )}
 
         {error && (
           <p className="lg-error" role="alert">
