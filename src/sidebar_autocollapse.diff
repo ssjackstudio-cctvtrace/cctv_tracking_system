@@ -1,0 +1,36 @@
+--- a/src/dashboard.tsx
++++ b/src/dashboard.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useRef, useState, type ReactNode } from 'react'
++import { useEffect, useRef, useState, type ReactNode, type UIEvent } from 'react'
+ import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+ import { supabase } from './lib/supabase'
+ import { TABLES } from './Usetable'
+@@ -431,6 +431,18 @@
+ 
+   const mainRef = useRef<HTMLElement>(null)
+   const [sideOpen, setSideOpen] = useState(true) // sidebar starts shown
++  const lastScrollRef = useRef(0)
++
++  // Phone layout (same width as the @media rule in dashboard.css): when the
++  // content is scrolled up, collapse the top sidebar to give the content more room
++  function onMainScroll(e: UIEvent<HTMLElement>) {
++    const top = e.currentTarget.scrollTop
++    const scrolledUp = top > lastScrollRef.current
++    lastScrollRef.current = top
++    if (sideOpen && scrolledUp && top > 10 && window.matchMedia('(max-width: 760px)').matches) {
++      setSideOpen(false)
++    }
++  }
+ 
+   useEffect(() => {
+     const label = SUB_TITLES.find((t) => t.match.test(pathname))?.title ?? NAV.find((n) => n.key === activeNav)?.label
+@@ -490,7 +502,7 @@
+         </div>
+       </aside>
+ 
+-      <main className="ds-main" ref={mainRef}>
++      <main className="ds-main" ref={mainRef} onScroll={onMainScroll}>
+         <Routes>
+           <Route path="/" element={<Navigate to="/dashboard" replace />} />
+           <Route
