@@ -1,0 +1,81 @@
+--- a/src/dashboard.tsx
++++ b/src/dashboard.tsx
+@@ -550,9 +550,11 @@
+               to={`/${n.key}`}
+               className={activeNav === n.key ? 'active' : ''}
+               aria-current={activeNav === n.key ? 'page' : undefined}
++              aria-label={n.label}
++              title={sideOpen ? undefined : n.label} // name on hover when only the icon shows
+             >
+               <svg viewBox="0 0 24 24" aria-hidden="true">{n.icon}</svg>
+-              {n.label}
++              <span className="ds-nav-label">{n.label}</span>
+             </NavLink>
+           ))}
+         </nav>
+--- a/src/dashboard.css
++++ b/src/dashboard.css
+@@ -104,15 +104,16 @@
+ .ds-toggle:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: -2px; }
+ .ds-toggle svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+ 
+-/* Hidden sidebar: narrow strip with only the logo and the toggle */
++/* Hidden sidebar: narrow strip with the logo, the toggle and the menu icons only */
+ .ds.ds--collapsed { grid-template-columns: 76px 1fr; }
+ .ds--collapsed .ds-side { padding: 1.25rem 0.5rem; }
+ .ds--collapsed .ds-side-head { flex-direction: column; gap: 0.75rem; }
+ .ds--collapsed .ds-brand { flex: none; padding: 0.25rem 0; }
+ .ds--collapsed .ds-brand-text,
+-.ds--collapsed .ds-nav,
++.ds--collapsed .ds-nav-label,
+ .ds--collapsed .ds-live,
+ .ds--collapsed .ds-account { display: none; }
++.ds--collapsed .ds-nav a { justify-content: center; padding: 0.65rem 0; }
+ 
+ .ds-live {
+   margin-top: auto;
+@@ -210,6 +211,12 @@
+   .ds.ds--collapsed { grid-template-columns: 1fr; }
+   .ds--collapsed .ds-side { padding: 1rem; }
+   .ds--collapsed .ds-side-head { flex-direction: row; padding-bottom: 0; border-bottom: 0; }
++  /* Phone, hidden sidebar: one row: logo, toggle | menu icons */
++  .ds--collapsed .ds-side { flex-direction: row; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem; }
++  .ds--collapsed .ds-side-head { flex: none; gap: 0.25rem; padding-right: 0.5rem; border-right: 1px solid var(--ds-line); }
++  .ds--collapsed .ds-nav { flex: 1; flex-wrap: nowrap; justify-content: space-between; gap: 0.125rem; margin-top: 0; min-width: 0; }
++  .ds--collapsed .ds-nav a { width: auto; padding: 0.5rem; border-left: 0; border-radius: 8px; }
++  .ds--collapsed .ds-nav a.active { box-shadow: inset 0 -3px 0 var(--ds-lens); }
+ }
+ 
+ /* Dashboard filters (branch + date) */
+--- a/src/Camerapage.tsx
++++ b/src/Camerapage.tsx
+@@ -114,6 +114,10 @@
+                 className="cam-expand"
+                 onClick={() => navigate(`/camera/${cam.camera_id}`)}
+               >
++                {/* expand (arrows to the corners) icon */}
++                <svg viewBox="0 0 24 24" aria-hidden="true">
++                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
++                </svg>
+                 Expand camera
+               </button>
+             </div>
+--- a/src/Camera.css
++++ b/src/Camera.css
+@@ -108,9 +108,15 @@
+   font-weight: 600;
+ }
+ 
++/* Expand camera: bottom right of the card */
+ .cam-expand {
+-  align-self: flex-start;
++  align-self: flex-end;
++  margin-top: auto;
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
+ }
++.cam-expand svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+ 
+ /* Screen (16:9) */
+ .cam-screen {

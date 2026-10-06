@@ -108,9 +108,21 @@
   font-weight: 600;
 }
 
+/* Expand camera: bottom right of the card */
 .cam-expand {
-  align-self: flex-start;
+  align-self: flex-end;
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: #10202b; /* black button, white text (same as + Add camera) */
+  background: #10202b;
+  color: #fff;
 }
+.cam-expand:hover {
+  background: #18303f;
+}
+.cam-expand svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Screen (16:9) */
 .cam-screen {

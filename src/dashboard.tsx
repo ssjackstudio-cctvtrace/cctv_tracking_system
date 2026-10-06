@@ -550,9 +550,11 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
               to={`/${n.key}`}
               className={activeNav === n.key ? 'active' : ''}
               aria-current={activeNav === n.key ? 'page' : undefined}
+              aria-label={n.label}
+              title={sideOpen ? undefined : n.label} // name on hover when only the icon shows
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">{n.icon}</svg>
-              {n.label}
+              <span className="ds-nav-label">{n.label}</span>
             </NavLink>
           ))}
         </nav>

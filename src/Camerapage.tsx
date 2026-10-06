@@ -114,6 +114,10 @@ export default function CameraPage() {
                 className="cam-expand"
                 onClick={() => navigate(`/camera/${cam.camera_id}`)}
               >
+                {/* expand (arrows to the corners) icon */}
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                </svg>
                 Expand camera
               </button>
             </div>
