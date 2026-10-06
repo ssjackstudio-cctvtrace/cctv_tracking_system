@@ -108,15 +108,14 @@ export default function CameraPage() {
               <div className="cam-card-title">{cam.camera_name}</div>
               <CameraScreen camera={cam} />
               <span className={`cam-status cam-status--${screenStatus(cam).tone}`}>{screenStatus(cam).text}</span>
-              {canCapture(cam) && (
-                <button
-                  type="button"
-                  className="cam-expand"
-                  onClick={() => navigate(`/camera/${cam.camera_id}`)}
-                >
-                  Expand camera
-                </button>
-              )}
+              {/* Shown for every camera, even before the edge box sends a picture */}
+              <button
+                type="button"
+                className="cam-expand"
+                onClick={() => navigate(`/camera/${cam.camera_id}`)}
+              >
+                Expand camera
+              </button>
             </div>
           ))}
         </div>
