@@ -167,6 +167,8 @@
 /* Total on the same line as the label, Male / Female rows underneath */
 .ds-stat-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
 .ds-stat-row strong { margin-top: 0; }
+/* Card title (People In, People Out, ...) in the same font and size as its value */
+.ds-stat-row small { font-family: inherit; font-size: 1.9rem; font-weight: 700; }
 .ds-stat-sub {
   display: flex;
   justify-content: space-between;
