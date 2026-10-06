@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type UIEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type UIEvent } from 'react'
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
@@ -431,18 +431,87 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
 
   const mainRef = useRef<HTMLElement>(null)
   const [sideOpen, setSideOpen] = useState(true) // sidebar starts shown
-  const lastScrollRef = useRef(0)
+  const sideRef = useRef<HTMLElement>(null)
+  const lastScrollRef = useRef({ top: 0, time: 0 })
+  const sideAnimRef = useRef<Animation | null>(null) // sidebar collapse / expand in progress
+  const pendingExpandRef = useRef<{ from: number; speed: number } | null>(null)
 
-  // Phone layout (same width as the @media rule in dashboard.css): when the
-  // content is scrolled up, collapse the top sidebar to give the content more room
+  // How long the sidebar takes to collapse / expand: it moves about as fast as
+  // the content is being scrolled (fast scroll = quick, slow scroll = gentle)
+  function sideDuration(distance: number, speed: number) {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 0
+    return Math.min(600, Math.max(120, Math.abs(distance) / Math.max(speed, 0.01)))
+  }
+
+  // Phone layout (same width as the @media rule in dashboard.css):
+  // content scrolled up -> collapse the top sidebar to give the content more room,
+  // content scrolled back down -> expand it again
   function onMainScroll(e: UIEvent<HTMLElement>) {
     const top = e.currentTarget.scrollTop
-    const scrolledUp = top > lastScrollRef.current
-    lastScrollRef.current = top
-    if (sideOpen && scrolledUp && top > 10 && window.matchMedia('(max-width: 760px)').matches) {
-      setSideOpen(false)
+    const last = lastScrollRef.current
+    const delta = top - last.top
+    const speed = Math.abs(delta) / Math.min(100, Math.max(16, e.timeStamp - last.time)) // px per ms
+    lastScrollRef.current = { top, time: e.timeStamp }
+
+    const side = sideRef.current
+    if (!side || sideAnimRef.current || !window.matchMedia('(max-width: 760px)').matches) return
+
+    if (sideOpen && delta > 0 && top > 10) {
+      // Shrink to the collapsed height first, then switch to the collapsed layout
+      const root = side.parentElement as HTMLElement
+      const from = side.offsetHeight
+      root.classList.add('ds--collapsed')
+      const to = side.offsetHeight
+      root.classList.remove('ds--collapsed')
+      const duration = sideDuration(from - to, speed)
+      if (!duration) {
+        setSideOpen(false)
+        return
+      }
+      const anim = side.animate(
+        [
+          { height: `${from}px`, overflow: 'hidden' },
+          { height: `${to}px`, overflow: 'hidden' },
+        ],
+        { duration, easing: 'ease-out', fill: 'forwards' },
+      )
+      sideAnimRef.current = anim
+      anim.onfinish = () => setSideOpen(false)
+    } else if (!sideOpen && delta < 0) {
+      // Expand: the new layout is rendered, then grown from the current height
+      pendingExpandRef.current = { from: side.offsetHeight, speed }
+      setSideOpen(true)
     }
   }
+
+  // After the sidebar opens or closes: finish the collapse / start the expand animation
+  useLayoutEffect(() => {
+    sideAnimRef.current?.cancel()
+    sideAnimRef.current = null
+    const main = mainRef.current
+    // the content height just changed, so measure scrolling from here
+    if (main) lastScrollRef.current = { ...lastScrollRef.current, top: main.scrollTop }
+
+    const pending = pendingExpandRef.current
+    pendingExpandRef.current = null
+    const side = sideRef.current
+    if (!pending || !side || !sideOpen) return
+    const to = side.offsetHeight
+    const duration = sideDuration(to - pending.from, pending.speed)
+    if (!duration) return
+    const anim = side.animate(
+      [
+        { height: `${pending.from}px`, overflow: 'hidden' },
+        { height: `${to}px`, overflow: 'hidden' },
+      ],
+      { duration, easing: 'ease-out' },
+    )
+    sideAnimRef.current = anim
+    anim.onfinish = () => {
+      if (sideAnimRef.current === anim) sideAnimRef.current = null
+      if (main) lastScrollRef.current = { ...lastScrollRef.current, top: main.scrollTop }
+    }
+  }, [sideOpen])
 
   useEffect(() => {
     const label = SUB_TITLES.find((t) => t.match.test(pathname))?.title ?? NAV.find((n) => n.key === activeNav)?.label
@@ -452,7 +521,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
 
   return (
     <div className={sideOpen ? 'ds' : 'ds ds--collapsed'}>
-      <aside className="ds-side">
+      <aside className="ds-side" ref={sideRef}>
         <div className="ds-side-head">
           <Link className="ds-brand" to="/dashboard" aria-label="Go to dashboard">
             <Logo />
