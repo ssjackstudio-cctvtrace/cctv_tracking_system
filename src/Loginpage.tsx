@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Logo } from './dashboard'
 import './Login.css'
 
@@ -15,6 +15,11 @@ export default function LoginPage({ onSignIn, notice }: Props) {
   const [showPassword, setShowPassword] = useState(false) // true only while the eye is held down
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  // Browser tab title for the sign-in page
+  useEffect(() => {
+    document.title = 'Login - JackStudio Retail System Tracking'
+  }, [])
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()

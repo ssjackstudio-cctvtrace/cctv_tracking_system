@@ -5,9 +5,17 @@ import LoginPage from './Loginpage'
 import './Login.css'
 
 const TOKEN_KEY = 'cctv_admin_token'
-const LOGIN_AT_KEY = 'cctv_admin_login_at' // when the admin signed in (ms)
-const SESSION_LIMIT_MS = 5 * 60 * 1000 // a sign-in lasts 5 minutes
-const SESSION_ENDED_MESSAGE = 'Your session has ended. Please sign in again.'
+const EXPIRES_AT_KEY = 'cctv_admin_expires_at' // when the session ends (ms)
+const SESSION_ENDED_MESSAGE = 'Your session has ended. Please sign in again between 9:00 am and 11:00 pm.'
+
+// 11:00 pm Malaysia time (UTC+8, no daylight saving) today, in ms.
+// Used only if the server did not send expires_at.
+function todaySessionEnd(): number {
+  const offset = 8 * 60 * 60 * 1000
+  const day = 24 * 60 * 60 * 1000
+  const myDayStart = Math.floor((Date.now() + offset) / day) * day
+  return myDayStart + 23 * 60 * 60 * 1000 - offset
+}
 
 function readToken(): string | null {
   try {
@@ -24,20 +32,20 @@ function saveToken(token: string | null) {
     // storage blocked: the admin just signs in again after a refresh
   }
 }
-function readLoginAt(): number | null {
+function readExpiresAt(): number | null {
   try {
-    const v = Number(localStorage.getItem(LOGIN_AT_KEY))
+    const v = Number(localStorage.getItem(EXPIRES_AT_KEY))
     return v > 0 ? v : null
   } catch {
     return null
   }
 }
-function saveLoginAt(time: number | null) {
+function saveExpiresAt(time: number | null) {
   try {
-    if (time) localStorage.setItem(LOGIN_AT_KEY, String(time))
-    else localStorage.removeItem(LOGIN_AT_KEY)
+    if (time) localStorage.setItem(EXPIRES_AT_KEY, String(time))
+    else localStorage.removeItem(EXPIRES_AT_KEY)
   } catch {
-    // storage blocked: the in-memory sign-in time is still used
+    // storage blocked: the in-memory end time is still used
   }
 }
 
@@ -46,7 +54,7 @@ export default function App() {
   const [adminName, setAdminName] = useState<string | null>(null)
   const [ready, setReady] = useState(false) // saved session checked
   const [sessionNotice, setSessionNotice] = useState('') // shown on the sign-in page
-  const loginAtRef = useRef<number | null>(null)
+  const expiresAtRef = useRef<number | null>(null)
   const endingRef = useRef(false)
 
   // Reopening the site: still signed in?
@@ -57,39 +65,39 @@ export default function App() {
       return
     }
     setAdminToken(token)
-    const loginAt = readLoginAt()
-    if (!loginAt || Date.now() - loginAt >= SESSION_LIMIT_MS) {
-      // Signed in more than 5 minutes ago: end that session on the server too
+    const expiresAt = readExpiresAt()
+    if (!expiresAt || Date.now() >= expiresAt) {
+      // Past 11:00 pm of the sign-in day: end that session on the server too
       supabase.rpc('admin_logout').then(() => {
         setAdminToken(null)
         saveToken(null)
-        saveLoginAt(null)
-        if (loginAt) setSessionNotice(SESSION_ENDED_MESSAGE)
+        saveExpiresAt(null)
+        if (expiresAt) setSessionNotice(SESSION_ENDED_MESSAGE)
         setReady(true)
       })
       return
     }
     supabase.rpc('admin_check').then(({ data, error }) => {
       if (!error && typeof data === 'string' && data) {
-        loginAtRef.current = loginAt
+        expiresAtRef.current = expiresAt
         setAdminName(data)
       } else {
         setAdminToken(null)
         saveToken(null)
-        saveLoginAt(null)
+        saveExpiresAt(null)
       }
       setReady(true)
     })
   }, [])
 
-  // Signed in: end the session 5 minutes after sign-in
+  // Signed in: end the session at 11:00 pm
   useEffect(() => {
     if (!adminName) return
-    const loginAt = loginAtRef.current ?? Date.now()
+    const expiresAt = expiresAtRef.current ?? todaySessionEnd()
     const check = () => {
-      if (Date.now() - loginAt >= SESSION_LIMIT_MS) void endSession()
+      if (Date.now() >= expiresAt) void endSession()
     }
-    const timer = window.setTimeout(check, Math.max(0, loginAt + SESSION_LIMIT_MS - Date.now()))
+    const timer = window.setTimeout(check, Math.max(0, expiresAt - Date.now()))
     // Timers can run late in background tabs, so check again when the tab is shown
     document.addEventListener('visibilitychange', check)
     window.addEventListener('focus', check)
@@ -103,11 +111,12 @@ export default function App() {
   async function signIn(name: string, password: string): Promise<string | null> {
     const { data, error } = await supabase.rpc('admin_login', { p_name: name, p_password: password })
     if (error) return error.message
-    const result = data as { token: string; admin_name: string } | null
+    const result = data as { token: string; admin_name: string; expires_at?: string } | null
     if (!result) return 'Wrong admin name or password.'
-    const now = Date.now()
-    loginAtRef.current = now
-    saveLoginAt(now)
+    const serverEnd = result.expires_at ? Date.parse(result.expires_at) : NaN
+    const expiresAt = Number.isFinite(serverEnd) ? serverEnd : todaySessionEnd()
+    expiresAtRef.current = expiresAt
+    saveExpiresAt(expiresAt)
     setAdminToken(result.token)
     saveToken(result.token)
     setSessionNotice('')
@@ -119,12 +128,12 @@ export default function App() {
     await supabase.rpc('admin_logout')
     setAdminToken(null)
     saveToken(null)
-    saveLoginAt(null)
-    loginAtRef.current = null
+    saveExpiresAt(null)
+    expiresAtRef.current = null
     setAdminName(null)
   }
 
-  // 5 minutes are up: sign out and show the message on the sign-in page
+  // 11:00 pm reached: sign out and show the message on the sign-in page
   async function endSession() {
     if (endingRef.current) return
     endingRef.current = true
