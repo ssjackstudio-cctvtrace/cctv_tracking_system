@@ -432,26 +432,22 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
   const mainRef = useRef<HTMLElement>(null)
   const [sideOpen, setSideOpen] = useState(true) // sidebar starts shown
   const sideRef = useRef<HTMLElement>(null)
-  const lastScrollRef = useRef({ top: 0, time: 0 })
+  const lastScrollRef = useRef(0)
   const sideAnimRef = useRef<Animation | null>(null) // sidebar collapse / expand in progress
-  const pendingExpandRef = useRef<{ from: number; speed: number } | null>(null)
+  const pendingExpandRef = useRef<number | null>(null) // sidebar height when the expand started
 
-  // How long the sidebar takes to collapse / expand: it moves about as fast as
-  // the content is being scrolled (fast scroll = quick, slow scroll = gentle)
-  function sideDuration(distance: number, speed: number) {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 0
-    return Math.min(600, Math.max(120, Math.abs(distance) / Math.max(speed, 0.01)))
+  // Sidebar collapse / expand always takes 0.5 s (no animation if the phone asks for reduced motion)
+  function sideDuration() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 500
   }
 
   // Phone layout (same width as the @media rule in dashboard.css):
-  // content scrolled up -> collapse the top sidebar to give the content more room,
-  // content scrolled back down -> expand it again
+  // scrolling down the content -> collapse the top sidebar to give the content more room,
+  // scrolling back up to the very top of the content -> expand it again
   function onMainScroll(e: UIEvent<HTMLElement>) {
     const top = e.currentTarget.scrollTop
-    const last = lastScrollRef.current
-    const delta = top - last.top
-    const speed = Math.abs(delta) / Math.min(100, Math.max(16, e.timeStamp - last.time)) // px per ms
-    lastScrollRef.current = { top, time: e.timeStamp }
+    const delta = top - lastScrollRef.current
+    lastScrollRef.current = top
 
     const side = sideRef.current
     if (!side || sideAnimRef.current || !window.matchMedia('(max-width: 760px)').matches) return
@@ -463,7 +459,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
       root.classList.add('ds--collapsed')
       const to = side.offsetHeight
       root.classList.remove('ds--collapsed')
-      const duration = sideDuration(from - to, speed)
+      const duration = sideDuration()
       if (!duration) {
         setSideOpen(false)
         return
@@ -477,9 +473,9 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
       )
       sideAnimRef.current = anim
       anim.onfinish = () => setSideOpen(false)
-    } else if (!sideOpen && delta < 0) {
-      // Expand: the new layout is rendered, then grown from the current height
-      pendingExpandRef.current = { from: side.offsetHeight, speed }
+    } else if (!sideOpen && delta < 0 && top <= 0) {
+      // Back at the top: render the open layout, then grow it from the current height
+      pendingExpandRef.current = side.offsetHeight
       setSideOpen(true)
     }
   }
@@ -490,18 +486,18 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
     sideAnimRef.current = null
     const main = mainRef.current
     // the content height just changed, so measure scrolling from here
-    if (main) lastScrollRef.current = { ...lastScrollRef.current, top: main.scrollTop }
+    if (main) lastScrollRef.current = main.scrollTop
 
-    const pending = pendingExpandRef.current
+    const from = pendingExpandRef.current
     pendingExpandRef.current = null
     const side = sideRef.current
-    if (!pending || !side || !sideOpen) return
+    if (from === null || !side || !sideOpen) return
     const to = side.offsetHeight
-    const duration = sideDuration(to - pending.from, pending.speed)
+    const duration = sideDuration()
     if (!duration) return
     const anim = side.animate(
       [
-        { height: `${pending.from}px`, overflow: 'hidden' },
+        { height: `${from}px`, overflow: 'hidden' },
         { height: `${to}px`, overflow: 'hidden' },
       ],
       { duration, easing: 'ease-out' },
@@ -509,7 +505,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
     sideAnimRef.current = anim
     anim.onfinish = () => {
       if (sideAnimRef.current === anim) sideAnimRef.current = null
-      if (main) lastScrollRef.current = { ...lastScrollRef.current, top: main.scrollTop }
+      if (main) lastScrollRef.current = main.scrollTop
     }
   }, [sideOpen])
 
