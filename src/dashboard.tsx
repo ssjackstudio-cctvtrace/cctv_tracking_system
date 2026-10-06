@@ -10,7 +10,6 @@ import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
-import LoginPage from './Loginpage'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
@@ -517,7 +516,6 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
           <Route path="/events" element={<EventsRoute />} />
           <Route path="/members" element={<MemberPage />} />
           <Route path="/transactions" element={<TransactionsPage />} />
-          <Route path="/Loginpage" element={<LoginPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
