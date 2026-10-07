@@ -84,7 +84,16 @@ within 60 s.
 
 ## B. Run on the G6-RK3588-F13 edge box
 
-1. Connect the box to the shop router with a cable; give it a fixed IP.
+1. Connect the box to the shop router (OLAX_LTE_8951 at Aeon Bukit Tinggi)
+   and reserve its IP in the router:
+   - **Wired (recommended):** LAN cable from the box to a router LAN port.
+   - **Wireless:** join the same Wi-Fi as the cameras (2.4 GHz, not guest Wi-Fi):
+     ```bash
+     sudo nmcli dev wifi connect "OLAX_LTE_8951" password "WIFI_PASSWORD"
+     sudo nmcli con mod "OLAX_LTE_8951" connection.autoconnect yes 802-11-wireless.powersave 2
+     ```
+   Either way, `ip a` must show a `192.168.8.x` address and `ping 192.168.8.129`
+   must reach camera ABT-01. The program itself is the same for both.
 2. From Windows: `ssh ubuntu@BOX_IP` (or VS Code → Remote-SSH).
 3. On the box:
    ```bash
@@ -107,7 +116,9 @@ within 60 s.
    includes RKNPU2. Without it, `MODEL=yolo11n.pt` still runs on the CPU,
    only slower.
 5. Try it: `python main.py`, walk past a camera, check Supabase.
-6. Make it start by itself:
+6. Make it start by itself. If the box's login is not `ubuntu` (check with
+   `whoami`), first change `User=` and both `/home/ubuntu/...` paths in
+   `cctv-edge.service`.
    ```bash
    sudo cp cctv-edge.service /etc/systemd/system/
    sudo systemctl daemon-reload

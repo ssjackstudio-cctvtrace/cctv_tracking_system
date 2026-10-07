@@ -79,6 +79,11 @@ def main() -> None:
     def sync_workers() -> None:
         cameras = {c["camera_id"]: c for c in load_cameras()}
         for cam_id, cam in cameras.items():
+            if cam_id in workers and workers[cam_id].grabber.source != source_for(cam):
+                # Wi-Fi camera got a new IP (or stream_path changed) in Supabase:
+                # the open RTSP link points at the old address, so start again.
+                log.info("%s: IP address / stream changed, reconnecting", workers[cam_id].name)
+                workers.pop(cam_id).stop()
             if cam_id in workers:
                 workers[cam_id].update_camera(cam)  # e.g. count line redrawn on the dashboard
             else:
