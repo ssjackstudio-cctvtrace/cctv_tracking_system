@@ -34,13 +34,29 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
 
 export function Logo() {
   return (
-    <svg className="ds-logo" viewBox="465 130 270 270" aria-hidden="true">
-      <rect x="465" y="130" width="270" height="270" rx="58" fill="#ffffff" />
-      <g fill="none" stroke="#111111" strokeWidth="13" strokeLinejoin="miter">
+    <svg className="ds-logo" viewBox="465 130 320 320" aria-hidden="true">
+      {/* No background. Lines use the text colour: light in the sidebar, black on the login card (Login.css) */}
+      <mask id="ds-logo-cut">
+        <path d="M465 130h320v320h-320z" fill="#ffffff" />
+        <circle cx="715" cy="358" r="60" fill="#000000" />
+      </mask>
+      <g fill="none" stroke="currentColor" strokeWidth="13" strokeLinejoin="miter" mask="url(#ds-logo-cut)">
         <path d="M562 158A113 113 0 0 1 712 292" />
         <path d="M668 352A113 113 0 0 1 487 240" />
         <path d="M512 208L538 178L668 352" />
       </g>
+      {/* CCTV camera, bottom right */}
+      <svg x="645" y="300" width="140" height="149.3" viewBox="0 0 150 160">
+        <ellipse cx="75" cy="148" rx="40" ry="10" fill="#cfe3f7" />
+        <path d="M67 112h16l3 32h-22z" fill="#a9c8ea" />
+        <ellipse cx="75" cy="116" rx="15" ry="6" fill="#8fb6e3" />
+        <circle cx="75" cy="62" r="56" fill="#dbe9f7" stroke="#9fc2e8" strokeWidth="3" />
+        <circle cx="75" cy="62" r="46" fill="#1b2a4a" />
+        <path d="M45 53v18M105 53v18" stroke="#4f7df0" strokeWidth="11" strokeLinecap="round" />
+        <circle cx="75" cy="62" r="17" fill="#4f7df0" />
+        <circle cx="75" cy="62" r="11" fill="#1b2a4a" />
+        <circle cx="75" cy="62" r="5" fill="#ffffff" />
+      </svg>
     </svg>
   )
 }

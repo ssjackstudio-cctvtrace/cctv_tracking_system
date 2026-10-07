@@ -1,6 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="465 130 270 270">
-  <rect x="465" y="130" width="270" height="270" rx="58" fill="#ffffff"/>
-  <g fill="none" stroke="#111111" stroke-width="13" stroke-linejoin="miter">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="465 130 320 320">
+  <!-- No background: black lines on a light browser tab, white lines on a dark one -->
+  <style>.mark { stroke: #111111; } @media (prefers-color-scheme: dark) { .mark { stroke: #ffffff; } }</style>
+  <!-- Clear gap in the lines around the camera -->
+  <mask id="cut">
+    <path d="M465 130h320v320h-320z" fill="#ffffff"/>
+    <circle cx="715" cy="358" r="60" fill="#000000"/>
+  </mask>
+  <g class="mark" fill="none" stroke-width="13" stroke-linejoin="miter" mask="url(#cut)">
     <!-- top-right arc -->
     <path d="M562 158A113 113 0 0 1 712 292"/>
     <!-- bottom-left arc -->
@@ -8,4 +14,16 @@
     <!-- diagonal slash with small tick -->
     <path d="M512 208L538 178L668 352"/>
   </g>
+  <!-- CCTV camera, bottom right -->
+  <svg x="645" y="300" width="140" height="149.3" viewBox="0 0 150 160">
+    <ellipse cx="75" cy="148" rx="40" ry="10" fill="#cfe3f7"/>
+    <path d="M67 112h16l3 32h-22z" fill="#a9c8ea"/>
+    <ellipse cx="75" cy="116" rx="15" ry="6" fill="#8fb6e3"/>
+    <circle cx="75" cy="62" r="56" fill="#dbe9f7" stroke="#9fc2e8" stroke-width="3"/>
+    <circle cx="75" cy="62" r="46" fill="#1b2a4a"/>
+    <path d="M45 53v18M105 53v18" stroke="#4f7df0" stroke-width="11" stroke-linecap="round"/>
+    <circle cx="75" cy="62" r="17" fill="#4f7df0"/>
+    <circle cx="75" cy="62" r="11" fill="#1b2a4a"/>
+    <circle cx="75" cy="62" r="5" fill="#ffffff"/>
+  </svg>
 </svg>
