@@ -23,8 +23,8 @@
 
 .lg-brand { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }
 .lg-brand .ds-logo { width: 42px; height: 42px; flex: none; }
-.lg-brand .ds-logo rect { fill: #10202b; }
-.lg-brand .ds-logo g { stroke: #ffffff; }
+.lg-brand .ds-logo rect { fill: #ffffff; stroke: #d5dde0; stroke-width: 14;  }
+.lg-brand .ds-logo g { stroke: #000000; }
 .lg-brand-name { font-weight: 700; font-size: 1.05rem; line-height: 1.15; }
 .lg-brand-sub { font-size: 0.8rem; color: #5d7079; }
 
