@@ -67,7 +67,7 @@
   }
 }
 
-/* Camera cards: 2 per row collapsed, 4 per row expanded */
+/* Camera cards: 4 per row collapsed, 2 per row expanded (bigger) */
 .cam-grid {
   display: grid;
   gap: 16px;
@@ -84,6 +84,9 @@
 @media (max-width: 900px) {
   .cam-grid--4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cam-grid--2 {
+    grid-template-columns: 1fr;
   }
 }
 

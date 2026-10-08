@@ -102,7 +102,7 @@ export default function CameraPage() {
       ) : branchCams.length === 0 ? (
         <p className="ds-lead">No cameras found for this branch. Click "+ Add camera" to add one.</p>
       ) : (
-        <div className={`cam-grid ${expanded ? 'cam-grid--4' : 'cam-grid--2'}`}>
+        <div className={`cam-grid ${expanded ? 'cam-grid--2' : 'cam-grid--4'}`}>
           {branchCams.map((cam) => (
             <div className="cam-card" key={cam.camera_id}>
               <div className="cam-card-title">{cam.camera_name}</div>
