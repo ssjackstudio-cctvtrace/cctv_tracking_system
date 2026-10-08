@@ -150,7 +150,7 @@ export default function EventsPage({ initialTab = 'cctv' }: { initialTab?: Event
   const [tab, setTab] = useState<EventTab>(initialTab)
   return (
     <>
-      <h1>Event</h1>
+      <h1>Event History</h1>
       <p className="ds-lead">Latest activity detected by the cameras.</p>
       <div className="tabs">
         <button className={tab === 'cctv' ? 'active' : ''} onClick={() => setTab('cctv')}>
