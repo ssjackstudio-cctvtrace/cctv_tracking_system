@@ -27,7 +27,7 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: <path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z" /> },
   { key: 'branch', label: 'Branch', icon: <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" /> },
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
-  { key: 'events', label: 'Event', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
+  { key: 'events', label: 'Event History', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
   { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
