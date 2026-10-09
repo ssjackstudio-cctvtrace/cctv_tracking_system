@@ -55,7 +55,6 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
   const [mac, setMac] = useState('')
   const [ip, setIp] = useState('')
   const [streamPath, setStreamPath] = useState<'stream1' | 'stream2'>('stream2')
-  const [status, setStatus] = useState<'Active' | 'Inactive'>('Active')
 
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -140,7 +139,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       .from(TABLES.camera)
       .insert({
         camera_name,
-        active_status: status,
+        active_status: 'Inactive', // the edge box sets Active once the camera picture is live
         branch_id: branchId,
         edge_device_id,
         tapo_model: tapoModel.trim() || null,
@@ -272,10 +271,10 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
 
           <label className="nb-field">
             <span>Status</span>
-            <select value={status} disabled={saved} onChange={(e) => setStatus(e.target.value as 'Active' | 'Inactive')}>
-              <option value="Active">Active</option>
+            <select value="Inactive" disabled>
               <option value="Inactive">Inactive</option>
             </select>
+            <small className="nb-hint">Set automatically: Active while the edge box receives the camera's open picture.</small>
           </label>
         </div>
       </section>
