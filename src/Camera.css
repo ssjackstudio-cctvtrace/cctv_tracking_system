@@ -202,6 +202,42 @@
   word-break: break-all;
 }
 
+/* Camera card + AI edge box card, stacked beside the screen */
+.cam-info-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cam-info-card {
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-info-card .cam-info {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+}
+
+.cam-info-title {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+/* Edge box status: Online green, Offline grey */
+.cam-info .badge-online {
+  background: #d5f3ea;
+  color: #12684f;
+}
+
+.cam-info .badge-offline {
+  background: #e4e9e8;
+  color: #5d7079;
+}
+
 .cam-count-note {
   margin: 0 0 8px;
   color: #64748b;

@@ -2,7 +2,7 @@ import { useEffect, useState, type MouseEvent, type ReactNode } from 'react'
 import { Badge } from './Datatable'
 import { supabase } from './lib/supabase'
 import { TABLES, isOnline } from './Usetable'
-import type { Camera, CountLine, Point } from './types'
+import type { Branch, Camera, CountLine, EdgeDevice, Point } from './types'
 import './Camera.css'
 
 // How often the snapshot image and people counts refresh
@@ -14,6 +14,79 @@ export const formatLongDate = (iso: string | null) =>
   iso
     ? new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
     : '—'
+
+// "09 October 2026 04:54 PM"
+export const formatLongDateTime = (iso: string | null) =>
+  iso
+    ? `${formatLongDate(iso)} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
+    : '—'
+
+// How often the camera / edge box details refresh (status, last seen, heartbeat)
+const INFO_REFRESH_MS = 10_000
+
+// One camera with its branch and edge box:
+//   select ca.tapo_model, ca.mac_address, ca.ip_address, b.branch_name, ca.stream_path,
+//          ca.last_seen_at, ca.active_status, ed.device_name, ed.last_heartbeat, ed.status
+//   from camera ca
+//   join edge_device ed on ca.edge_device_id = ed.edge_device_id
+//   join branch b on ca.branch_id = b.branch_id
+// (edge_device is a left join here, so a camera with no edge box still shows its own card)
+type CameraInfo = Pick<
+  Camera,
+  'tapo_model' | 'mac_address' | 'ip_address' | 'stream_path' | 'last_seen_at' | 'active_status'
+> & {
+  branch: Pick<Branch, 'branch_name'> | null
+  edge_device: Pick<EdgeDevice, 'device_name' | 'last_heartbeat' | 'status'> | null
+}
+
+function useCameraInfo(cameraId: string) {
+  const [info, setInfo] = useState<CameraInfo | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const { data, error } = await supabase
+        .from(TABLES.camera)
+        .select(
+          'tapo_model, mac_address, ip_address, stream_path, last_seen_at, active_status, ' +
+            'branch(branch_name), edge_device(device_name, last_heartbeat, status)',
+        )
+        .eq('camera_id', cameraId)
+        .maybeSingle()
+      if (cancelled) return
+      if (error) setError(error.message)
+      else {
+        setError('')
+        setInfo(data as unknown as CameraInfo | null)
+      }
+    }
+    load()
+    const timer = setInterval(load, INFO_REFRESH_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [cameraId])
+
+  return { info, error }
+}
+
+function InfoCard({ title, rows }: { title: string; rows: [string, ReactNode][] }) {
+  return (
+    <section className="cam-info-card">
+      <h2 className="cam-info-title">{title}</h2>
+      <dl className="cam-info">
+        {rows.map(([label, value]) => (
+          <div className="cam-info-row" key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
 
 // A camera can show a live capture when it is active, the edge box has
 // uploaded a snapshot, and the edge box reported in the last 5 minutes.
@@ -248,16 +321,27 @@ function CountLineEditor({ camera }: { camera: Camera }) {
 
 export default function CameraDetails({ camera, onBack }: { camera: Camera; onBack: () => void }) {
   const people = usePeopleCount(camera.camera_id)
+  const { info, error: infoError } = useCameraInfo(camera.camera_id)
+  const cam = info ?? { ...camera, branch: null, edge_device: null } // until the query answers
+  const edge = info?.edge_device ?? null
 
-  const details: [string, ReactNode][] = [
-    ['Status', <Badge text={camera.active_status} />],
-    ['Tapo Model', camera.tapo_model ?? '—'],
-    ['MAC Address', camera.mac_address ?? '—'],
-    ['IP Address', camera.ip_address ?? '—'],
-    ['Stream Path', camera.stream_path ?? '—'],
-    ['Last Seen', formatLongDate(camera.last_seen_at)],
-    ['Created', formatLongDate(camera.created_at)],
+  const cameraRows: [string, ReactNode][] = [
+    ['Tapo Model', cam.tapo_model ?? '—'],
+    ['MAC Address', cam.mac_address ?? '—'],
+    ['IP Address', cam.ip_address ?? '—'],
+    ['Branch', info?.branch?.branch_name ?? '—'],
+    ['Stream Path', cam.stream_path ?? '—'],
+    ['Last Seen', formatLongDateTime(cam.last_seen_at)],
+    ['Camera Status', <Badge text={cam.active_status} />],
   ]
+
+  const edgeRows: [string, ReactNode][] = edge
+    ? [
+        ['Edge Device Name', edge.device_name],
+        ['Last Heartbeat', formatLongDateTime(edge.last_heartbeat)],
+        ['Edge Device Status', <Badge text={edge.status} />],
+      ]
+    : [['Edge Device', info ? 'No edge box linked to this camera' : '—']]
 
   return (
     <>
@@ -269,14 +353,11 @@ export default function CameraDetails({ camera, onBack }: { camera: Camera; onBa
 
       <div className="cam-detail">
         <CameraScreen camera={camera} />
-        <dl className="cam-info">
-          {details.map(([label, value]) => (
-            <div className="cam-info-row" key={label}>
-              <dt>{label}</dt>
-              <dd>{value}</dd>
-            </div>
-          ))}
-        </dl>
+        <div className="cam-info-cards">
+          <InfoCard title="Camera" rows={cameraRows} />
+          <InfoCard title="AI Edge Box" rows={edgeRows} />
+          {infoError && <p className="cam-error">Could not load camera details: {infoError}</p>}
+        </div>
       </div>
 
       <CountLineEditor camera={camera} />
