@@ -6,7 +6,7 @@ import './Branches.css'
 import './Newbranch.css'
 import './Camera.css'
 
-// "+ New edge box" option in the Edge box list
+// "+ New AI Edge box" option in the AI Edge box list
 const NEW_EDGE = '__new__'
 
 type Notice = { type: 'success' | 'error'; text: string }
@@ -43,7 +43,7 @@ type Props = {
 
 // Add a camera to an existing branch. Values come from the Tapo app:
 // camera → ⚙️ Settings → Device Info. The camera's username / password are NOT
-// saved here; they stay in edge/.env on the edge box.
+// saved here; they stay in edge/.env on the AI edge box.
 export default function NewCameraPage({ branches, defaultBranchId, onBack, onSaved }: Props) {
   const [branchId, setBranchId] = useState(defaultBranchId || branches[0]?.branch_id || '')
   const [edgeDevices, setEdgeDevices] = useState<EdgeDevice[]>([])
@@ -62,7 +62,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
 
   const branch = useMemo(() => branches.find((b) => b.branch_id === branchId), [branches, branchId])
 
-  // Edge boxes of the chosen branch. None yet → offer to create one.
+  // AI Edge boxes of the chosen branch. None yet → offer to create one.
   useEffect(() => {
     if (!branchId) return
     let cancelled = false
@@ -74,7 +74,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       .then(({ data, error }) => {
         if (cancelled) return
         if (error) {
-          setNotice({ type: 'error', text: `Could not load edge boxes: ${error.message}` })
+          setNotice({ type: 'error', text: `Could not load AI edge boxes: ${error.message}` })
           return
         }
         const rows = (data ?? []) as EdgeDevice[]
@@ -104,7 +104,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
     const camera_name = cameraName.trim()
     if (!branchId) return fail('Choose the branch.')
     if (!camera_name) return fail('Enter the camera name (Device name in the Tapo app).')
-    if (edgeChoice === NEW_EDGE && !newEdgeName.trim()) return fail('Enter a name for the new edge box.')
+    if (edgeChoice === NEW_EDGE && !newEdgeName.trim()) return fail('Enter a name for the new AI edge box.')
 
     let mac_address: string | null = null
     if (mac.trim()) {
@@ -116,7 +116,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
 
     setSaving(true)
 
-    // 1. Edge box: use the chosen one, or create it first
+    // 1. AI Edge box: use the chosen one, or create it first
     let edge_device_id = edgeChoice
     if (edgeChoice === NEW_EDGE) {
       const { data, error } = await supabase
@@ -126,7 +126,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
         .single()
       if (error || !data) {
         setSaving(false)
-        return fail(`Failed to save the edge box: ${saveError(error?.message ?? 'no row returned', error?.code)}`)
+        return fail(`Failed to save the AI edge box: ${saveError(error?.message ?? 'no row returned', error?.code)}`)
       }
       const created = data as EdgeDevice
       edge_device_id = created.edge_device_id
@@ -139,7 +139,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       .from(TABLES.camera)
       .insert({
         camera_name,
-        active_status: 'Inactive', // the edge box sets Active once the camera picture is live
+        active_status: 'Inactive', // the AI edge box sets Active once the camera picture is live
         branch_id: branchId,
         edge_device_id,
         tapo_model: tapoModel.trim() || null,
@@ -171,7 +171,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       <h1>Add Camera</h1>
       <p className="ds-lead">
         Copy the details from the Tapo app: camera → ⚙️ Settings → Device Info. The camera's username and
-        password are not saved here; they go in <code>edge/.env</code> on the edge box.
+        password are not saved here; they go in <code>edge/.env</code> on the AI edge box.
       </p>
 
       {notice && (
@@ -183,8 +183,8 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       {saved && (
         <section className="ds-panel cam-saved">
           <p>
-            Put this edge box id in <code>edge/.env</code> as <code>EDGE_DEVICE_ID</code>, then run{' '}
-            <code>python main.py</code>. The camera screen appears within a few seconds after the edge box
+            Put this AI edge box id in <code>edge/.env</code> as <code>EDGE_DEVICE_ID</code>, then run{' '}
+            <code>python main.py</code>. The camera screen appears within a few seconds after the AI edge box
             sends its first picture.
           </p>
           <p className="cam-saved-id">
@@ -211,21 +211,21 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
           </label>
 
           <label className="nb-field">
-            <span>Edge box</span>
+            <span>AI Edge box</span>
             <select value={edgeChoice} disabled={saved} onChange={(e) => setEdgeChoice(e.target.value)}>
               {edgeDevices.map((d) => (
                 <option key={d.edge_device_id} value={d.edge_device_id}>
                   {d.device_name}
                 </option>
               ))}
-              <option value={NEW_EDGE}>+ New edge box</option>
+              <option value={NEW_EDGE}>+ New AI Edge box</option>
             </select>
             <small className="nb-hint">The box in this branch that reads this camera's video.</small>
           </label>
 
           {edgeChoice === NEW_EDGE && (
             <label className="nb-field nb-span2">
-              <span>New edge box name</span>
+              <span>New AI Edge box name</span>
               <input
                 value={newEdgeName}
                 disabled={saved}
@@ -274,7 +274,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
             <select value="Inactive" disabled>
               <option value="Inactive">Inactive</option>
             </select>
-            <small className="nb-hint">Set automatically: Active while the edge box receives the camera's open picture.</small>
+            <small className="nb-hint">Set automatically: Active while the AI edge box receives the camera's open picture.</small>
           </label>
         </div>
       </section>
