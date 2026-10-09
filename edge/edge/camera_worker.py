@@ -19,6 +19,11 @@ log = logging.getLogger("camera")
 
 PERSON = 0  # COCO class id for "person"
 
+# camera.active_status: "Active" only while live, open pictures arrive
+NO_FRAME_SECONDS = 20  # no new picture for this long → stream lost → Inactive
+DARK_SECONDS = 5  # picture almost all black for this long → camera closed → Inactive
+DARK_MEAN, DARK_STD = 12, 6  # "almost all black": low brightness and almost no detail (0–255 scale)
+
 
 class FrameGrabber(threading.Thread):
     """Reads the RTSP stream non-stop and keeps only the newest frame, so the
@@ -88,6 +93,8 @@ class CameraWorker(threading.Thread):
         self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
+        self.dark_since: float | None = None  # when the picture went black (camera closed)
+        self.reported_status: str | None = None  # active_status last sent to Supabase
         self.preview: np.ndarray | None = None  # for --show
         self._visits: dict[int, str] = {}  # tracker id → visit_id
         self._session = uuid.uuid4().hex[:6]  # tracker ids restart at 1 after a restart
@@ -102,6 +109,17 @@ class CameraWorker(threading.Thread):
         self.stop_event.set()
         self.grabber.stop_event.set()
 
+    # "Active": the stream is connected and the camera picture is open.
+    # "Inactive": not connected, no new picture lately, or the picture is
+    # black (camera closed, e.g. Tapo privacy mode).
+    def active_status(self) -> str:
+        now = time.time()
+        if not self.grabber.connected or now - self.last_frame_at > NO_FRAME_SECONDS:
+            return "Inactive"
+        if self.dark_since is not None and now - self.dark_since >= DARK_SECONDS:
+            return "Inactive"
+        return "Active"
+
     def run(self) -> None:
         from ultralytics import YOLO  # imported here so --help works without it
 
@@ -111,7 +129,7 @@ class CameraWorker(threading.Thread):
         if self.counter.line is None:
             log.warning("no count line yet — draw it on the Camera page; counting is paused")
 
-        last_no, last_snapshot = 0, 0.0
+        last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
         while not self.stop_event.is_set():
             frame_no, frame = self.grabber.latest()
             if frame is None or frame_no == last_no:
@@ -121,6 +139,16 @@ class CameraWorker(threading.Thread):
             now = time.time()
             self.last_frame_at = now
             h, w = frame.shape[:2]
+
+            # Camera closed? (the picture turns almost all black)
+            if now - last_dark_check >= 1:
+                last_dark_check = now
+                mean, std = cv2.meanStdDev(cv2.resize(frame, (64, 36)))
+                if float(mean.mean()) < DARK_MEAN and float(std.mean()) < DARK_STD:
+                    if self.dark_since is None:
+                        self.dark_since = now
+                else:
+                    self.dark_since = None
 
             result = model.track(
                 frame,

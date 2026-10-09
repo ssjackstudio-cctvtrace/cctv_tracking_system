@@ -28,6 +28,7 @@ log = logging.getLogger("main")
 
 CAMERA_COLUMNS = "camera_id,camera_name,branch_id,active_status,ip_address,stream_path,count_line"
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
+STATUS_SECONDS = 5  # check each camera's active_status (sent only when it changes)
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,8 +67,10 @@ def main() -> None:
                 "active_status": "Active", "ip_address": "", "stream_path": "stream2",
                 "count_line": {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}},
             }]
+        # Every camera of this box, Active or Inactive: the box itself decides
+        # active_status from whether the camera picture is live and open.
         rows = supa.select("camera", CAMERA_COLUMNS, edge_device_id=f"eq.{settings.edge_device_id}")
-        return [c for c in rows if c["active_status"] == "Active" and (not args.camera or c["camera_name"] == args.camera)]
+        return [c for c in rows if not args.camera or c["camera_name"] == args.camera]
 
     def source_for(cam: dict) -> str | int:
         if args.source:
@@ -94,7 +97,7 @@ def main() -> None:
                 )
                 workers[cam_id] = w
                 w.start()
-        for cam_id in [k for k in workers if k not in cameras]:  # set Inactive / removed
+        for cam_id in [k for k in workers if k not in cameras]:  # removed or moved to another box
             log.info("Stopping %s", workers[cam_id].name)
             workers.pop(cam_id).stop()
 
@@ -104,15 +107,30 @@ def main() -> None:
         supa.update("edge_device", {"status": "Online", "last_heartbeat": utc_now()},
                     edge_device_id=f"eq.{settings.edge_device_id}")
         for cam_id, w in workers.items():
-            if time.time() - w.last_frame_at < REFRESH_SECONDS:
+            if w.active_status() == "Active":
                 supa.update("camera", {"last_seen_at": utc_now()}, camera_id=f"eq.{cam_id}")
+
+    # Active = connected + camera picture open; Inactive = closed or not connected
+    def report_status() -> None:
+        if supa is None:
+            return
+        for cam_id, w in list(workers.items()):
+            status = w.active_status()
+            if status == w.reported_status:
+                continue
+            values = {"active_status": status}
+            if status == "Active":
+                values["last_seen_at"] = utc_now()
+            supa.update("camera", values, camera_id=f"eq.{cam_id}")
+            w.reported_status = status
+            log.info("%s is now %s", w.camera["camera_name"], status)
 
     sync_workers()
     if not workers:
-        sys.exit("No active cameras found for this EDGE_DEVICE_ID. Check the camera table (Step 4).")
+        sys.exit("No cameras found for this EDGE_DEVICE_ID. Check the camera table (Step 4).")
     log.info("Running %d camera(s). Press Ctrl+C to stop.", len(workers))
 
-    next_refresh = 0.0
+    next_refresh = next_status = 0.0
     try:
         while True:
             if time.time() >= next_refresh:
@@ -122,6 +140,12 @@ def main() -> None:
                 except Exception as exc:  # internet down: keep counting, try again later
                     log.warning("Refresh / heartbeat failed: %s", exc)
                 next_refresh = time.time() + REFRESH_SECONDS
+            if time.time() >= next_status:
+                try:
+                    report_status()
+                except Exception as exc:  # internet down: sent again on the next check
+                    log.warning("Camera status update failed: %s", exc)
+                next_status = time.time() + STATUS_SECONDS
             if args.show:
                 import cv2
 
@@ -143,6 +167,8 @@ def main() -> None:
         if supa:
             try:
                 supa.update("edge_device", {"status": "Offline"}, edge_device_id=f"eq.{settings.edge_device_id}")
+                # Box stopping: nobody watches its cameras any more
+                supa.update("camera", {"active_status": "Inactive"}, edge_device_id=f"eq.{settings.edge_device_id}")
             except Exception:
                 pass
         log.info("Stopped. %d row(s) were still waiting to be sent.", writer.jobs.qsize())
