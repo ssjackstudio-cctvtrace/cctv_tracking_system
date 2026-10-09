@@ -5,16 +5,16 @@ import LoginPage from './Loginpage'
 import './Login.css'
 
 const TOKEN_KEY = 'cctv_admin_token'
-const EXPIRES_AT_KEY = 'cctv_admin_expires_at' // when the session ends (ms)
-const SESSION_ENDED_MESSAGE = 'Your session has ended. Please sign in again between 9:00 am and 11:00 pm.'
+const EXPIRES_AT_KEY = 'cctv_admin_expires_at' // when the session ends (ms): last activity + 10 min
+const IDLE_LIMIT_MS = 10 * 60 * 1000 // signed out after 10 minutes with no activity
+const IDLE_WARNING_MS = 8 * 60 * 1000 // "Stay signed in?" shown after 8 minutes
+const TOUCH_EVERY_MS = 60 * 1000 // tell the server "still active" at most once a minute
+const ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'scroll', 'touchstart'] as const
+const SESSION_ENDED_MESSAGE = 'You were signed out after 10 minutes of inactivity. Please sign in again.'
 
-// 11:00 pm Malaysia time (UTC+8, no daylight saving) today, in ms.
-// Used only if the server did not send expires_at.
-function todaySessionEnd(): number {
-  const offset = 8 * 60 * 60 * 1000
-  const day = 24 * 60 * 60 * 1000
-  const myDayStart = Math.floor((Date.now() + offset) / day) * day
-  return myDayStart + 23 * 60 * 60 * 1000 - offset
+// 95 seconds → "1:35"
+function formatCountdown(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
 function readToken(): string | null {
@@ -54,7 +54,11 @@ export default function App() {
   const [adminName, setAdminName] = useState<string | null>(null)
   const [ready, setReady] = useState(false) // saved session checked
   const [sessionNotice, setSessionNotice] = useState('') // shown on the sign-in page
-  const expiresAtRef = useRef<number | null>(null)
+  const [warningLeft, setWarningLeft] = useState<number | null>(null) // seconds left while the warning shows
+  const warningRef = useRef(false)
+  const lastActivityRef = useRef(0) // last mouse / key / touch / scroll (ms)
+  const lastTouchRef = useRef(0) // last admin_touch call (ms)
+  const touchTimerRef = useRef<number | undefined>(undefined)
   const endingRef = useRef(false)
 
   // Reopening the site: still signed in?
@@ -67,7 +71,7 @@ export default function App() {
     setAdminToken(token)
     const expiresAt = readExpiresAt()
     if (!expiresAt || Date.now() >= expiresAt) {
-      // Past 11:00 pm of the sign-in day: end that session on the server too
+      // Inactive for 10 minutes or more: end that session on the server too
       supabase.rpc('admin_logout').then(() => {
         setAdminToken(null)
         saveToken(null)
@@ -79,7 +83,6 @@ export default function App() {
     }
     supabase.rpc('admin_check').then(({ data, error }) => {
       if (!error && typeof data === 'string' && data) {
-        expiresAtRef.current = expiresAt
         setAdminName(data)
       } else {
         setAdminToken(null)
@@ -90,21 +93,84 @@ export default function App() {
     })
   }, [])
 
-  // Signed in: end the session at 11:00 pm
+  // Tell the server the admin is still active: the session now ends 10 minutes from now
+  async function touchServer() {
+    lastTouchRef.current = Date.now()
+    const { data, error } = await supabase.rpc('admin_touch')
+    if (!error && !data) void endSession() // the server already ended this session
+  }
+
+  // Mouse, key, touch or scroll: restart the 10-minute inactivity count
+  function markActive() {
+    const now = Date.now()
+    if (now - lastActivityRef.current < 1000) return // ignore bursts (e.g. mouse moves)
+    lastActivityRef.current = now
+    saveExpiresAt(now + IDLE_LIMIT_MS) // also tells other open tabs
+    // Reach the server at most once a minute, always including the latest activity
+    window.clearTimeout(touchTimerRef.current)
+    const wait = TOUCH_EVERY_MS - (now - lastTouchRef.current)
+    if (wait <= 0) void touchServer()
+    else touchTimerRef.current = window.setTimeout(() => void touchServer(), wait)
+  }
+
+  // "Yes, stay signed in" on the warning
+  function staySignedIn() {
+    warningRef.current = false
+    setWarningLeft(null)
+    lastActivityRef.current = 0
+    lastTouchRef.current = 0 // reach the server right away
+    markActive()
+  }
+
+  // Signed in: warn after 8 minutes of inactivity, sign out after 10
   useEffect(() => {
     if (!adminName) return
-    const expiresAt = expiresAtRef.current ?? todaySessionEnd()
+    lastActivityRef.current = 0
+    lastTouchRef.current = 0
+    markActive() // signing in or reopening the site counts as activity
+
     const check = () => {
-      if (Date.now() >= expiresAt) void endSession()
+      const idle = Date.now() - lastActivityRef.current
+      if (idle >= IDLE_LIMIT_MS) {
+        void endSession()
+      } else if (idle >= IDLE_WARNING_MS) {
+        warningRef.current = true
+        setWarningLeft(Math.ceil((IDLE_LIMIT_MS - idle) / 1000))
+      } else if (warningRef.current) {
+        // active again in another tab
+        warningRef.current = false
+        setWarningLeft(null)
+      }
     }
-    const timer = window.setTimeout(check, Math.max(0, expiresAt - Date.now()))
+    // While the warning shows, only the "Yes" button keeps the admin signed in
+    const onActivity = () => {
+      if (!warningRef.current) markActive()
+    }
+    // Activity in another open tab of the site counts too
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== EXPIRES_AT_KEY || !e.newValue) return
+      const otherTabActivity = Number(e.newValue) - IDLE_LIMIT_MS
+      if (otherTabActivity > lastActivityRef.current) {
+        lastActivityRef.current = otherTabActivity
+        check()
+      }
+    }
+
+    const timer = window.setInterval(check, 1000)
+    ACTIVITY_EVENTS.forEach((ev) => window.addEventListener(ev, onActivity, { passive: true, capture: true }))
+    window.addEventListener('storage', onStorage)
     // Timers can run late in background tabs, so check again when the tab is shown
     document.addEventListener('visibilitychange', check)
     window.addEventListener('focus', check)
     return () => {
-      window.clearTimeout(timer)
+      window.clearInterval(timer)
+      window.clearTimeout(touchTimerRef.current)
+      ACTIVITY_EVENTS.forEach((ev) => window.removeEventListener(ev, onActivity, { capture: true }))
+      window.removeEventListener('storage', onStorage)
       document.removeEventListener('visibilitychange', check)
       window.removeEventListener('focus', check)
+      warningRef.current = false
+      setWarningLeft(null)
     }
   }, [adminName])
 
@@ -113,10 +179,7 @@ export default function App() {
     if (error) return error.message
     const result = data as { token: string; admin_name: string; expires_at?: string } | null
     if (!result) return 'Wrong admin name or password.'
-    const serverEnd = result.expires_at ? Date.parse(result.expires_at) : NaN
-    const expiresAt = Number.isFinite(serverEnd) ? serverEnd : todaySessionEnd()
-    expiresAtRef.current = expiresAt
-    saveExpiresAt(expiresAt)
+    saveExpiresAt(Date.now() + IDLE_LIMIT_MS)
     setAdminToken(result.token)
     saveToken(result.token)
     setSessionNotice('')
@@ -125,15 +188,15 @@ export default function App() {
   }
 
   async function signOut() {
+    window.clearTimeout(touchTimerRef.current)
     await supabase.rpc('admin_logout')
     setAdminToken(null)
     saveToken(null)
     saveExpiresAt(null)
-    expiresAtRef.current = null
     setAdminName(null)
   }
 
-  // 11:00 pm reached: sign out and show the message on the sign-in page
+  // 10 minutes without activity: sign out and show the message on the sign-in page
   async function endSession() {
     if (endingRef.current) return
     endingRef.current = true
@@ -152,5 +215,34 @@ export default function App() {
 
   if (!adminName) return <LoginPage onSignIn={signIn} notice={sessionNotice} />
 
-  return <Dashboard adminName={adminName} onSignOut={signOut} />
+  return (
+    <>
+      <Dashboard adminName={adminName} onSignOut={signOut} />
+      {warningLeft !== null && (
+        <div className="idle-overlay">
+          <div
+            className="idle-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="idle-title"
+            aria-describedby="idle-text"
+          >
+            <h2 id="idle-title">Are you still there?</h2>
+            <p id="idle-text">
+              You have been inactive for 8 minutes. You will be signed out in{' '}
+              <strong>{formatCountdown(warningLeft)}</strong>. Do you want to stay signed in?
+            </p>
+            <div className="idle-actions">
+              <button type="button" className="idle-btn idle-btn-primary" autoFocus onClick={staySignedIn}>
+                Yes, stay signed in
+              </button>
+              <button type="button" className="idle-btn" onClick={() => void signOut()}>
+                Sign out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
 }

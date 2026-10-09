@@ -100,3 +100,43 @@
 .lg-submit:disabled { opacity: 0.7; cursor: default; }
 
 .lg-loading { color: #9db2bb; }
+
+/* "Are you still there?" warning after 8 minutes of inactivity */
+.idle-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(16, 32, 43, 0.6);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+.idle-dialog {
+  width: 100%;
+  max-width: 400px;
+  box-sizing: border-box;
+  padding: 1.5rem 1.5rem 1.25rem;
+  border-radius: 10px;
+  border-top: 4px solid #f2a93b;
+  background: #ffffff;
+  color: #16242d;
+}
+.idle-dialog h2 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+.idle-dialog p { margin: 0 0 1.25rem; color: #5d7079; font-size: 0.95rem; line-height: 1.45; }
+.idle-dialog strong { color: #a12a2a; font-variant-numeric: tabular-nums; }
+.idle-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }
+.idle-btn {
+  padding: 0.6rem 1rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #16242d;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.idle-btn:hover { background: #f3f5f4; }
+.idle-btn-primary { border-color: #10202b; background: #10202b; color: #fff; }
+.idle-btn-primary:hover { background: #18303f; }
+.idle-btn:focus-visible { outline: 2px solid #f2a93b; outline-offset: 2px; }
