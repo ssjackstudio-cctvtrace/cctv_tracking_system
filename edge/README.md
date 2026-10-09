@@ -18,6 +18,8 @@ Tapo camera ──RTSP (shop network)──► main.py ──► Supabase (visit
 | `main.py` | Starts everything; reloads camera settings + heartbeat every 60 s |
 | `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → line counter → rows |
 | `edge/line_counter.py` | Decides In / Out when a person crosses `camera.count_line` |
+| `edge/demographics.py` | Estimated gender + age from each person's face |
+| `download_models.py` | Downloads the face, gender and age models into `models/` |
 | `edge/uploader.py` | Sends rows (retries while the internet is down) and snapshots |
 | `edge/supa.py` | Small Supabase client using the secret key |
 | `edge/config.py` | Reads `.env`, builds the RTSP link |
@@ -135,10 +137,22 @@ window) a green arrow marks the **In** side: crossing towards the arrow is
 Camera page swaps them. The point that must cross is the person's feet
 (`ANCHOR=bottom`); for a camera looking straight down use `ANCHOR=center`.
 
+## Gender and age (estimated)
+
+Once per machine, with the `.venv` active: `python download_models.py`
+(about 48 MB into `edge/models/`, not in GitHub). Then restart `main.py`.
+
+While a person is tracked, the box looks at their face up to 5 times
+(every 0.5 s), averages the results and writes `est_gender`
+(Male / Female / Unknown), `est_age` and `demographic_score` (how sure the
+models are, 0-100) to their `visit` row. No face picture is saved or sent.
+People seen only from behind stay `Unknown`. The age model works in age
+groups (25-32, 38-43, ...), so `est_age` is a rough estimate. With `--show`
+the window prints it next to each person, e.g. `7 F 29`.
+Turn it off with `DEMOGRAPHICS=off` in `.env`.
+
 ## Not in this version yet (phase 2)
 
-- `est_gender`, `est_age`, `demographic_score` stay at their defaults
-  (`Unknown` / 0), so the dashboard's Male / Female rows show 0 for now.
 - Face recognition → `recognition_event`. The SQL function
   `match_member_face` is ready for it.
 - Rows waiting while the internet is down are kept in memory, so a power cut

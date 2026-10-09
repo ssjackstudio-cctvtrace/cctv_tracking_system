@@ -13,6 +13,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from .demographics import Demographics, Estimate
 from .line_counter import CountLine, LineCounter
 
 log = logging.getLogger("camera")
@@ -23,6 +24,12 @@ PERSON = 0  # COCO class id for "person"
 NO_FRAME_SECONDS = 20  # no new picture for this long → stream lost → Inactive
 DARK_SECONDS = 5  # picture almost all black for this long → camera closed → Inactive
 DARK_MEAN, DARK_STD = 12, 6  # "almost all black": low brightness and almost no detail (0–255 scale)
+
+# Gender / age: look at each person's face a few times while they are tracked
+FACE_SAMPLES = 5  # faces averaged per person
+FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
+FACES_PER_FRAME = 1  # faces checked per frame (~0.15 s each on the CPU; keeps counting smooth)
+TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age sent
 
 
 class FrameGrabber(threading.Thread):
@@ -83,6 +90,7 @@ class CameraWorker(threading.Thread):
         offer_snapshot: Callable[[str, bytes], None] | None,
         snapshot_seconds: float,
         show: bool = False,
+        update: Callable[..., None] | None = None,
     ):
         super().__init__(name=f"cam-{camera['camera_name']}", daemon=True)
         self.camera = camera
@@ -90,6 +98,11 @@ class CameraWorker(threading.Thread):
         self.model_path, self.confidence, self.image_size, self.anchor = model_path, confidence, image_size, anchor
         self.insert, self.offer_snapshot, self.snapshot_seconds = insert, offer_snapshot, snapshot_seconds
         self.show = show
+        self.update = update  # update(table, values, **filters), for a visit's gender / age
+        self._estimates: dict[int, Estimate] = {}  # tracker id → averaged gender / age
+        self._last_look: dict[int, float] = {}  # tracker id → last time its face was checked
+        self._last_seen: dict[int, float] = {}  # tracker id → last frame it was in
+        self._sent: dict[int, int] = {}  # tracker id → face samples already written to its visit
         self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
@@ -124,6 +137,7 @@ class CameraWorker(threading.Thread):
         from ultralytics import YOLO  # imported here so --help works without it
 
         model = YOLO(self.model_path)
+        demo = Demographics()  # gender / age models (off if the model files are missing)
         self.grabber.start()
         log.info("started (model %s)", self.model_path)
         if self.counter.line is None:
@@ -162,6 +176,7 @@ class CameraWorker(threading.Thread):
 
             points: dict[int, tuple[float, float]] = {}
             conf_by_id: dict[int, float] = {}
+            box_by_id: dict[int, tuple[float, float, float, float]] = {}
             boxes = result.boxes
             if boxes is not None and boxes.id is not None:
                 for (x1, y1, x2, y2), tid, conf in zip(
@@ -170,6 +185,10 @@ class CameraWorker(threading.Thread):
                     y = y2 if self.anchor == "bottom" else (y1 + y2) / 2
                     points[tid] = (((x1 + x2) / 2) / w, y / h)
                     conf_by_id[tid] = conf
+                    box_by_id[tid] = (x1, y1, x2, y2)
+
+            if demo.enabled:
+                self._look_at_faces(demo, frame, box_by_id, now)
 
             for crossing in self.counter.update(points, now=now):
                 self._record(crossing.track_id, crossing.direction, conf_by_id.get(crossing.track_id, 0.0))
@@ -189,18 +208,20 @@ class CameraWorker(threading.Thread):
         cam = self.camera
         visit_id = self._visits.get(tid)
         if visit_id is None:
-            # One visit per tracked person. Gender / age / member stay at their
-            # defaults ("Unknown") until phase 2 adds those models.
+            # One visit per tracked person, with the gender / age estimated so
+            # far (updated later as more faces are seen). Member stays empty.
             visit_id = str(uuid.uuid4())
             self._visits[tid] = visit_id
-            self.insert(
-                "visit",
-                {
-                    "visit_id": visit_id,
-                    "branch_id": cam["branch_id"],
-                    "track_id": f"{cam['camera_name']}-{self._session}-{tid}",
-                },
-            )
+            row = {
+                "visit_id": visit_id,
+                "branch_id": cam["branch_id"],
+                "track_id": f"{cam['camera_name']}-{self._session}-{tid}",
+            }
+            est = self._estimates.get(tid)
+            if est and est.samples:
+                row.update(est.visit_fields())
+                self._sent[tid] = est.samples
+            self.insert("visit", row)
         self.insert(
             "cctv_event",
             {
@@ -217,6 +238,43 @@ class CameraWorker(threading.Thread):
             for k in list(self._visits)[:2500]:
                 del self._visits[k]
 
+    # ---------- Gender / age ----------
+    def _look_at_faces(self, demo: Demographics, frame: np.ndarray,
+                       box_by_id: dict[int, tuple[float, float, float, float]], now: float) -> None:
+        for tid in box_by_id:
+            self._last_seen[tid] = now
+        # People who still need faces, those with the fewest first
+        due = [
+            tid for tid in box_by_id
+            if self._estimates.get(tid, Estimate()).samples < FACE_SAMPLES
+            and now - self._last_look.get(tid, 0.0) >= FACE_EVERY_SECONDS
+        ]
+        due.sort(key=lambda t: self._estimates.get(t, Estimate()).samples)
+        for tid in due[:FACES_PER_FRAME]:
+            self._last_look[tid] = now
+            found = demo.from_person(frame, box_by_id[tid])
+            if found is None:
+                continue  # no clear face this time (turned away, too small, blurred)
+            est = self._estimates.setdefault(tid, Estimate())
+            est.add(*found)
+            if est.samples in (1, 3, FACE_SAMPLES):  # first guess, better guess, final
+                self._send_estimate(tid)
+
+        # People gone for a while: send their final estimate and forget them
+        for tid in [t for t, seen in self._last_seen.items() if now - seen > TRACK_DONE_SECONDS]:
+            self._send_estimate(tid)
+            for d in (self._estimates, self._last_look, self._last_seen, self._sent):
+                d.pop(tid, None)
+
+    def _send_estimate(self, tid: int) -> None:
+        """Write the person's newest gender / age to their visit row, if they
+        already have one (a visit is made when they cross the count line)."""
+        est, visit_id = self._estimates.get(tid), self._visits.get(tid)
+        if not est or not visit_id or not self.update or est.samples <= self._sent.get(tid, 0):
+            return
+        self.update("visit", est.visit_fields(), visit_id=f"eq.{visit_id}")
+        self._sent[tid] = est.samples
+
     def _draw(self, img: np.ndarray, points: dict[int, tuple[float, float]]) -> np.ndarray:
         h, w = img.shape[:2]
         line = self.counter.line
@@ -232,7 +290,9 @@ class CameraWorker(threading.Thread):
             cv2.putText(img, "IN", tip, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
         for tid, (x, y) in points.items():
             cv2.circle(img, (int(x * w), int(y * h)), 5, (255, 80, 0), -1)
-            cv2.putText(img, str(tid), (int(x * w) + 6, int(y * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 80, 0), 1)
+            est = self._estimates.get(tid)
+            text = f"{tid} {est.label()}" if est else str(tid)  # e.g. "7 F 29"
+            cv2.putText(img, text, (int(x * w) + 6, int(y * h)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 80, 0), 1)
         cv2.putText(img, f"In {self.counts['In']}  Out {self.counts['Out']}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         return img

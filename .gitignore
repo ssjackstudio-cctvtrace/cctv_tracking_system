@@ -148,3 +148,4 @@ __pycache__/
 *.pt
 *_rknn_model/
 edge/*.mp4
+edge/models/

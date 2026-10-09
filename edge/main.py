@@ -93,7 +93,7 @@ def main() -> None:
                 w = CameraWorker(
                     cam, source_for(cam), settings.model, settings.confidence, settings.image_size,
                     settings.anchor, writer.insert, snapshots.offer if snapshots else None,
-                    settings.snapshot_seconds, show=args.show,
+                    settings.snapshot_seconds, show=args.show, update=writer.update,
                 )
                 workers[cam_id] = w
                 w.start()

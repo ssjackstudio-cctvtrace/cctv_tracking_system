@@ -1,7 +1,8 @@
 """Background threads that talk to Supabase, so the camera threads never wait
 on the internet.
 
-- Writer: inserts visit / cctv_event rows in order, retrying while offline.
+- Writer: inserts visit / cctv_event rows (and updates a visit's gender / age)
+  in order, retrying while offline.
 - Snapshots: uploads the newest picture of each camera and keeps
   camera.last_snapshot_url pointing at a signed link.
 """
@@ -28,24 +29,38 @@ class Writer(threading.Thread):
     def __init__(self, supa: Supabase | None, max_pending: int = 50_000):
         super().__init__(name="writer", daemon=True)
         self.supa = supa
-        self.jobs: "queue.Queue[tuple[str, dict[str, Any]]]" = queue.Queue(maxsize=max_pending)
+        # (table, row, filters): filters None = insert row, otherwise update with these filters
+        self.jobs: "queue.Queue[tuple[str, dict[str, Any], dict[str, str] | None]]" = queue.Queue(maxsize=max_pending)
 
     def insert(self, table: str, row: dict[str, Any]) -> None:
         if self.supa is None:  # --offline
             log.info("offline: would insert into %s %s", table, row)
             return
         try:
-            self.jobs.put_nowait((table, row))
+            self.jobs.put_nowait((table, row, None))
         except queue.Full:
             log.error("Too many unsent rows; dropping %s row", table)
 
+    # Queued after the insert it belongs to, so the row always exists first
+    def update(self, table: str, values: dict[str, Any], **filters: str) -> None:
+        if self.supa is None:  # --offline
+            log.info("offline: would update %s %s where %s", table, values, filters)
+            return
+        try:
+            self.jobs.put_nowait((table, values, filters))
+        except queue.Full:
+            log.error("Too many unsent rows; dropping %s update", table)
+
     def run(self) -> None:
         while True:
-            table, row = self.jobs.get()
+            table, row, filters = self.jobs.get()
             delay = 2.0
             while True:
                 try:
-                    self.supa.insert(table, row)  # type: ignore[union-attr]
+                    if filters is None:
+                        self.supa.insert(table, row)  # type: ignore[union-attr]
+                    else:
+                        self.supa.update(table, row, **filters)  # type: ignore[union-attr]
                     break
                 except SupabaseError as exc:
                     if exc.status == 409:  # already inserted by an earlier try
