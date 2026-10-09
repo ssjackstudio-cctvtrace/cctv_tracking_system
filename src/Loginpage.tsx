@@ -18,7 +18,7 @@ export default function LoginPage({ onSignIn, notice }: Props) {
 
   // Browser tab title for the sign-in page
   useEffect(() => {
-    document.title = 'Login - JackStudio Retail System Tracking'
+    document.title = 'Login | JackStudio Retail System Tracking'
   }, [])
 
   async function onSubmit(e: FormEvent) {
