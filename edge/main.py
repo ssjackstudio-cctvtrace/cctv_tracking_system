@@ -134,6 +134,7 @@ def main() -> None:
     log.info("Running %d camera(s). Press Ctrl+C to stop.", len(workers))
 
     next_refresh = next_status = 0.0
+    open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
         while True:
             if time.time() >= next_refresh:
@@ -153,8 +154,15 @@ def main() -> None:
                 import cv2
 
                 for w in list(workers.values()):
-                    if w.preview is not None:
-                        cv2.imshow(w.camera["camera_name"], w.preview)
+                    name = w.camera["camera_name"]
+                    if w.preview is not None:  # camera on: open / refresh its window
+                        cv2.imshow(name, w.preview)
+                        open_windows.add(name)
+                    elif name in open_windows:  # camera off or closed: close its window
+                        cv2.destroyWindow(name)
+                        open_windows.discard(name)
+                if not open_windows:
+                    time.sleep(0.03)  # no window open, so waitKey would not wait
                 if cv2.waitKey(30) & 0xFF == ord("q"):
                     break
             else:

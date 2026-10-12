@@ -4,11 +4,13 @@ crossings → queue visit / cctv_event rows for Supabase."""
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import cv2
 import numpy as np
@@ -31,6 +33,23 @@ FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
 FACES_PER_FRAME = 1  # faces checked per frame (~0.15 s each on the CPU; keeps counting smooth)
 TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age sent
 
+# Camera power: while the camera is off (no answer on its RTSP port) the box
+# only knocks every few seconds; tracking starts by itself once it powers on.
+POWER_CHECK_SECONDS = 5
+
+
+def camera_powered_on(source: str | int) -> bool:
+    """True when the camera answers on its RTSP port (usually 554), i.e. it is
+    switched on and on the network. Files / webcams always count as on."""
+    if not (isinstance(source, str) and source.lower().startswith("rtsp")):
+        return True
+    url = urlsplit(source)
+    try:
+        with socket.create_connection((url.hostname, url.port or 554), timeout=2):
+            return True
+    except OSError:
+        return False
+
 
 class FrameGrabber(threading.Thread):
     """Reads the RTSP stream non-stop and keeps only the newest frame, so the
@@ -44,6 +63,7 @@ class FrameGrabber(threading.Thread):
         self._lock = threading.Lock()
         self.stop_event = threading.Event()
         self.connected = False
+        self.powered: bool | None = None  # camera switched on? (None = not checked yet)
 
     def latest(self) -> tuple[int, np.ndarray | None]:
         with self._lock:
@@ -52,6 +72,18 @@ class FrameGrabber(threading.Thread):
     def run(self) -> None:
         is_file = isinstance(self.source, str) and not self.source.lower().startswith("rtsp")
         while not self.stop_event.is_set():
+            # Camera off: wait quietly, then start again as soon as it powers on
+            if not camera_powered_on(self.source):
+                self.connected = False
+                if self.powered is not False:
+                    log.info("camera is OFF (no answer) — tracking stopped, waiting for it to power on")
+                self.powered = False
+                self.stop_event.wait(POWER_CHECK_SECONDS)
+                continue
+            if self.powered is not True:
+                log.info("camera is ON — starting live tracking")
+            self.powered = True
+
             cap = cv2.VideoCapture(self.source)
             if not cap.isOpened():
                 self.connected = False
@@ -144,10 +176,15 @@ class CameraWorker(threading.Thread):
             log.warning("no count line yet — draw it on the Camera page; counting is paused")
 
         last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
+        paused = False  # True while the camera picture is closed (black)
         while not self.stop_event.is_set():
             frame_no, frame = self.grabber.latest()
             if frame is None or frame_no == last_no:
-                time.sleep(0.01)
+                if not self.grabber.connected:
+                    self.preview = None  # camera off: --show closes its window
+                    time.sleep(0.5)
+                else:
+                    time.sleep(0.01)
                 continue
             last_no = frame_no
             now = time.time()
@@ -162,7 +199,19 @@ class CameraWorker(threading.Thread):
                     if self.dark_since is None:
                         self.dark_since = now
                 else:
+                    if self.dark_since is not None and now - self.dark_since >= DARK_SECONDS:
+                        log.info("camera picture open again — tracking resumed")
                     self.dark_since = None
+
+            # Camera closed (Tapo privacy mode / black picture): no people to
+            # track, so skip the AI and close the --show window until it opens
+            if self.dark_since is not None and now - self.dark_since >= DARK_SECONDS:
+                if not paused:
+                    log.info("camera picture closed — tracking paused")
+                    paused = True
+                self.preview = None
+                continue
+            paused = False
 
             result = model.track(
                 frame,

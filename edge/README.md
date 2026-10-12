@@ -113,7 +113,8 @@ within 60 s.
    yolo export model=yolo11n.pt format=rknn name=rk3588
    ```
    Copy the `yolo11n_rknn_model` folder to the box's `edge` folder and set
-   `MODEL=./yolo11n_rknn_model` in `.env`. The box needs the Rockchip NPU
+   `MODEL=./yolo11n_rknn_model` in `.env`. On the box, with the `.venv`
+   active, also run `pip install rknn-toolkit-lite2` (runs the RKNN model). The box needs the Rockchip NPU
    runtime (`librknnrt.so`); ask the seller for the Ubuntu 22.04 image that
    includes RKNPU2. Without it, `MODEL=yolo11n.pt` still runs on the CPU,
    only slower.
@@ -128,6 +129,11 @@ within 60 s.
    journalctl -u cctv-edge -f      # live log
    ```
    After `git pull` with new code: `sudo systemctl restart cctv-edge`.
+
+   The program then stays running and follows each camera by itself: when a
+   Tapo camera is switched off it stops tracking it (log: `camera is OFF`,
+   Camera page: Inactive), and when the camera powers on again it starts
+   tracking within about 5 seconds (log: `camera is ON — starting live tracking`).
 
 ## How In / Out is decided
 
