@@ -26,7 +26,8 @@ from edge.uploader import SnapshotUploader, Writer  # noqa: E402
 
 log = logging.getLogger("main")
 
-CAMERA_COLUMNS = "camera_id,camera_name,branch_id,active_status,ip_address,stream_path,count_line"
+# camera has no branch_id: the branch comes from the camera's edge box (edge_device.branch_id)
+CAMERA_COLUMNS = "camera_id,camera_name,active_status,ip_address,stream_path,count_line,edge_device(branch_id)"
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
 STATUS_SECONDS = 5  # check each camera's active_status (sent only when it changes)
 
@@ -70,6 +71,8 @@ def main() -> None:
         # Every camera of this box, Active or Inactive: the box itself decides
         # active_status from whether the camera picture is live and open.
         rows = supa.select("camera", CAMERA_COLUMNS, edge_device_id=f"eq.{settings.edge_device_id}")
+        for c in rows:  # visit.branch_id = branch of this edge box
+            c["branch_id"] = (c.pop("edge_device", None) or {}).get("branch_id")
         return [c for c in rows if not args.camera or c["camera_name"] == args.camera]
 
     def source_for(cam: dict) -> str | int:

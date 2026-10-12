@@ -1,0 +1,37 @@
+/* AI Edge Device pages (toolbar, cards and grid come from Branches.css) */
+
+/* Toolbar: search, branch, status and add button in one row when expanded */
+.ed-toolbar .ed-branch { flex: 0 1 240px; min-width: 0; }
+.ed-toolbar .ed-statusfilter { flex: 0 0 auto; }
+.ed-add { background: #000; border-color: #000; color: #fff; }
+.ed-add:hover { background: #222; }
+
+/* Collapsed: search (one row), branch (one row), status + add button (one row) */
+@media (max-width: 760px) {
+  .ed-toolbar .ed-branch { flex: 1 1 100%; }
+  .ed-toolbar .ed-statusfilter { flex: 1 1 0; min-width: 0; }
+}
+
+/* Status pad: Online green, Offline grey */
+.ed-status {
+  display: inline-block;
+  padding: 0.15rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.ed-status--online { background: #d5f3ea; color: #12684f; }
+.ed-status--offline { background: #e4e9e8; color: #4b5d66; }
+
+/* New / Edit form: selects and disabled inputs look like the text fields */
+.ed-form .nb-field select {
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ds-text);
+  font: inherit;
+  font-size: 0.95rem;
+}
+.ed-form .nb-field select:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.ed-form .nb-field :disabled { background: #f3f5f4; color: var(--ds-muted); cursor: not-allowed; }

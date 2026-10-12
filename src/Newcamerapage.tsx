@@ -38,7 +38,7 @@ type Props = {
   branches: Branch[]
   defaultBranchId: string
   onBack: () => void
-  onSaved: (camera: Camera) => void
+  onSaved: (branchId: string, camera: Camera) => void
 }
 
 // Add a camera to an existing branch. Values come from the Tapo app:
@@ -140,8 +140,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       .insert({
         camera_name,
         active_status: 'Inactive', // the AI edge box sets Active once the camera picture is live
-        branch_id: branchId,
-        edge_device_id,
+        edge_device_id, // the camera's branch comes from this edge box
         tapo_model: tapoModel.trim() || null,
         mac_address,
         ip_address,
@@ -157,7 +156,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
 
     setSavedEdgeId(edge_device_id)
     setNotice({ type: 'success', text: `The camera ${camera_name} is saved successfully` })
-    onSaved(data as Camera)
+    onSaved(branchId, data as Camera)
   }
 
   const saved = !!savedEdgeId

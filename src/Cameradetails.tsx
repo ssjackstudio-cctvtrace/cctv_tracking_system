@@ -24,19 +24,22 @@ export const formatLongDateTime = (iso: string | null) =>
 // How often the camera / edge box details refresh (status, last seen, heartbeat)
 const INFO_REFRESH_MS = 10_000
 
-// One camera with its branch and edge box:
+// One camera with its edge box and the edge box's branch:
 //   select ca.tapo_model, ca.mac_address, ca.ip_address, b.branch_name, ca.stream_path,
 //          ca.last_seen_at, ca.active_status, ed.device_name, ed.last_heartbeat, ed.status
 //   from camera ca
 //   join edge_device ed on ca.edge_device_id = ed.edge_device_id
-//   join branch b on ca.branch_id = b.branch_id
+//   join branch b on ed.branch_id = b.branch_id
 // (edge_device is a left join here, so a camera with no edge box still shows its own card)
 type CameraInfo = Pick<
   Camera,
   'tapo_model' | 'mac_address' | 'ip_address' | 'stream_path' | 'last_seen_at' | 'active_status'
 > & {
-  branch: Pick<Branch, 'branch_name'> | null
-  edge_device: Pick<EdgeDevice, 'device_name' | 'last_heartbeat' | 'status'> | null
+  edge_device:
+    | (Pick<EdgeDevice, 'device_name' | 'last_heartbeat' | 'status'> & {
+        branch: Pick<Branch, 'branch_name'> | null
+      })
+    | null
 }
 
 function useCameraInfo(cameraId: string) {
@@ -50,7 +53,7 @@ function useCameraInfo(cameraId: string) {
         .from(TABLES.camera)
         .select(
           'tapo_model, mac_address, ip_address, stream_path, last_seen_at, active_status, ' +
-            'branch(branch_name), edge_device(device_name, last_heartbeat, status)',
+            'edge_device(device_name, last_heartbeat, status, branch(branch_name))',
         )
         .eq('camera_id', cameraId)
         .maybeSingle()
@@ -322,14 +325,14 @@ function CountLineEditor({ camera }: { camera: Camera }) {
 export default function CameraDetails({ camera, onBack }: { camera: Camera; onBack: () => void }) {
   const people = usePeopleCount(camera.camera_id)
   const { info, error: infoError } = useCameraInfo(camera.camera_id)
-  const cam = info ?? { ...camera, branch: null, edge_device: null } // until the query answers
+  const cam = info ?? { ...camera, edge_device: null } // until the query answers
   const edge = info?.edge_device ?? null
 
   const cameraRows: [string, ReactNode][] = [
     ['Tapo Model', cam.tapo_model ?? '—'],
     ['MAC Address', cam.mac_address ?? '—'],
     ['IP Address', cam.ip_address ?? '—'],
-    ['Branch', info?.branch?.branch_name ?? '—'],
+    ['Branch', edge?.branch?.branch_name ?? '—'],
     ['Stream Path', cam.stream_path ?? '—'],
     ['Last Seen', formatLongDateTime(cam.last_seen_at)],
     ['Camera Status', <Badge text={cam.active_status} />],

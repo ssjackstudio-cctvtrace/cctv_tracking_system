@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { TABLES, isOnline, useTable } from './Usetable'
-import type { Branch, Camera } from './types'
+import type { Branch, Camera, EdgeDevice } from './types'
 import CameraDetails, { CameraScreen, canCapture, formatLongDate } from './Cameradetails'
 import NewCameraPage from './Newcamerapage'
 import './Camera.css'
@@ -29,6 +29,8 @@ function screenStatus(cam: Camera): { text: string; tone: 'ok' | 'wait' | 'off' 
 export default function CameraPage() {
   const cams = useTable<Camera>(TABLES.camera, 'camera_name', true, 500)
   const branches = useTable<Branch>(TABLES.branch, 'branch_name', true, 500)
+  // A camera's branch is its edge box's branch (camera.edge_device_id → edge_device.branch_id)
+  const edges = useTable<EdgeDevice>(TABLES.edgeDevice, 'device_name', true, 500)
   const [branchId, setBranchId] = useState('')
   const [expanded, setExpanded] = useState(false)
   // Sub-pages have their own address: /camera/new and /camera/<camera id>
@@ -81,8 +83,9 @@ export default function CameraPage() {
         branches={branches.rows}
         defaultBranchId={branchId}
         onBack={() => navigate('/camera')}
-        onSaved={(cam) => {
-          setBranchId(cam.branch_id) // show the new camera's branch when going back
+        onSaved={(savedBranchId) => {
+          setBranchId(savedBranchId) // show the new camera's branch when going back
+          edges.reload() // a new edge box may have been created with the camera
           reload()
         }}
       />
@@ -93,7 +96,10 @@ export default function CameraPage() {
   if (selected) return <CameraDetails camera={selected} onBack={() => navigate('/camera')} />
   if (selectedId && cams.loading && cams.rows.length === 0) return <p className="ds-lead">Loading camera…</p>
 
-  const branchCams = cams.rows.filter((c) => c.branch_id === branchId)
+  // select ca.* from camera ca join edge_device ed on ca.edge_device_id = ed.edge_device_id
+  // where ed.branch_id = <selected branch>
+  const branchEdgeIds = new Set(edges.rows.filter((d) => d.branch_id === branchId).map((d) => d.edge_device_id))
+  const branchCams = cams.rows.filter((c) => !!c.edge_device_id && branchEdgeIds.has(c.edge_device_id))
 
   return (
     <>
@@ -126,7 +132,8 @@ export default function CameraPage() {
       </div>
 
       {cams.error && <p className="cam-error">{cams.error}</p>}
-      {cams.loading && cams.rows.length === 0 ? (
+      {edges.error && <p className="cam-error">{edges.error}</p>}
+      {(cams.loading && cams.rows.length === 0) || (edges.loading && edges.rows.length === 0) ? (
         <p className="ds-lead">Loading cameras…</p>
       ) : branchCams.length === 0 ? (
         <p className="ds-lead">No cameras found for this branch. Click "+ Add camera" to add one.</p>

@@ -57,8 +57,7 @@ export type Camera = {
   camera_id: string
   camera_name: string
   active_status: 'Active' | 'Inactive'
-  branch_id: string
-  edge_device_id: string | null
+  edge_device_id: string | null // the camera's branch comes from its edge box (edge_device.branch_id)
   tapo_model: string | null
   mac_address: string | null
   ip_address: string | null // inet
@@ -75,7 +74,6 @@ export type CameraEditable = Pick<
   Camera,
   | 'camera_name'
   | 'active_status'
-  | 'branch_id'
   | 'edge_device_id'
   | 'tapo_model'
   | 'mac_address'

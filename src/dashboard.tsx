@@ -5,6 +5,8 @@ import { TABLES } from './Usetable'
 import BranchesPage from './BranchesPage'
 import EditBranchPage from './Editbranch'
 import CameraPage from './Camerapage'
+import EdgeDevicePage from './Edgedevicepage'
+import { EditEdgeDevicePage, NewEdgeDevicePage } from './Edgedeviceform'
 import EventsPage, { type EventTab } from './Eventspage'
 import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
@@ -13,7 +15,7 @@ import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
-type PageKey = 'dashboard' | 'branch' | 'camera' | 'events' | 'members' | 'transactions'
+type PageKey = 'dashboard' | 'branch' | 'camera' | 'edge-device' | 'events' | 'members' | 'transactions'
 
 // Titles for sub-pages (the sidebar keeps the parent page highlighted on these)
 const SUB_TITLES: { match: RegExp; title: string }[] = [
@@ -21,12 +23,16 @@ const SUB_TITLES: { match: RegExp; title: string }[] = [
   { match: /^\/branch\/[^/]+\/edit$/, title: 'Edit Branch' },
   { match: /^\/camera\/new$/, title: 'Add Camera' },
   { match: /^\/camera\/[^/]+$/, title: 'Camera Details' },
+  { match: /^\/edge-device\/new$/, title: 'New AI Edge Box' },
+  { match: /^\/edge-device\/[^/]+\/edit$/, title: 'Edit AI Edge Box' },
 ]
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: <path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z" /> },
   { key: 'branch', label: 'Branch', icon: <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" /> },
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
+  // AI edge box: processor chip with pins
+  { key: 'edge-device', label: 'AI Edge Device', icon: <path d="M6 6h12v12H6zM9.5 9.5h5v5h-5zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /> },
   { key: 'events', label: 'Event History', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
   { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
@@ -135,29 +141,31 @@ async function loadTimes(table: string, column: string): Promise<string[]> {
   return out
 }
 
-// Number of cctv_event rows with the given direction (branch = camera's branch),
+// Number of cctv_event rows with the given direction (branch = branch of the camera's edge box),
 // optionally only for one estimated gender of the visit
 function eventCount(direction: 'In' | 'Out', branch: string, range: Range, gender?: Gender) {
   let q = supabase
     .from(TABLES.cctvEvent)
     .select(
-      gender ? 'cctv_event_id, camera!inner(branch_id), visit!inner(est_gender)' : 'cctv_event_id, camera!inner(branch_id)',
+      gender
+        ? 'cctv_event_id, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender)'
+        : 'cctv_event_id, camera!inner(edge_device!inner(branch_id))',
       { count: 'exact', head: true },
     )
     .eq('direction', direction)
   if (gender) q = q.eq('visit.est_gender', gender)
-  if (branch) q = q.eq('camera.branch_id', branch)
+  if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q
 }
 
-// Number of transactions with status 'Dealed' (branch = branch of the matched event's camera)
+// Number of transactions with status 'Dealed' (branch = branch of the matched event's camera's edge box)
 function dealedCount(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.transaction)
-    .select('transaction_id, cctv_event!inner(camera!inner(branch_id))', { count: 'exact', head: true })
+    .select('transaction_id, cctv_event!inner(camera!inner(edge_device!inner(branch_id)))', { count: 'exact', head: true })
     .eq('status', 'Dealed')
-  if (branch) q = q.eq('cctv_event.camera.branch_id', branch)
+  if (branch) q = q.eq('cctv_event.camera.edge_device.branch_id', branch)
   if (range) q = q.gte('transaction_date', range[0]).lt('transaction_date', range[1])
   return q
 }
@@ -168,9 +176,9 @@ function latestEvents(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.cctvEvent)
     .select(
-      'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, branch_id), visit!inner(visit_type, est_gender, est_age)',
+      'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(visit_type, est_gender, est_age)',
     )
-  if (branch) q = q.eq('camera.branch_id', branch)
+  if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q.order('event_time', { ascending: false }).limit(50)
 }
@@ -183,9 +191,9 @@ function latestRecognitions(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.recognitionEvent)
     .select(
-      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, branch_id), member_face_template!inner(member!inner(member_no)), visit!inner(est_gender, est_age)',
+      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), member_face_template!inner(member!inner(member_no)), visit!inner(est_gender, est_age)',
     )
-  if (branch) q = q.eq('camera.branch_id', branch)
+  if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q.order('event_time', { ascending: false }).limit(50)
 }
@@ -430,6 +438,14 @@ function EditBranchRoute() {
   return <EditBranchPage branchId={branchId} onBack={() => navigate('/branch')} />
 }
 
+// /edge-device/:edgeDeviceId/edit
+function EditEdgeDeviceRoute() {
+  const { edgeDeviceId } = useParams()
+  const navigate = useNavigate()
+  if (!edgeDeviceId) return <Navigate to="/edge-device" replace />
+  return <EditEdgeDevicePage edgeDeviceId={edgeDeviceId} onBack={() => navigate('/edge-device')} />
+}
+
 // /events or /events?tab=recognition
 function EventsRoute() {
   const [params] = useSearchParams()
@@ -608,7 +624,18 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
           <Route path="/branch/new" element={<NewBranchPage onBack={() => navigate('/branch')} />} />
           <Route path="/branch/:branchId/edit" element={<EditBranchRoute />} />
           <Route path="/camera/*" element={<CameraPage />} />
-          <Route path="/events" element={<EventsRoute />} />
+          <Route
+            path="/edge-device"
+            element={
+              <EdgeDevicePage
+                onAdd={() => navigate('/edge-device/new')}
+                onManage={(id) => navigate(`/edge-device/${id}/edit`)}
+              />
+            }
+          />
+          <Route path="/edge-device/new" element={<NewEdgeDevicePage onBack={() => navigate('/edge-device')} />} />
+          <Route path="/edge-device/:edgeDeviceId/edit" element={<EditEdgeDeviceRoute />} />
+          <Route path="/eventhistory" element={<EventsRoute />} />
           <Route path="/members" element={<MemberPage />} />
           <Route path="/transactions" element={<TransactionsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
