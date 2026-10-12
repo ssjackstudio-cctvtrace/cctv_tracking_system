@@ -1,32 +1,30 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
-import type { Branch, Camera, EdgeDevice } from './types'
+import type { Branch, Camera } from './types'
+import { EDGE_COLUMNS, type EdgeDeviceRow } from './Edgedevicepage'
 import './Branches.css'
 import './Newbranch.css'
 import './Camera.css'
-
-// "+ New AI Edge box" option in the AI Edge box list
-const NEW_EDGE = '__new__'
 
 type Notice = { type: 'success' | 'error'; text: string }
 
 // Tapo shows the MAC as AA-BB-CC-DD-EE-FF (or with ":"). Store it one way so the
 // UNIQUE check on camera.mac_address also catches the same camera typed differently.
-function normaliseMac(value: string): string | null {
+export function normaliseMac(value: string): string | null {
   const hex = value.replace(/[^0-9a-f]/gi, '').toUpperCase()
   if (hex.length !== 12) return null
   return hex.match(/../g)!.join('-')
 }
 
 // Plain IPv4 such as 192.168.1.50 (the camera's address on the shop network)
-function isIpv4(value: string): boolean {
+export function isIpv4(value: string): boolean {
   const parts = value.split('.')
   return parts.length === 4 && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255)
 }
 
 // Friendly text for "duplicate value" errors from UNIQUE columns
-function saveError(message: string, code?: string): string {
+export function saveError(message: string, code?: string): string {
   if (code !== '23505') return message
   if (message.includes('camera_name')) return 'This camera name is already used. Choose another name.'
   if (message.includes('mac_address')) return 'A camera with this MAC address is already saved.'
@@ -35,7 +33,7 @@ function saveError(message: string, code?: string): string {
 }
 
 type Props = {
-  branches: Branch[]
+  branches: Branch[] // not used any more: the branch comes from the AI edge box
   defaultBranchId: string
   onBack: () => void
   onSaved: (branchId: string, camera: Camera) => void
@@ -44,11 +42,9 @@ type Props = {
 // Add a camera to an existing branch. Values come from the Tapo app:
 // camera → ⚙️ Settings → Device Info. The camera's username / password are NOT
 // saved here; they stay in edge/.env on the AI edge box.
-export default function NewCameraPage({ branches, defaultBranchId, onBack, onSaved }: Props) {
-  const [branchId, setBranchId] = useState(defaultBranchId || branches[0]?.branch_id || '')
-  const [edgeDevices, setEdgeDevices] = useState<EdgeDevice[]>([])
+export default function NewCameraPage({ defaultBranchId, onBack, onSaved }: Props) {
+  const [edgeDevices, setEdgeDevices] = useState<EdgeDeviceRow[]>([])
   const [edgeChoice, setEdgeChoice] = useState('')
-  const [newEdgeName, setNewEdgeName] = useState('')
 
   const [cameraName, setCameraName] = useState('')
   const [tapoModel, setTapoModel] = useState('')
@@ -60,16 +56,18 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
   const [notice, setNotice] = useState<Notice | null>(null)
   const [savedEdgeId, setSavedEdgeId] = useState('')
 
-  const branch = useMemo(() => branches.find((b) => b.branch_id === branchId), [branches, branchId])
+  // The branch is not chosen here: it is the branch of the selected AI edge box
+  const edge = useMemo(() => edgeDevices.find((d) => d.edge_device_id === edgeChoice), [edgeDevices, edgeChoice])
+  const branchId = edge?.branch_id ?? ''
 
-  // AI Edge boxes of the chosen branch. None yet → offer to create one.
+  // All AI edge boxes with their branch:
+  //   select ed.*, b.branch_name from edge_device ed join branch b on ed.branch_id = b.branch_id
+  // First pick: a box in the branch shown on the Camera page, else the first box.
   useEffect(() => {
-    if (!branchId) return
     let cancelled = false
     supabase
       .from(TABLES.edgeDevice)
-      .select('edge_device_id, branch_id, device_name, status, last_heartbeat, created_at')
-      .eq('branch_id', branchId)
+      .select(EDGE_COLUMNS)
       .order('device_name', { ascending: true })
       .then(({ data, error }) => {
         if (cancelled) return
@@ -77,34 +75,23 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
           setNotice({ type: 'error', text: `Could not load AI edge boxes: ${error.message}` })
           return
         }
-        const rows = (data ?? []) as EdgeDevice[]
+        const rows = (data ?? []) as unknown as EdgeDeviceRow[]
         setEdgeDevices(rows)
-        setEdgeChoice(rows[0]?.edge_device_id ?? NEW_EDGE)
+        const first = rows.find((d) => d.branch_id === defaultBranchId) ?? rows[0]
+        setEdgeChoice(first?.edge_device_id ?? '')
       })
     return () => {
       cancelled = true
     }
-  }, [branchId])
-
-  // Suggest a box name such as EDGE-AEON-BUKIT-TINGGI-01 for the chosen branch
-  useEffect(() => {
-    if (edgeChoice !== NEW_EDGE || !branch) return
-    const slug = branch.branch_name
-      .toUpperCase()
-      .replace(/^JACKSTUDIO\s*@\s*/, '')
-      .replace(/[^A-Z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-    setNewEdgeName(`EDGE-${slug}-01`)
-  }, [edgeChoice, branch])
+  }, [defaultBranchId])
 
   async function handleSave() {
     const fail = (text: string) => setNotice({ type: 'error', text })
     setNotice(null)
 
     const camera_name = cameraName.trim()
-    if (!branchId) return fail('Choose the branch.')
+    if (!edgeChoice) return fail('Choose the AI edge box. None yet? Add one on the AI Edge Device page.')
     if (!camera_name) return fail('Enter the camera name (Device name in the Tapo app).')
-    if (edgeChoice === NEW_EDGE && !newEdgeName.trim()) return fail('Enter a name for the new AI edge box.')
 
     let mac_address: string | null = null
     if (mac.trim()) {
@@ -116,25 +103,9 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
 
     setSaving(true)
 
-    // 1. AI Edge box: use the chosen one, or create it first
-    let edge_device_id = edgeChoice
-    if (edgeChoice === NEW_EDGE) {
-      const { data, error } = await supabase
-        .from(TABLES.edgeDevice)
-        .insert({ branch_id: branchId, device_name: newEdgeName.trim() })
-        .select('edge_device_id, branch_id, device_name, status, last_heartbeat, created_at')
-        .single()
-      if (error || !data) {
-        setSaving(false)
-        return fail(`Failed to save the AI edge box: ${saveError(error?.message ?? 'no row returned', error?.code)}`)
-      }
-      const created = data as EdgeDevice
-      edge_device_id = created.edge_device_id
-      setEdgeDevices((prev) => [...prev, created])
-      setEdgeChoice(created.edge_device_id) // a retry after a camera error reuses this box
-    }
+    const edge_device_id = edgeChoice
 
-    // 2. Camera
+    // Camera
     const { data, error } = await supabase
       .from(TABLES.camera)
       .insert({
@@ -198,41 +169,25 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
       <section className="ds-panel nb-panel cam-form">
         <div className="nb-grid">
           <label className="nb-field">
-            <span>Branch</span>
-            <select value={branchId} disabled={saved} onChange={(e) => setBranchId(e.target.value)}>
-              {branches.map((b) => (
-                <option key={b.branch_id} value={b.branch_id}>
-                  {b.branch_name}
-                </option>
-              ))}
-            </select>
-            <small className="nb-hint">Branch not listed? Add it first on the Branch page.</small>
-          </label>
-
-          <label className="nb-field">
-            <span>AI Edge box</span>
+            <span>AI Edge Box</span>
             <select value={edgeChoice} disabled={saved} onChange={(e) => setEdgeChoice(e.target.value)}>
+              {edgeDevices.length === 0 && <option value="">No AI edge boxes yet</option>}
               {edgeDevices.map((d) => (
                 <option key={d.edge_device_id} value={d.edge_device_id}>
                   {d.device_name}
                 </option>
               ))}
-              <option value={NEW_EDGE}>+ New AI Edge box</option>
             </select>
-            <small className="nb-hint">The box in this branch that reads this camera's video.</small>
+            <small className="nb-hint">The box that reads this camera's video. Add boxes on the AI Edge Device page.</small>
           </label>
 
-          {edgeChoice === NEW_EDGE && (
-            <label className="nb-field nb-span2">
-              <span>New AI Edge box name</span>
-              <input
-                value={newEdgeName}
-                disabled={saved}
-                onChange={(e) => setNewEdgeName(e.target.value)}
-                placeholder="e.g. EDGE-AEON-BUKIT-TINGGI-01"
-              />
-            </label>
-          )}
+          <label className="nb-field">
+            <span>Branch</span>
+            <select value={branchId} disabled>
+              <option value={branchId}>{edge?.branch?.branch_name ?? '—'}</option>
+            </select>
+            <small className="nb-hint">Set by the AI edge box selected.</small>
+          </label>
 
           <label className="nb-field">
             <span>Camera name (Tapo device name)</span>
@@ -284,7 +239,7 @@ export default function NewCameraPage({ branches, defaultBranchId, onBack, onSav
             Done
           </button>
         ) : (
-          <button type="button" className="nb-save" disabled={saving || branches.length === 0} onClick={handleSave}>
+          <button type="button" className="nb-save" disabled={saving || edgeDevices.length === 0} onClick={handleSave}>
             {saving ? 'Saving…' : 'Save camera'}
           </button>
         )}

@@ -5,6 +5,7 @@ import { TABLES, isOnline, useTable } from './Usetable'
 import type { Branch, Camera, EdgeDevice } from './types'
 import CameraDetails, { CameraScreen, canCapture, formatLongDate } from './Cameradetails'
 import NewCameraPage from './Newcamerapage'
+import EditCameraPage from './Editcamerapage'
 import './Camera.css'
 
 // Branch selected when the page opens
@@ -33,11 +34,13 @@ export default function CameraPage() {
   const edges = useTable<EdgeDevice>(TABLES.edgeDevice, 'device_name', true, 500)
   const [branchId, setBranchId] = useState('')
   const [expanded, setExpanded] = useState(false)
-  // Sub-pages have their own address: /camera/new and /camera/<camera id>
+  // Sub-pages have their own address: /camera/new, /camera/<camera id> and /camera/<camera id>/edit
   const navigate = useNavigate()
   const sub = useParams()['*'] ?? ''
   const adding = sub === 'new'
-  const selectedId = sub && !adding ? sub : null
+  const [subId, subAction] = sub.split('/')
+  const editing = subAction === 'edit'
+  const selectedId = sub && !adding ? subId : null
 
   // Pick AEON Bukit Tinggi by default, or the first branch if it does not exist
   useEffect(() => {
@@ -93,7 +96,27 @@ export default function CameraPage() {
   }
 
   const selected = cams.rows.find((c) => c.camera_id === selectedId)
-  if (selected) return <CameraDetails camera={selected} onBack={() => navigate('/camera')} />
+  if (selected && editing) {
+    return (
+      <EditCameraPage
+        camera={selected}
+        onBack={() => navigate(`/camera/${selected.camera_id}`)}
+        onSaved={() => {
+          edges.reload() // the camera may now be in another branch
+          reload()
+        }}
+      />
+    )
+  }
+  if (selected) {
+    return (
+      <CameraDetails
+        camera={selected}
+        onBack={() => navigate('/camera')}
+        onEdit={() => navigate(`/camera/${selected.camera_id}/edit`)}
+      />
+    )
+  }
   if (selectedId && cams.loading && cams.rows.length === 0) return <p className="ds-lead">Loading camera…</p>
 
   // select ca.* from camera ca join edge_device ed on ca.edge_device_id = ed.edge_device_id

@@ -322,7 +322,15 @@ function CountLineEditor({ camera }: { camera: Camera }) {
   )
 }
 
-export default function CameraDetails({ camera, onBack }: { camera: Camera; onBack: () => void }) {
+export default function CameraDetails({
+  camera,
+  onBack,
+  onEdit,
+}: {
+  camera: Camera
+  onBack: () => void
+  onEdit: () => void
+}) {
   const people = usePeopleCount(camera.camera_id)
   const { info, error: infoError } = useCameraInfo(camera.camera_id)
   const cam = info ?? { ...camera, edge_device: null } // until the query answers
@@ -359,6 +367,9 @@ export default function CameraDetails({ camera, onBack }: { camera: Camera; onBa
         <div className="cam-info-cards">
           <InfoCard title="Camera" rows={cameraRows} />
           <InfoCard title="AI Edge Box" rows={edgeRows} />
+          <button type="button" className="cam-edit" onClick={onEdit}>
+            Edit Camera
+          </button>
           {infoError && <p className="cam-error">Could not load camera details: {infoError}</p>}
         </div>
       </div>

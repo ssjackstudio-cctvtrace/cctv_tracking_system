@@ -471,3 +471,25 @@
   background: #f1f5f9;
   word-break: break-all;
 }
+
+/* Edit Camera button under the AI Edge Box card */
+.cam-edit {
+  align-self: flex-end;
+  padding: 0.6rem 1.2rem;
+  border: 0;
+  border-radius: 6px;
+  background: #000;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cam-edit:hover {
+  background: #222;
+}
+
+.cam-edit:focus-visible {
+  outline: 2px solid var(--ds-lens);
+  outline-offset: 2px;
+}

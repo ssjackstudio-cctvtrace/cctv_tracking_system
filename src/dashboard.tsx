@@ -23,6 +23,7 @@ const SUB_TITLES: { match: RegExp; title: string }[] = [
   { match: /^\/branch\/[^/]+\/edit$/, title: 'Edit Branch' },
   { match: /^\/camera\/new$/, title: 'Add Camera' },
   { match: /^\/camera\/[^/]+$/, title: 'Camera Details' },
+  { match: /^\/camera\/[^/]+\/edit$/, title: 'Edit Camera' },
   { match: /^\/edge-device\/new$/, title: 'New AI Edge Box' },
   { match: /^\/edge-device\/[^/]+\/edit$/, title: 'Edit AI Edge Box' },
 ]
