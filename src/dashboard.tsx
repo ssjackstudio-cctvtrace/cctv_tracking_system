@@ -15,7 +15,7 @@ import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
-type PageKey = 'dashboard' | 'branch' | 'camera' | 'edge-device' | 'events' | 'members' | 'transactions'
+type PageKey = 'dashboard' | 'branch' | 'camera' | 'edge-device' | 'eventhistory' | 'members' | 'transactions'
 
 // Titles for sub-pages (the sidebar keeps the parent page highlighted on these)
 const SUB_TITLES: { match: RegExp; title: string }[] = [
@@ -33,7 +33,7 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'branch', label: 'Branch', icon: <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" /> },
   { key: 'edge-device', label: 'AI Edge Device', icon: <path d="M6 6h12v12H6zM9.5 9.5h5v5h-5zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /> },
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
-  { key: 'events', label: 'Event History', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
+  { key: 'eventhistory', label: 'Event History', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
   { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
@@ -446,7 +446,7 @@ function EditEdgeDeviceRoute() {
   return <EditEdgeDevicePage edgeDeviceId={edgeDeviceId} onBack={() => navigate('/edge-device')} />
 }
 
-// /events or /events?tab=recognition
+// /eventhistory or /eventhistory?tab=recognition
 function EventsRoute() {
   const [params] = useSearchParams()
   const tab: EventTab = params.get('tab') === 'recognition' ? 'recognition' : 'cctv'
@@ -608,7 +608,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
             path="/dashboard"
             element={
               <Overview
-                onMoreEvents={(tab) => navigate(tab === 'recognition' ? '/events?tab=recognition' : '/events')}
+                onMoreEvents={(tab) => navigate(tab === 'recognition' ? '/eventhistory?tab=recognition' : '/eventhistory')}
               />
             }
           />
