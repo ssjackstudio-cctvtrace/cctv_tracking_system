@@ -462,7 +462,7 @@ function LiveClock() {
   }, [])
   const pad = (n: number) => String(n).padStart(2, '0')
   const month = now.toLocaleString('en-GB', { month: 'long' })
-  const text = `${pad(now.getDate())} ${month} ${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}.${pad(now.getSeconds())}`
+  const text = `${pad(now.getDate())} ${month} ${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
   return <time className="ds-clock" dateTime={now.toISOString()}>{text}</time>
 }
 
