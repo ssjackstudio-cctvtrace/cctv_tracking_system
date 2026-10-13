@@ -154,10 +154,10 @@ export default function EventsPage({ initialTab = 'cctv' }: { initialTab?: Event
       <p className="ds-lead">Latest activity detected by the cameras.</p>
       <div className="tabs">
         <button className={tab === 'cctv' ? 'active' : ''} onClick={() => setTab('cctv')}>
-          CCTV Events
+          CCTV Event
         </button>
         <button className={tab === 'recognition' ? 'active' : ''} onClick={() => setTab('recognition')}>
-          Recognition Events
+          Recognition Event
         </button>
       </div>
       {tab === 'cctv' ? <CctvEventsTable /> : <RecognitionEventsTable />}
