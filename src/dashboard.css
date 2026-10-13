@@ -126,6 +126,18 @@
 }
 .ds-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ds-signal); }
 
+/* Current time, under "System online", right aligned */
+.ds-clock {
+  display: block;
+  padding: 0 0.75rem 0.75rem;
+  text-align: right;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: #9db2bb;
+}
+.ds--collapsed .ds-clock { display: none; }
+@media (max-width: 760px) { .ds-clock { display: none; } }
+
 /* Signed-in admin + sign out, at the bottom of the sidebar */
 .ds-account {
   display: flex;

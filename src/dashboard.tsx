@@ -453,6 +453,19 @@ function EventsRoute() {
   return <EventsPage key={tab} initialTab={tab} />
 }
 
+// Current time in the sidebar, ticking every second: DD Month YYYY HH:MM.SS (24 hours)
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const month = now.toLocaleString('en-GB', { month: 'long' })
+  const text = `${pad(now.getDate())} ${month} ${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}.${pad(now.getSeconds())}`
+  return <time className="ds-clock" dateTime={now.toISOString()}>{text}</time>
+}
+
 type DashboardProps = { adminName: string; onSignOut: () => void }
 
 export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
@@ -592,6 +605,7 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
         </nav>
 
         <div className="ds-live"><i /> System online</div>
+        <LiveClock />
 
         <div className="ds-account">
           <span className="ds-account-name" title={adminName}>{adminName}</span>
