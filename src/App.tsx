@@ -72,11 +72,11 @@ export default function App() {
     const expiresAt = readExpiresAt()
     if (!expiresAt || Date.now() >= expiresAt) {
       // Inactive for 10 minutes or more: end that session on the server too
+      // (quietly: the message only shows when the session times out while the site is open)
       supabase.rpc('admin_logout').then(() => {
         setAdminToken(null)
         saveToken(null)
         saveExpiresAt(null)
-        if (expiresAt) setSessionNotice(SESSION_ENDED_MESSAGE)
         setReady(true)
       })
       return
