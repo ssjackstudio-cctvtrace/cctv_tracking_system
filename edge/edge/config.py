@@ -29,6 +29,11 @@ class Settings:
     anchor: str  # "bottom" (feet) or "center"
     snapshot_seconds: float
     snapshot_bucket: str
+    live_port: int  # live video server (0 = off)
+    live_host: str
+    live_public_url: str  # e.g. wss://js-abt-edge-01.tailxxxx.ts.net (Tailscale Funnel)
+    live_max_fps: float
+    live_quality: int
 
 
 def load_settings(offline: bool = False) -> Settings:
@@ -46,6 +51,11 @@ def load_settings(offline: bool = False) -> Settings:
         anchor=os.getenv("ANCHOR", "bottom"),
         snapshot_seconds=float(os.getenv("SNAPSHOT_SECONDS", "5")),
         snapshot_bucket=os.getenv("SNAPSHOT_BUCKET", "camera-snapshots"),
+        live_port=int(os.getenv("LIVE_PORT", "8090")),
+        live_host=os.getenv("LIVE_HOST", "127.0.0.1"),
+        live_public_url=os.getenv("LIVE_PUBLIC_URL", "").strip().rstrip("/"),
+        live_max_fps=float(os.getenv("LIVE_MAX_FPS", "15")),
+        live_quality=int(os.getenv("LIVE_QUALITY", "60")),
     )
 
 

@@ -152,6 +152,52 @@
   font-size: 0.95rem;
 }
 
+/* Live video (drawn on a canvas, on top of the snapshot until it plays) */
+.cam-live-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.cam-live-canvas--hidden {
+  visibility: hidden;
+}
+
+.cam-live-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 8px;
+}
+
+.cam-live-bar .cam-count-note {
+  margin: 0;
+}
+
+.cam-live-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: #334155;
+  cursor: pointer;
+}
+
+/* Latest records table (Camera Details page) */
+.cam-records {
+  margin: 24px 0;
+}
+
+.cam-records h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
 /* Camera Details page */
 .cam-back {
   margin-bottom: 12px;
@@ -357,30 +403,65 @@
   vector-effect: non-scaling-stroke;
 }
 
-.cam-line-arrow {
-  stroke: #22c55e;
-  stroke-width: 3;
+.cam-line-path {
+  fill: none;
+}
+
+/* Next segment, from the last dot to the mouse */
+.cam-line-next {
+  stroke: #facc15;
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
   vector-effect: non-scaling-stroke;
 }
 
-.cam-line-arrowhead {
-  fill: #22c55e;
+/* Line stretched to the picture border (splits the picture in two areas) */
+.cam-line-stretch {
+  stroke: #facc15;
+  stroke-width: 2;
+  stroke-dasharray: 3 5;
+  opacity: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-zone-in {
+  fill: rgba(22, 163, 74, 0.28);
+}
+
+.cam-zone-out {
+  fill: rgba(249, 115, 22, 0.18);
+}
+
+.cam-zone-hover {
+  fill: rgba(255, 255, 255, 0.22);
 }
 
 .cam-line-dot {
-  fill: #facc15;
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #10202b;
+  border-radius: 50%;
+  background: #facc15;
+  pointer-events: none;
 }
 
-.cam-line-in {
+.cam-line-in,
+.cam-line-out {
   position: absolute;
-  transform: translate(-50%, -140%);
-  padding: 1px 6px;
+  transform: translate(-50%, -50%);
+  padding: 2px 8px;
   border-radius: 4px;
-  background: #22c55e;
+  background: #16a34a;
   color: #fff;
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   font-weight: 700;
   pointer-events: none;
+}
+
+.cam-line-out {
+  background: #f97316;
 }
 
 /* Toolbar buttons: Expand view + Add camera */

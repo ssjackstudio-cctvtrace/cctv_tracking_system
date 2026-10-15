@@ -40,6 +40,7 @@ export type EdgeDevice = {
   device_name: string
   status: 'Online' | 'Offline'
   last_heartbeat: string | null
+  live_url?: string | null // live video address (supabase/live_video.sql), set by the edge box
   created_at: string
 }
 
@@ -50,7 +51,12 @@ export type EdgeDeviceEditable = Pick<EdgeDevice, 'branch_id' | 'device_name'>
 // still fit if the stream resolution changes. Keep this shape the same as
 // what the edge box reads.
 export type Point = { x: number; y: number }
-export type CountLine = { start: Point; end: Point }
+// Count line: many dots joined into one line; in_zone is the area labelled
+// "In" (the line stretched to the picture border splits the picture in two).
+// The older two-point line { start, end } is still read.
+export type CountLine =
+  | { points: Point[]; in_point: Point; in_zone: Point[] }
+  | { start: Point; end: Point }
 export type CounterZone = { points: Point[] }
 
 export type Camera = {

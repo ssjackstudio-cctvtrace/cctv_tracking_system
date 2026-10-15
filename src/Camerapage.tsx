@@ -18,10 +18,16 @@ const LIST_REFRESH_MS = 15_000
 // camera for this long (box off or offline), the website sets it Inactive.
 const STALE_MINUTES = 3
 
+// Live video in the grid: smaller and fewer pictures per second than the
+// details page, to save the shop's mobile data with 4 cameras at once
+const GRID_VIDEO_WIDTH = 480
+const GRID_VIDEO_FPS = 8
+
 // Why a screen shows (or does not show) a picture, under each camera
-function screenStatus(cam: Camera): { text: string; tone: 'ok' | 'wait' | 'off' } {
+function screenStatus(cam: Camera, liveUrl?: string | null): { text: string; tone: 'ok' | 'wait' | 'off' } {
   if (cam.active_status !== 'Active') return { text: 'Inactive: camera closed or not connected', tone: 'off' }
   if (!cam.edge_device_id) return { text: 'No edge box linked to this camera', tone: 'off' }
+  if (liveUrl) return { text: 'Live video', tone: 'ok' }
   if (canCapture(cam)) return { text: 'Live: picture updates every few seconds', tone: 'ok' }
   if (!cam.last_snapshot_url) return { text: 'Waiting for the edge box to send the first picture', tone: 'wait' }
   return { text: `Edge box offline (last seen ${formatLongDate(cam.last_seen_at)})`, tone: 'off' }
@@ -95,6 +101,9 @@ export default function CameraPage() {
     )
   }
 
+  // Live video address of each camera's edge box (edge_device.live_url)
+  const liveUrlOf = (cam: Camera) => edges.rows.find((d) => d.edge_device_id === cam.edge_device_id)?.live_url ?? null
+
   const selected = cams.rows.find((c) => c.camera_id === selectedId)
   if (selected && editing) {
     return (
@@ -112,6 +121,7 @@ export default function CameraPage() {
     return (
       <CameraDetails
         camera={selected}
+        liveUrl={liveUrlOf(selected)}
         onBack={() => navigate('/camera')}
         onEdit={() => navigate(`/camera/${selected.camera_id}/edit`)}
       />
@@ -165,8 +175,10 @@ export default function CameraPage() {
           {branchCams.map((cam) => (
             <div className="cam-card" key={cam.camera_id}>
               <div className="cam-card-title">{cam.camera_name}</div>
-              <CameraScreen camera={cam} />
-              <span className={`cam-status cam-status--${screenStatus(cam).tone}`}>{screenStatus(cam).text}</span>
+              <CameraScreen camera={cam} liveUrl={liveUrlOf(cam)} width={GRID_VIDEO_WIDTH} fps={GRID_VIDEO_FPS} />
+              <span className={`cam-status cam-status--${screenStatus(cam, liveUrlOf(cam)).tone}`}>
+                {screenStatus(cam, liveUrlOf(cam)).text}
+              </span>
               {/* Shown for every camera, even before the edge box sends a picture */}
               <button
                 type="button"

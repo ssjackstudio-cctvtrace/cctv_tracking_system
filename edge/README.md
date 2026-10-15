@@ -17,10 +17,11 @@ Tapo camera ──RTSP (shop network)──► main.py ──► Supabase (visit
 |---|---|
 | `main.py` | Starts everything; reloads camera settings + heartbeat every 60 s |
 | `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → line counter → rows |
-| `edge/line_counter.py` | Decides In / Out when a person crosses `camera.count_line` |
+| `edge/line_counter.py` | Decides In / Out from the count line's In / Out areas (`camera.count_line`) |
 | `edge/demographics.py` | Estimated gender + age from each person's face |
 | `download_models.py` | Downloads the face, gender and age models into `models/` |
 | `edge/uploader.py` | Sends rows (retries while the internet is down) and snapshots |
+| `edge/live_server.py` | Live video + people boxes for the website (WebSocket, no extra install) |
 | `edge/supa.py` | Small Supabase client using the secret key |
 | `edge/config.py` | Reads `.env`, builds the RTSP link |
 | `cctv-edge.service` | Auto-start on the edge box |
@@ -137,11 +138,59 @@ within 60 s.
 
 ## How In / Out is decided
 
-The count line has a direction. On the Camera page (and the `--show`
-window) a green arrow marks the **In** side: crossing towards the arrow is
-**In**, crossing away from it is **Out**. **Flip direction** on the
-Camera page swaps them. The point that must cross is the person's feet
-(`ANCHOR=bottom`); for a camera looking straight down use `ANCHOR=center`.
+On the camera details page, **Edit count line**: click as many dots as you
+need across the shop entrance, **Save line**, then click the area that is
+inside the shop. That area is **In** (green), the other is **Out** (orange);
+the line is stretched to the picture border at both ends to split the
+picture. **Save**.
+
+- **In**: a person seen in the Out area whose feet (both bottom corners of
+  their box) are then **completely** inside the In area for a few frames.
+- **Out**: only for a person already counted In, whose feet are then
+  completely back in the Out area. People never counted In are not counted Out.
+- **Full body**: people whose feet are cut off by the bottom of the picture,
+  or whose box is not tall enough (`FULL_BODY_RATIO`, default 1.2), are
+  followed but not counted until their full body is seen.
+- For a camera looking straight down use `ANCHOR=center` (the box middle is
+  used instead of the feet).
+
+Older two-point lines still work (In = the side the green arrow pointed to).
+
+## Live video (Camera page and camera details page)
+
+The box streams live video (8 pictures/s per camera on the Camera page, 12
+on the details page) with a box around each counted person. It only sends
+pictures while someone has the page open in a visible browser tab, so it
+uses no mobile data when nobody watches.
+
+**Mobile data (SIM router):** live video is heavy. Roughly 45 MB per minute
+with the Camera page open (4 cameras), 30 MB per minute on one camera's
+details page, i.e. about 2.5 GB per hour of watching the Camera page. Close
+the tab when done. To use less, lower `LIVE_QUALITY` (e.g. 45) or
+`LIVE_MAX_FPS` (e.g. 6) in `.env`. Counting itself does not use the video and
+is not affected.
+
+Once per box:
+
+1. Supabase → SQL Editor → run `supabase/live_video.sql`.
+2. On the box, give the live video a public https address with Tailscale Funnel:
+   ```bash
+   sudo tailscale funnel --bg 8090
+   tailscale funnel status          # shows https://js-abt-edge-01.<your-tailnet>.ts.net
+   ```
+   The first time, it prints a link to turn on HTTPS / Funnel for your
+   tailnet: open it, allow it, then run the command again.
+3. `nano .env` → `LIVE_PUBLIC_URL=https://js-abt-edge-01.<your-tailnet>.ts.net`
+4. `sudo systemctl restart cctv-edge`. Within a minute the Camera page plays
+   live video. Check from any browser: `https://…ts.net/health` shows
+   `live video ok, 4 camera(s)`.
+
+Only signed-in website admins can watch (the box checks the website's sign-in
+with Supabase). Without `LIVE_PUBLIC_URL` the pages keep showing the snapshot
+every few seconds, as before.
+
+When a person is counted, the box tells the open camera details page at
+once, so the counts and records update without refreshing.
 
 ## Gender and age (estimated)
 

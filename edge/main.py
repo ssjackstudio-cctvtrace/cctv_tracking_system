@@ -21,6 +21,7 @@ os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 from edge.camera_worker import CameraWorker  # noqa: E402
 from edge.config import load_settings, rtsp_url  # noqa: E402
+from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
 from edge.uploader import SnapshotUploader, Writer  # noqa: E402
 
@@ -60,6 +61,16 @@ def main() -> None:
         snapshots = SnapshotUploader(supa, settings.snapshot_bucket, settings.snapshot_seconds)
         snapshots.start()
 
+    workers: dict[str, CameraWorker] = {}
+
+    # Live video for the website (only sends pictures while someone watches)
+    live = None
+    if supa and settings.live_port:
+        live = LiveServer(settings.live_host, settings.live_port, lambda: dict(workers),
+                          supa.admin_ok, settings.live_max_fps, settings.live_quality)
+        live.start()
+        writer.on_saved = live.notify  # a row was saved → the website reloads at once
+
     def load_cameras() -> list[dict]:
         if supa is None:
             x1, y1, x2, y2 = (float(v) for v in (args.line or "0.1,0.6,0.9,0.6").split(","))
@@ -79,8 +90,6 @@ def main() -> None:
         if args.source:
             return int(args.source) if args.source.isdigit() else args.source
         return rtsp_url(settings, cam)
-
-    workers: dict[str, CameraWorker] = {}
 
     def sync_workers() -> None:
         cameras = {c["camera_id"]: c for c in load_cameras()}
@@ -109,6 +118,12 @@ def main() -> None:
             return
         supa.update("edge_device", {"status": "Online", "last_heartbeat": utc_now()},
                     edge_device_id=f"eq.{settings.edge_device_id}")
+        if settings.live_public_url:  # tell the website where to watch the live video
+            try:
+                supa.update("edge_device", {"live_url": settings.live_public_url},
+                            edge_device_id=f"eq.{settings.edge_device_id}")
+            except Exception as exc:
+                log.warning("Could not save live_url (run supabase/live_video.sql once): %s", exc)
         for cam_id, w in workers.items():
             if w.active_status() == "Active":
                 supa.update("camera", {"last_seen_at": utc_now()}, camera_id=f"eq.{cam_id}")

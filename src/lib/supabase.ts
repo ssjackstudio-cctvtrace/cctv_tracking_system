@@ -13,6 +13,8 @@ let adminToken: string | null = null
 export function setAdminToken(token: string | null) {
   adminToken = token
 }
+// Also used to sign in to the edge box's live video
+export const getAdminToken = () => adminToken
 
 // Publishable key only. Safe in the browser because RLS protects the data.
 export const supabase = createClient(url, anonKey, {

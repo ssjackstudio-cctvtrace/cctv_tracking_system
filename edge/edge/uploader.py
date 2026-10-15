@@ -2,7 +2,8 @@
 on the internet.
 
 - Writer: inserts visit / cctv_event rows (and updates a visit's gender / age)
-  in order, retrying while offline.
+  in order, retrying while offline. After each row is saved it calls
+  on_saved(camera_id), so the website's live video can reload at once.
 - Snapshots: uploads the newest picture of each camera and keeps
   camera.last_snapshot_url pointing at a signed link.
 """
@@ -13,7 +14,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .supa import Supabase, SupabaseError
 
@@ -29,31 +30,34 @@ class Writer(threading.Thread):
     def __init__(self, supa: Supabase | None, max_pending: int = 50_000):
         super().__init__(name="writer", daemon=True)
         self.supa = supa
-        # (table, row, filters): filters None = insert row, otherwise update with these filters
-        self.jobs: "queue.Queue[tuple[str, dict[str, Any], dict[str, str] | None]]" = queue.Queue(maxsize=max_pending)
+        self.on_saved: Callable[[str | None], None] | None = None  # set by main (live video)
+        # (table, row, filters, camera_id): filters None = insert row, otherwise update with these filters
+        self.jobs: "queue.Queue[tuple[str, dict[str, Any], dict[str, str] | None, str | None]]" = queue.Queue(
+            maxsize=max_pending
+        )
 
-    def insert(self, table: str, row: dict[str, Any]) -> None:
+    def insert(self, table: str, row: dict[str, Any], camera_id: str | None = None) -> None:
         if self.supa is None:  # --offline
             log.info("offline: would insert into %s %s", table, row)
             return
         try:
-            self.jobs.put_nowait((table, row, None))
+            self.jobs.put_nowait((table, row, None, camera_id or row.get("camera_id")))
         except queue.Full:
             log.error("Too many unsent rows; dropping %s row", table)
 
     # Queued after the insert it belongs to, so the row always exists first
-    def update(self, table: str, values: dict[str, Any], **filters: str) -> None:
+    def update(self, table: str, values: dict[str, Any], camera_id: str | None = None, **filters: str) -> None:
         if self.supa is None:  # --offline
             log.info("offline: would update %s %s where %s", table, values, filters)
             return
         try:
-            self.jobs.put_nowait((table, values, filters))
+            self.jobs.put_nowait((table, values, filters, camera_id))
         except queue.Full:
             log.error("Too many unsent rows; dropping %s update", table)
 
     def run(self) -> None:
         while True:
-            table, row, filters = self.jobs.get()
+            table, row, filters, camera_id = self.jobs.get()
             delay = 2.0
             while True:
                 try:
@@ -61,6 +65,11 @@ class Writer(threading.Thread):
                         self.supa.insert(table, row)  # type: ignore[union-attr]
                     else:
                         self.supa.update(table, row, **filters)  # type: ignore[union-attr]
+                    if self.on_saved:
+                        try:
+                            self.on_saved(camera_id)
+                        except Exception:
+                            pass
                     break
                 except SupabaseError as exc:
                     if exc.status == 409:  # already inserted by an earlier try

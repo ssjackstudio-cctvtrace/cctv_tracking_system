@@ -58,6 +58,25 @@ class Supabase:
         self._check(r)
         return r.json()
 
+    def admin_ok(self, token: str) -> bool:
+        """True when token is a signed-in website admin session (for live video).
+        Uses admin_check() like the website does; falls back to admin_session."""
+        try:
+            r = self.http.post(f"{self.url}/rest/v1/rpc/admin_check", json={},
+                               headers={"x-admin-token": token}, timeout=self.timeout)
+            if r.status_code < 400:
+                return bool(r.json())
+        except requests.RequestException:
+            pass
+        try:
+            from datetime import datetime, timezone
+
+            rows = self.select("admin_session", "admin_id", token=f"eq.{token}",
+                               expires_at=f"gt.{datetime.now(timezone.utc).isoformat()}")
+            return bool(rows)
+        except Exception:
+            return False
+
     # ---------- Storage ----------
     def upload(self, bucket: str, path: str, data: bytes, content_type: str = "image/jpeg") -> None:
         r = self.http.post(

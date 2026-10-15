@@ -1,9 +1,11 @@
-"""One thread per camera: read RTSP → detect + track people → count line
-crossings → queue visit / cctv_event rows for Supabase."""
+"""One thread per camera: read RTSP → detect + track people → count people
+walking into the In area → queue visit / cctv_event rows for Supabase.
+Also keeps each person's latest box for the website's live video."""
 
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import threading
 import time
@@ -36,6 +38,13 @@ TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age 
 # Camera power: while the camera is off (no answer on its RTSP port) the box
 # only knocks every few seconds; tracking starts by itself once it powers on.
 POWER_CHECK_SECONDS = 5
+
+# Full body: only people whose feet are visible take part in In / Out.
+# A box cut off by the bottom of the picture, or much wider than a standing
+# person (e.g. only the head and shoulders), is followed but not counted yet.
+FULL_BODY_RATIO = float(os.getenv("FULL_BODY_RATIO", "1.2"))  # box height / width
+BOTTOM_EDGE = 0.985  # box bottom below this share of the picture = feet cut off
+FOOT_INSET = 0.25  # feet = bottom corners of the box, moved in by this share of its width
 
 
 def camera_powered_on(source: str | int) -> bool:
@@ -118,7 +127,7 @@ class CameraWorker(threading.Thread):
         confidence: float,
         image_size: int,
         anchor: str,
-        insert: Callable[[str, dict[str, Any]], None],
+        insert: Callable[..., None],
         offer_snapshot: Callable[[str, bytes], None] | None,
         snapshot_seconds: float,
         show: bool = False,
@@ -144,6 +153,25 @@ class CameraWorker(threading.Thread):
         self._visits: dict[int, str] = {}  # tracker id → visit_id
         self._session = uuid.uuid4().hex[:6]  # tracker ids restart at 1 after a restart
         self.counts = {"In": 0, "Out": 0}
+        # Newest people boxes for the live video: [{"track", "b": [x1, y1, x2, y2] (0-1), "area"}]
+        self.live_boxes: list[dict[str, Any]] = []
+        self.live_frame_no = 0
+
+    def track_name(self, tid: int) -> str:
+        """Same text as visit.track_id, e.g. ABT-01-3f9a2c-7."""
+        return f"{self.camera['camera_name']}-{self._session}-{tid}"
+
+    def _feet(self, box: tuple[float, float, float, float], w: int, h: int) -> list[tuple[float, float]]:
+        """Points that must all be inside an area for it to count: both feet
+        (bottom corners of the box). Empty while the full body is not visible."""
+        x1, y1, x2, y2 = box
+        bw, bh = max(x2 - x1, 1.0), y2 - y1
+        if self.anchor == "center":  # camera looking straight down: no feet to see
+            return [(((x1 + x2) / 2) / w, ((y1 + y2) / 2) / h)]
+        if y2 >= h * BOTTOM_EDGE or bh / bw < FULL_BODY_RATIO:
+            return []
+        inset = bw * FOOT_INSET
+        return [((x1 + inset) / w, y2 / h), ((x2 - inset) / w, y2 / h)]
 
     # Called by main when the dashboard changes the camera (e.g. a new count line)
     def update_camera(self, camera: dict[str, Any]) -> None:
@@ -173,7 +201,7 @@ class CameraWorker(threading.Thread):
         self.grabber.start()
         log.info("started (model %s)", self.model_path)
         if self.counter.line is None:
-            log.warning("no count line yet — draw it on the Camera page; counting is paused")
+            log.warning("no count line / In area yet — draw it on the Camera page; counting is paused")
 
         last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
         paused = False  # True while the camera picture is closed (black)
@@ -210,6 +238,7 @@ class CameraWorker(threading.Thread):
                     log.info("camera picture closed — tracking paused")
                     paused = True
                 self.preview = None
+                self.live_boxes = []
                 continue
             paused = False
 
@@ -224,6 +253,7 @@ class CameraWorker(threading.Thread):
             )[0]
 
             points: dict[int, tuple[float, float]] = {}
+            feet: dict[int, list[tuple[float, float]]] = {}
             conf_by_id: dict[int, float] = {}
             box_by_id: dict[int, tuple[float, float, float, float]] = {}
             boxes = result.boxes
@@ -233,14 +263,26 @@ class CameraWorker(threading.Thread):
                 ):
                     y = y2 if self.anchor == "bottom" else (y1 + y2) / 2
                     points[tid] = (((x1 + x2) / 2) / w, y / h)
+                    feet[tid] = self._feet((x1, y1, x2, y2), w, h)
                     conf_by_id[tid] = conf
                     box_by_id[tid] = (x1, y1, x2, y2)
 
             if demo.enabled:
                 self._look_at_faces(demo, frame, box_by_id, now)
 
-            for crossing in self.counter.update(points, now=now):
+            for crossing in self.counter.update(feet, now=now):
                 self._record(crossing.track_id, crossing.direction, conf_by_id.get(crossing.track_id, 0.0))
+
+            # For the website's live video: where each person is in this frame
+            self.live_boxes = [
+                {
+                    "track": self.track_name(tid),
+                    "b": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
+                    "area": self.counter.area_of(tid),
+                }
+                for tid, (x1, y1, x2, y2) in box_by_id.items()
+            ]
+            self.live_frame_no = frame_no
 
             if self.offer_snapshot and now - last_snapshot >= self.snapshot_seconds:
                 ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -264,13 +306,13 @@ class CameraWorker(threading.Thread):
             row = {
                 "visit_id": visit_id,
                 "branch_id": cam["branch_id"],
-                "track_id": f"{cam['camera_name']}-{self._session}-{tid}",
+                "track_id": self.track_name(tid),
             }
             est = self._estimates.get(tid)
             if est and est.samples:
                 row.update(est.visit_fields())
                 self._sent[tid] = est.samples
-            self.insert("visit", row)
+            self.insert("visit", row, cam["camera_id"])
         self.insert(
             "cctv_event",
             {
@@ -321,22 +363,21 @@ class CameraWorker(threading.Thread):
         est, visit_id = self._estimates.get(tid), self._visits.get(tid)
         if not est or not visit_id or not self.update or est.samples <= self._sent.get(tid, 0):
             return
-        self.update("visit", est.visit_fields(), visit_id=f"eq.{visit_id}")
+        self.update("visit", est.visit_fields(), camera_id=self.camera["camera_id"], visit_id=f"eq.{visit_id}")
         self._sent[tid] = est.samples
 
     def _draw(self, img: np.ndarray, points: dict[int, tuple[float, float]]) -> np.ndarray:
         h, w = img.shape[:2]
         line = self.counter.line
         if line:
-            s = (int(line.start[0] * w), int(line.start[1] * h))
-            e = (int(line.end[0] * w), int(line.end[1] * h))
-            cv2.line(img, s, e, (0, 220, 255), 2)
-            mid = ((s[0] + e[0]) // 2, (s[1] + e[1]) // 2)
-            dx, dy = e[0] - s[0], e[1] - s[1]
-            n = max((dx * dx + dy * dy) ** 0.5, 1)
-            tip = (int(mid[0] + dy / n * 40), int(mid[1] - dx / n * 40))  # points to the "In" side
-            cv2.arrowedLine(img, mid, tip, (0, 200, 0), 2, tipLength=0.3)
-            cv2.putText(img, "IN", tip, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+            zone = np.array([(int(x * w), int(y * h)) for x, y in line.in_zone], np.int32)
+            tint = img.copy()
+            cv2.fillPoly(tint, [zone], (0, 160, 0))  # In area: green tint
+            img = cv2.addWeighted(tint, 0.18, img, 0.82, 0)
+            pts = np.array([(int(x * w), int(y * h)) for x, y in line.points], np.int32)
+            cv2.polylines(img, [pts], False, (0, 220, 255), 2)
+            cx, cy = zone.mean(axis=0).astype(int)
+            cv2.putText(img, "IN", (int(cx), int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 0), 2)
         for tid, (x, y) in points.items():
             cv2.circle(img, (int(x * w), int(y * h)), 5, (255, 80, 0), -1)
             est = self._estimates.get(tid)
