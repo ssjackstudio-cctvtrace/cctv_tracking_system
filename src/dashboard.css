@@ -252,6 +252,7 @@
 .ds-datefilter input[type='date'] { padding: 0.5rem 0.8rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; }
 .ds-datefilter input[type='date']:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
 .ds-datefilter-label { color: var(--ds-muted); font-size: 0.9rem; }
+.ds-datefilter-field { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; color: var(--ds-muted); }
 .ds-datefilter-clear { padding: 0.4rem 0.75rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer; }
 .ds-datefilter-clear:hover { background: var(--ds-paper); }
 @media (max-width: 760px) { .ds-datefilter { flex: 1 1 100%; } }

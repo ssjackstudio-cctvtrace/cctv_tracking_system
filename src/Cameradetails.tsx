@@ -310,9 +310,11 @@ function drawAreas(ctx: CanvasRenderingContext2D, areas: CountAreas) {
   ctx.globalAlpha = 1
   ctx.lineWidth = Math.max(2, W / 400)
   ctx.strokeStyle = '#facc15'
-  ctx.beginPath()
-  areas.points.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)))
-  ctx.stroke()
+  if (areas.points.length >= 2) {
+    ctx.beginPath()
+    areas.points.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)))
+    ctx.stroke()
+  }
   const font = Math.max(12, Math.round(H * 0.035))
   ctx.font = `700 ${font}px system-ui, sans-serif`
   ctx.textAlign = 'center'
@@ -321,6 +323,7 @@ function drawAreas(ctx: CanvasRenderingContext2D, areas: CountAreas) {
     ['IN', areas.inZone, IN_COLOR],
     ['OUT', areas.outZone, OUT_COLOR],
   ] as const) {
+    if (poly.length < 3) continue // whole screen is In: no Out area
     const c = pointInside(poly)
     const w = ctx.measureText(text).width + font * 0.6
     ctx.fillStyle = color
@@ -447,6 +450,19 @@ function CountLineEditor({
   const hoverArea = split && hover && !inPoint ? (inside(split[0], hover) ? split[0] : split[1]) : null
   const stretched = mode === 'label' && points.length >= 2 ? extendedLine(points) : null
 
+  // Camera inside the shop: everyone it sees is inside (no line, no Out area)
+  const saveWholeScreen = async () => {
+    setSaving(true)
+    setMessage('')
+    const { error } = await supabase.from(TABLES.camera).update({ count_line: { all_in: true } }).eq('camera_id', camera.camera_id)
+    setSaving(false)
+    if (error) setMessage(`Could not save: ${error.message}`)
+    else {
+      cancel()
+      setMessage('Saved: the whole screen is In. The edge box starts using it within a minute.')
+    }
+  }
+
   // No line: this camera stops counting (e.g. a camera that does not see the entrance)
   const remove = async () => {
     if (!window.confirm(`Remove the count line of ${camera.camera_name}? It will stop counting people.`)) return
@@ -489,13 +505,15 @@ function CountLineEditor({
   const note =
     mode === 'dots'
       ? points.length < 2
-        ? 'Click dots across the shop entrance, one after another. Add as many as you need.'
+        ? 'Click dots across the shop entrance, one after another. Add as many as you need. For a camera inside the shop that does not see the entrance, click "Whole screen is In".'
         : `${points.length} dots. Keep clicking to add more, or click "Save line" when the line is done.`
       : mode === 'label'
         ? inPoint
           ? 'Green = In (inside the shop), orange = Out. Click the other area or "Swap In / Out" to change, then Save.'
           : 'Now click the area that is INSIDE the shop. It becomes In; the other area becomes Out.'
-        : saved
+        : saved && saved.outZone.length === 0
+          ? 'Whole screen is In: everyone this camera sees is inside the shop, and keeps the same track ID they got on the other cameras. This camera does not count Out.'
+          : saved
           ? (background ? '' : 'The line and In / Out areas are shown on the live video above. ') +
             'A person counts as In when both feet are completely inside the green In area, after being seen in the Out area. Out is only counted for people already counted In.'
           : 'No count line yet, so this camera is not counting. Click "Edit count line".'
@@ -528,6 +546,9 @@ function CountLineEditor({
             </button>
             <button type="button" className="cam-toggle" disabled={points.length === 0} onClick={() => setPoints([])}>
               Clear
+            </button>
+            <button type="button" className="cam-toggle" disabled={saving} onClick={saveWholeScreen}>
+              Whole screen is In
             </button>
             <button type="button" className="cam-toggle" onClick={cancel}>
               Cancel
@@ -583,7 +604,7 @@ function CountLineEditor({
           {shown && (
             <>
               <polygon points={polyPoints(shown.inZone)} className="cam-zone-in" />
-              <polygon points={polyPoints(shown.outZone)} className="cam-zone-out" />
+              {shown.outZone.length >= 3 && <polygon points={polyPoints(shown.outZone)} className="cam-zone-out" />}
             </>
           )}
           {stretched && (
@@ -626,6 +647,7 @@ function CountLineEditor({
             ['IN', shown.inZone, 'cam-line-in'],
             ['OUT', shown.outZone, 'cam-line-out'],
           ] as const).map(([text, poly, cls]) => {
+            if (poly.length < 3) return null
             const c = pointInside(poly)
             return (
               <span key={text} className={cls} style={{ left: `${c.x * 100}%`, top: `${c.y * 100}%` }}>
@@ -671,9 +693,13 @@ export default function CameraDetails({
   const [liveMsg, setLiveMsg] = useState<{ state: LiveState; msg: string }>({ state: 'connecting', msg: '' })
   const grabFrameRef = useRef<(() => string | null) | null>(null)
   const onLiveState = useCallback((state: LiveState, msg: string) => setLiveMsg({ state, msg }), [])
+  // People inside = people standing in this camera's In area right now (from the live video)
+  const [insideNow, setInsideNow] = useState<number | null>(null)
 
   // Count line + In area, then a rectangle and record for each counted person
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
+    const nIn = frame.boxes.filter((b) => b.area === 'in').length
+    setInsideNow((cur) => (cur === nIn ? cur : nIn))
     if (areas) drawAreas(ctx, areas)
     for (const box of frame.boxes) {
       const rec = records.byTrack.get(box.track)
@@ -767,8 +793,8 @@ export default function CameraDetails({
           <span className="cam-count-value">{people.out}</span>
         </div>
         <div className="cam-count-card">
-          <span className="cam-count-label">People Inside</span>
-          <span className="cam-count-value">{people.inside}</span>
+          <span className="cam-count-label">People Inside (now, this camera)</span>
+          <span className="cam-count-value">{liveMsg.state === 'live' && insideNow !== null ? insideNow : '—'}</span>
         </div>
       </div>
 

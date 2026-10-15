@@ -19,6 +19,7 @@ import numpy as np
 
 from .demographics import Demographics, Estimate
 from .line_counter import CountLine, LineCounter
+from .visitors import Visitor, VisitorRegistry, appearance
 
 log = logging.getLogger("camera")
 
@@ -45,6 +46,11 @@ POWER_CHECK_SECONDS = 5
 FULL_BODY_RATIO = float(os.getenv("FULL_BODY_RATIO", "1.2"))  # box height / width
 BOTTOM_EDGE = 0.985  # box bottom below this share of the picture = feet cut off
 FOOT_INSET = 0.25  # feet = bottom corners of the box, moved in by this share of its width
+
+# Look of each person's clothes (to keep one track_id for one person on all cameras)
+LOOK_SAMPLES = 5  # looks averaged per tracked person
+LOOK_EVERY_SECONDS = 0.5
+FORGET_TRACK_SECONDS = 30  # tracker id not seen this long → forget it on this camera
 
 
 def camera_powered_on(source: str | int) -> bool:
@@ -132,6 +138,7 @@ class CameraWorker(threading.Thread):
         snapshot_seconds: float,
         show: bool = False,
         update: Callable[..., None] | None = None,
+        registry: VisitorRegistry | None = None,
     ):
         super().__init__(name=f"cam-{camera['camera_name']}", daemon=True)
         self.camera = camera
@@ -143,14 +150,20 @@ class CameraWorker(threading.Thread):
         self._estimates: dict[int, Estimate] = {}  # tracker id → averaged gender / age
         self._last_look: dict[int, float] = {}  # tracker id → last time its face was checked
         self._last_seen: dict[int, float] = {}  # tracker id → last frame it was in
-        self._sent: dict[int, int] = {}  # tracker id → face samples already written to its visit
         self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
         self.dark_since: float | None = None  # when the picture went black (camera closed)
         self.reported_status: str | None = None  # active_status last sent to Supabase
         self.preview: np.ndarray | None = None  # for --show
-        self._visits: dict[int, str] = {}  # tracker id → visit_id
+        # Visitors inside the shop, shared by all cameras of this box (one track_id per person)
+        self.registry = registry or VisitorRegistry()
+        self._visitor: dict[int, Visitor] = {}  # tracker id → visitor it is
+        self._look: dict[int, np.ndarray] = {}  # tracker id → averaged clothes look
+        self._look_n: dict[int, int] = {}
+        self._look_at: dict[int, float] = {}
+        self._seen_at: dict[int, float] = {}  # tracker id → last time in the picture
+        self._last_forget = 0.0
         self._session = uuid.uuid4().hex[:6]  # tracker ids restart at 1 after a restart
         self.counts = {"In": 0, "Out": 0}
         # Newest people boxes for the live video: [{"track", "b": [x1, y1, x2, y2] (0-1), "area"}]
@@ -267,16 +280,19 @@ class CameraWorker(threading.Thread):
                     conf_by_id[tid] = conf
                     box_by_id[tid] = (x1, y1, x2, y2)
 
+            self._follow(frame, box_by_id, now)
+
             if demo.enabled:
                 self._look_at_faces(demo, frame, box_by_id, now)
 
             for crossing in self.counter.update(feet, now=now):
-                self._record(crossing.track_id, crossing.direction, conf_by_id.get(crossing.track_id, 0.0))
+                self._record(crossing.track_id, crossing.direction, conf_by_id.get(crossing.track_id, 0.0),
+                             frame, box_by_id.get(crossing.track_id))
 
             # For the website's live video: where each person is in this frame
             self.live_boxes = [
                 {
-                    "track": self.track_name(tid),
+                    "track": self._visitor[tid].track_id if tid in self._visitor else self.track_name(tid),
                     "b": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
                     "area": self.counter.area_of(tid),
                 }
@@ -295,39 +311,93 @@ class CameraWorker(threading.Thread):
 
         self.grabber.stop_event.set()
 
-    def _record(self, tid: int, direction: str, conf: float) -> None:
+    # ---------- Who is who (one track_id per person on all cameras) ----------
+    def _follow(self, frame: np.ndarray, box_by_id: dict[int, tuple[float, float, float, float]], now: float) -> None:
+        """Every frame: note who is seen, learn how they look, drop old trackers."""
+        cam_id = self.camera["camera_id"]
+        for tid, box in box_by_id.items():
+            self._seen_at[tid] = now
+            v = self._visitor.get(tid)
+            if v is not None and v.left:  # counted Out on another camera (or forgotten)
+                del self._visitor[tid]
+                v = None
+            if v is not None:
+                self.registry.seen(v, cam_id, now)
+            if self._look_n.get(tid, 0) < LOOK_SAMPLES and now - self._look_at.get(tid, 0.0) >= LOOK_EVERY_SECONDS:
+                self._look_at[tid] = now
+                self._add_look(tid, appearance(frame, box))
+                if v is not None:
+                    v.add_look(self._look.get(tid))
+
+        for tid in [t for t, seen in self._seen_at.items() if now - seen > FORGET_TRACK_SECONDS]:
+            for d in (self._seen_at, self._visitor, self._look, self._look_n, self._look_at):
+                d.pop(tid, None)
+        if now - self._last_forget > 10:
+            self._last_forget = now
+            self.registry.forget_old()
+
+    def _add_look(self, tid: int, sig: np.ndarray | None) -> None:
+        if sig is None:
+            return
+        n = self._look_n.get(tid, 0)
+        self._look[tid] = sig if n == 0 else (self._look[tid] * n + sig) / (n + 1)
+        self._look_n[tid] = n + 1
+
+    def _record(self, tid: int, direction: str, conf: float, frame: np.ndarray | None = None,
+                box: tuple[float, float, float, float] | None = None) -> None:
         cam = self.camera
-        visit_id = self._visits.get(tid)
-        if visit_id is None:
-            # One visit per tracked person, with the gender / age estimated so
-            # far (updated later as more faces are seen). Member stays empty.
-            visit_id = str(uuid.uuid4())
-            self._visits[tid] = visit_id
-            row = {
-                "visit_id": visit_id,
-                "branch_id": cam["branch_id"],
-                "track_id": self.track_name(tid),
-            }
+        cam_id = cam["camera_id"]
+        v = self._visitor.get(tid)
+        if v is not None and v.left:
+            v = None
+
+        if direction == "Out":
+            if v is None:
+                return  # never In as a known visitor: Out is not recorded
+            self._event(v, "Out", conf, tid)
+            self.registry.leave(v)  # visit ends; coming back later is a new visit
+            self._visitor.pop(tid, None)
+            return
+
+        # In: someone already inside (seen by this or another camera) keeps their track_id
+        if tid not in self._look and frame is not None and box is not None:
+            self._add_look(tid, appearance(frame, box))
+        if v is None:
+            v = self.registry.match(self._look.get(tid), cam_id)
+            if v is not None:
+                log.info("person %s is %s (same person, seen before)", tid, v.track_id)
+        if v is None:
+            # New visitor: one visit row, with the gender / age estimated so far
+            # (updated later as more faces are seen). Member stays empty.
+            v = Visitor(visit_id=str(uuid.uuid4()), track_id=self.track_name(tid))
+            row = {"visit_id": v.visit_id, "branch_id": cam["branch_id"], "track_id": v.track_id}
             est = self._estimates.get(tid)
             if est and est.samples:
                 row.update(est.visit_fields())
-                self._sent[tid] = est.samples
-            self.insert("visit", row, cam["camera_id"])
+                v.sent_faces = est.samples
+            self.insert("visit", row, cam_id)
+            self.registry.add(v)
+        v.add_look(self._look.get(tid))
+        self._visitor[tid] = v
+        self.registry.seen(v, cam_id)
+        if cam_id not in v.cameras_in:  # one In per camera per visit
+            v.cameras_in.add(cam_id)
+            self._event(v, "In", conf, tid)
+
+    def _event(self, v: Visitor, direction: str, conf: float, tid: int) -> None:
         self.insert(
             "cctv_event",
             {
-                "camera_id": cam["camera_id"],
-                "visit_id": visit_id,
+                "camera_id": self.camera["camera_id"],
+                "visit_id": v.visit_id,
                 "direction": direction,
                 "confidence": round(conf * 100, 2),
                 "event_time": datetime.now(timezone.utc).isoformat(),
             },
         )
         self.counts[direction] += 1
-        log.info("person %s %s  (since start: In %d / Out %d)", tid, direction, self.counts["In"], self.counts["Out"])
-        if len(self._visits) > 5000:  # keep memory small on long runs
-            for k in list(self._visits)[:2500]:
-                del self._visits[k]
+        log.info("person %s (%s) %s  (since start: In %d / Out %d, inside now %d)", tid, v.track_id, direction,
+                 self.counts["In"], self.counts["Out"], self.registry.count())
 
     # ---------- Gender / age ----------
     def _look_at_faces(self, demo: Demographics, frame: np.ndarray,
@@ -354,17 +424,17 @@ class CameraWorker(threading.Thread):
         # People gone for a while: send their final estimate and forget them
         for tid in [t for t, seen in self._last_seen.items() if now - seen > TRACK_DONE_SECONDS]:
             self._send_estimate(tid)
-            for d in (self._estimates, self._last_look, self._last_seen, self._sent):
+            for d in (self._estimates, self._last_look, self._last_seen):
                 d.pop(tid, None)
 
     def _send_estimate(self, tid: int) -> None:
         """Write the person's newest gender / age to their visit row, if they
         already have one (a visit is made when they cross the count line)."""
-        est, visit_id = self._estimates.get(tid), self._visits.get(tid)
-        if not est or not visit_id or not self.update or est.samples <= self._sent.get(tid, 0):
+        est, v = self._estimates.get(tid), self._visitor.get(tid)
+        if not est or v is None or not self.update or est.samples <= v.sent_faces:
             return
-        self.update("visit", est.visit_fields(), camera_id=self.camera["camera_id"], visit_id=f"eq.{visit_id}")
-        self._sent[tid] = est.samples
+        self.update("visit", est.visit_fields(), camera_id=self.camera["camera_id"], visit_id=f"eq.{v.visit_id}")
+        v.sent_faces = est.samples
 
     def _draw(self, img: np.ndarray, points: dict[int, tuple[float, float]]) -> np.ndarray:
         h, w = img.shape[:2]

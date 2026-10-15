@@ -13,14 +13,19 @@ the picture width / height):
 The older two-point line {"start": ..., "end": ...} still works: its In side
 is the side the green arrow pointed to.
 
-Rules (per tracked person):
+A camera inside the shop that does not see the entrance can be set to
+"whole screen is In":  {"all_in": true}. Everyone it sees is inside.
+
+Rules (per tracked person on one camera):
   - A person's feet (both bottom corners of their box) must be completely
     inside one area for a few frames before that area counts.
-  - In:  the person was seen in the Out area, then their feet are completely
-         in the In area.
-  - Out: only for a person already counted In, whose feet are then completely
-         back in the Out area. People who were never counted In are not
-         counted Out.
+  - In:  the feet are completely in the In area. This includes people who
+         are already inside when the box starts (or walk into this camera's
+         view from inside the shop).
+  - Out: only after this person was In, when their feet are then completely
+         back in the Out area. People never In are not counted Out.
+The camera worker then decides which visitor (track_id) the person is, so the
+same person keeps one track_id across all cameras (see visitors.py).
 """
 
 from __future__ import annotations
@@ -124,11 +129,14 @@ def in_area_for(points: list[Point], in_point: Point) -> list[Point]:
 class CountLine:
     points: list[Point]
     in_zone: list[Point]
+    all_in: bool = False  # whole screen is In (camera inside the shop)
 
     @staticmethod
     def from_json(value: dict | None) -> "CountLine | None":
         if not isinstance(value, dict):
             return None
+        if value.get("all_in"):
+            return CountLine([], [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)], all_in=True)
         pt = lambda d: (float(d["x"]), float(d["y"]))  # noqa: E731
         try:
             if "points" in value:
@@ -156,6 +164,8 @@ class CountLine:
 
     def area(self, p: Point) -> str:
         """"in" or "out" for one point."""
+        if self.all_in:
+            return "in"
         return "in" if inside(self.in_zone, p) else "out"
 
     def area_of(self, feet: list[Point]) -> str | None:
@@ -171,7 +181,6 @@ class _Track:
     area: str | None = None  # area the feet were last steadily (completely) in
     candidate: str | None = None
     streak: int = 0
-    seen_out: bool = False  # steadily in the Out area at some point
     counted_in: bool = False  # counted In, and not counted Out since
 
 
@@ -226,8 +235,7 @@ class LineCounter:
                 if t.counted_in:
                     crossings.append(Crossing(track_id, "Out"))
                     t.counted_in = False
-                t.seen_out = True
-            elif area == "in" and t.seen_out and not t.counted_in:
+            elif area == "in" and not t.counted_in:
                 crossings.append(Crossing(track_id, "In"))
                 t.counted_in = True
 

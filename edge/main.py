@@ -24,6 +24,7 @@ from edge.config import load_settings, rtsp_url  # noqa: E402
 from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
 from edge.uploader import SnapshotUploader, Writer  # noqa: E402
+from edge.visitors import VisitorRegistry  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -62,6 +63,8 @@ def main() -> None:
         snapshots.start()
 
     workers: dict[str, CameraWorker] = {}
+    # People inside the shop, shared by all cameras: one track_id per person
+    visitors = VisitorRegistry()
 
     # Live video for the website (only sends pictures while someone watches)
     live = None
@@ -105,7 +108,7 @@ def main() -> None:
                 w = CameraWorker(
                     cam, source_for(cam), settings.model, settings.confidence, settings.image_size,
                     settings.anchor, writer.insert, snapshots.offer if snapshots else None,
-                    settings.snapshot_seconds, show=args.show, update=writer.update,
+                    settings.snapshot_seconds, show=args.show, update=writer.update, registry=visitors,
                 )
                 workers[cam_id] = w
                 w.start()

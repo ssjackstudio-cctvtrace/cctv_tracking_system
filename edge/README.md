@@ -17,6 +17,7 @@ Tapo camera ──RTSP (shop network)──► main.py ──► Supabase (visit
 |---|---|
 | `main.py` | Starts everything; reloads camera settings + heartbeat every 60 s |
 | `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → line counter → rows |
+| `edge/visitors.py` | People inside the shop, shared by all cameras: one track_id per person |
 | `edge/line_counter.py` | Decides In / Out from the count line's In / Out areas (`camera.count_line`) |
 | `edge/demographics.py` | Estimated gender + age from each person's face |
 | `download_models.py` | Downloads the face, gender and age models into `models/` |
@@ -144,10 +145,13 @@ inside the shop. That area is **In** (green), the other is **Out** (orange);
 the line is stretched to the picture border at both ends to split the
 picture. **Save**.
 
-- **In**: a person seen in the Out area whose feet (both bottom corners of
-  their box) are then **completely** inside the In area for a few frames.
-- **Out**: only for a person already counted In, whose feet are then
-  completely back in the Out area. People never counted In are not counted Out.
+- **In**: a person whose feet (both bottom corners of their box) are
+  **completely** inside the In area for a few frames. This includes people
+  already inside when the box starts.
+- **Out**: only for a person already In, whose feet are then completely back
+  in the Out area. People never In are not counted Out.
+- **Whole screen is In** (button in the editor): for a camera inside the shop
+  that does not see the entrance. Everyone it sees is In; it never counts Out.
 - **Full body**: people whose feet are cut off by the bottom of the picture,
   or whose box is not tall enough (`FULL_BODY_RATIO`, default 1.2), are
   followed but not counted until their full body is seen.
@@ -155,6 +159,32 @@ picture. **Save**.
   used instead of the feet).
 
 Older two-point lines still work (In = the side the green arrow pointed to).
+
+## One track ID per person (all cameras)
+
+All cameras of the box share one list of the people inside. When a camera
+sees someone go In, the box compares the colours of their clothes (upper and
+lower body) with everyone already inside:
+
+- **Looks the same** → it is that person: the camera records its own In
+  event, but with the **same visit / track_id** they got on the first camera.
+  Each camera records In at most once per visit.
+- **No match** → a new person: new visit, new track_id.
+- **Out** on any camera ends the visit (the person leaves the list). If they
+  come back later, that is a new visit.
+
+Only colour numbers are kept in memory; no picture is saved. Clothes colour
+is not perfect: two people in the same plain black shirt can be mixed up, and
+very different camera colours can split one person into two. Tune with
+`REID_MAX_DISTANCE` in `.env` (lower = stricter). People who leave without
+any camera seeing them go Out are forgotten after `VISITOR_FORGET_MINUTES`.
+
+The dashboard counts **people** (visits), not events: People In = visits with
+an In, People Out = visits with an Out, People Still Inside = visits whose
+newest event is In.
+
+To delete all tracking records and start again, see
+`supabase/reset_tracking.sql` (stop the box first).
 
 ## Live video (Camera page and camera details page)
 

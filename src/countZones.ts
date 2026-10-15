@@ -116,10 +116,21 @@ export function pointInside(poly: Point[]): Point {
 
 export type CountAreas = { points: Point[]; inPoint: Point; inZone: Point[]; outZone: Point[] }
 
+const WHOLE_SCREEN: Point[] = [
+  { x: 0, y: 0 },
+  { x: 1, y: 0 },
+  { x: 1, y: 1 },
+  { x: 0, y: 1 },
+]
+
 // camera.count_line → dots + In / Out areas. Also reads the older two-point
 // line ({start, end}), whose In side was the side the green arrow pointed to.
 export function readCountLine(line: CountLine | null | undefined): CountAreas | null {
   if (!line) return null
+  if ('all_in' in line) {
+    // Whole screen is In: no line, no Out area
+    return line.all_in ? { points: [], inPoint: { x: 0.5, y: 0.5 }, inZone: WHOLE_SCREEN, outZone: [] } : null
+  }
   if ('points' in line) {
     if (!line.points || line.points.length < 2 || !line.in_point) return null
     return { points: line.points, inPoint: line.in_point, ...areasFor(line.points, line.in_point) }

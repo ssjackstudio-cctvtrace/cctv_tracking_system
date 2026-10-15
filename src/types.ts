@@ -53,9 +53,11 @@ export type EdgeDeviceEditable = Pick<EdgeDevice, 'branch_id' | 'device_name'>
 export type Point = { x: number; y: number }
 // Count line: many dots joined into one line; in_zone is the area labelled
 // "In" (the line stretched to the picture border splits the picture in two).
+// { all_in: true }: whole screen is In (a camera inside the shop).
 // The older two-point line { start, end } is still read.
 export type CountLine =
   | { points: Point[]; in_point: Point; in_zone: Point[] }
+  | { all_in: true }
   | { start: Point; end: Point }
 export type CounterZone = { points: Point[] }
 

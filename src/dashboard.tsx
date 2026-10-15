@@ -68,10 +68,7 @@ export function Logo() {
 }
 
 type BranchOption = { branch_id: string; branch_name: string }
-type DateOption = { key: string; label: string }
 type Range = readonly [string, string] | null
-
-type Gender = 'Male' | 'Female'
 
 type LatestEvent = {
   cctv_event_id: string
@@ -99,6 +96,9 @@ type Counts = {
   outCount: number | null
   outMale: number | null
   outFemale: number | null
+  insideCount: number | null
+  insideMale: number | null
+  insideFemale: number | null
   dealed: number | null
 }
 
@@ -116,47 +116,63 @@ const fmtDateTime = (iso: string) => {
   const d = new Date(iso)
   return `${fmtDate(d)} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
 }
-// [start of the day, start of the next day] as ISO strings
-const dayRange = (key: string): Range => {
-  const start = new Date(`${key}T00:00:00`)
-  const end = new Date(start)
-  end.setDate(end.getDate() + 1)
+// [start of the "from" day, start of the day after "to"] as ISO strings ('' = no limit on that side)
+const dateRange = (from: string, to: string): Range => {
+  if (!from && !to) return null
+  const [a, b] = from && to && from > to ? [to, from] : [from, to]
+  const start = a ? new Date(`${a}T00:00:00`) : new Date('2000-01-01T00:00:00')
+  const end = b ? new Date(`${b}T00:00:00`) : new Date()
+  if (b) end.setDate(end.getDate() + 1)
+  else end.setFullYear(end.getFullYear() + 1)
   return [start.toISOString(), end.toISOString()]
 }
+const todayKey = () => dateKey(new Date().toISOString())
 
-// All timestamps of one column (read in pages of 1,000, up to 20,000 rows)
-async function loadTimes(table: string, column: string): Promise<string[]> {
-  const out: string[] = []
-  for (let from = 0; from < 20000; from += 1000) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(column)
-      .order(column, { ascending: false })
-      .range(from, from + 999)
+// One row per cctv_event: the visit (person) it belongs to, its direction and time
+type PersonEvent = { visit_id: string; direction: string; event_time: string; visit: { est_gender: string } | null }
+
+// All cctv_event rows of the branch in the date range, oldest first
+// (read in pages of 1,000, up to 50,000 rows)
+async function loadPersonEvents(branch: string, range: Range): Promise<PersonEvent[]> {
+  const out: PersonEvent[] = []
+  for (let from = 0; from < 50000; from += 1000) {
+    let q = supabase
+      .from(TABLES.cctvEvent)
+      .select('visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender)')
+    if (branch) q = q.eq('camera.edge_device.branch_id', branch)
+    if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
+    const { data, error } = await q.order('event_time', { ascending: true }).range(from, from + 999)
     if (error) throw new Error(error.message)
-    const rows = (data ?? []) as unknown as Record<string, string>[]
-    out.push(...rows.map((r) => r[column]))
+    const rows = (data ?? []) as unknown as PersonEvent[]
+    out.push(...rows)
     if (rows.length < 1000) break
   }
   return out
 }
 
-// Number of cctv_event rows with the given direction (branch = branch of the camera's edge box),
-// optionally only for one estimated gender of the visit
-function eventCount(direction: 'In' | 'Out', branch: string, range: Range, gender?: Gender) {
-  let q = supabase
-    .from(TABLES.cctvEvent)
-    .select(
-      gender
-        ? 'cctv_event_id, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender)'
-        : 'cctv_event_id, camera!inner(edge_device!inner(branch_id))',
-      { count: 'exact', head: true },
-    )
-    .eq('direction', direction)
-  if (gender) q = q.eq('visit.est_gender', gender)
-  if (branch) q = q.eq('camera.edge_device.branch_id', branch)
-  if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
-  return q
+// People, not events: one person (visit = one track_id) can be seen going In by
+// several cameras, so each number counts different visits.
+//   People In           = visits with an In event
+//   People Out          = visits with an Out event
+//   People Still Inside = visits whose newest event is In (in the In region now)
+export function countPeople(events: PersonEvent[]) {
+  const people = new Map<string, { gender: string; wentIn: boolean; wentOut: boolean; last: string }>()
+  for (const e of events) {
+    const p = people.get(e.visit_id) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, wentOut: false, last: '' }
+    if (e.direction === 'In') p.wentIn = true
+    if (e.direction === 'Out') p.wentOut = true
+    if (e.direction === 'In' || e.direction === 'Out') p.last = e.direction // events come oldest first
+    people.set(e.visit_id, p)
+  }
+  const tally = (keep: (p: { wentIn: boolean; wentOut: boolean; last: string }) => boolean) => {
+    const list = [...people.values()].filter(keep)
+    return {
+      all: list.length,
+      male: list.filter((p) => p.gender === 'Male').length,
+      female: list.filter((p) => p.gender === 'Female').length,
+    }
+  }
+  return { in: tally((p) => p.wentIn), out: tally((p) => p.wentOut), inside: tally((p) => p.last === 'In') }
 }
 
 // Number of transactions with status 'Dealed' (branch = branch of the matched event's camera's edge box)
@@ -198,13 +214,12 @@ function latestRecognitions(branch: string, range: Range) {
   return q.order('event_time', { ascending: false }).limit(50)
 }
 
-const diff = (a: number | null, b: number | null) => (a !== null && b !== null ? a - b : null)
-
 function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
   const [branches, setBranches] = useState<BranchOption[]>([])
-  const [dates, setDates] = useState<DateOption[]>([])
   const [branch, setBranch] = useState('') // set to the first branch once the branches are loaded
-  const [date, setDate] = useState(() => dateKey(new Date().toISOString())) // starts on today; '' = all dates (YYYY-MM-DD)
+  // Date range (YYYY-MM-DD), any dates; starts on today. Both '' = all dates
+  const [dateFrom, setDateFrom] = useState(todayKey)
+  const [dateTo, setDateTo] = useState(todayKey)
 
   const [counts, setCounts] = useState<Counts>({
     inCount: null,
@@ -213,6 +228,9 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     outCount: null,
     outMale: null,
     outFemale: null,
+    insideCount: null,
+    insideMale: null,
+    insideFemale: null,
     dealed: null,
   })
   const [events, setEvents] = useState<LatestEvent[]>([])
@@ -222,15 +240,13 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
   const [filterError, setFilterError] = useState('')
   const [error, setError] = useState('')
 
-  // Options for the two filters
+  // Options for the branch filter (the date range accepts any dates)
   useEffect(() => {
     let cancelled = false
-    Promise.all([
+    Promise.resolve(
       supabase.from(TABLES.branch).select('branch_id, branch_name').order('branch_name', { ascending: true }),
-      loadTimes(TABLES.cctvEvent, 'event_time'),
-      loadTimes(TABLES.transaction, 'transaction_date'),
-    ])
-      .then(([b, eventTimes, transactionTimes]) => {
+    )
+      .then((b) => {
         if (cancelled) return
         if (b.error) setFilterError(b.error.message)
         else {
@@ -239,9 +255,6 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
           if (list.length) setBranch((cur) => cur || list[0].branch_id)
           else setLoading(false)
         }
-
-        const keys = Array.from(new Set([...eventTimes, ...transactionTimes].map(dateKey))).sort().reverse()
-        setDates(keys.map((key) => ({ key, label: fmtDate(new Date(`${key}T00:00:00`)) })))
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -260,31 +273,31 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     let cancelled = false
     setLoading(true)
     setError('')
-    const range = date ? dayRange(date) : null
+    const range = dateRange(dateFrom, dateTo)
 
     Promise.all([
-      eventCount('In', branch, range),
-      eventCount('In', branch, range, 'Male'),
-      eventCount('In', branch, range, 'Female'),
-      eventCount('Out', branch, range),
-      eventCount('Out', branch, range, 'Male'),
-      eventCount('Out', branch, range, 'Female'),
+      loadPersonEvents(branch, range).then(
+        (rows) => ({ people: countPeople(rows), error: null }),
+        (err: unknown) => ({ people: null, error: { message: err instanceof Error ? err.message : String(err) } }),
+      ),
       dealedCount(branch, range),
       latestEvents(branch, range),
       latestRecognitions(branch, range),
-    ]).then(([inRes, inMaleRes, inFemaleRes, outRes, outMaleRes, outFemaleRes, dealRes, evRes, recRes]) => {
+    ]).then(([peopleRes, dealRes, evRes, recRes]) => {
       if (cancelled) return
-      const failed = [inRes, inMaleRes, inFemaleRes, outRes, outMaleRes, outFemaleRes, dealRes, evRes, recRes].find(
-        (r) => r.error,
-      )
+      const failed = [peopleRes, dealRes, evRes, recRes].find((r) => r.error)
       if (failed?.error) setError(failed.error.message)
+      const p = peopleRes.people
       setCounts({
-        inCount: inRes.error ? null : inRes.count,
-        inMale: inMaleRes.error ? null : inMaleRes.count,
-        inFemale: inFemaleRes.error ? null : inFemaleRes.count,
-        outCount: outRes.error ? null : outRes.count,
-        outMale: outMaleRes.error ? null : outMaleRes.count,
-        outFemale: outFemaleRes.error ? null : outFemaleRes.count,
+        inCount: p ? p.in.all : null,
+        inMale: p ? p.in.male : null,
+        inFemale: p ? p.in.female : null,
+        outCount: p ? p.out.all : null,
+        outMale: p ? p.out.male : null,
+        outFemale: p ? p.out.female : null,
+        insideCount: p ? p.inside.all : null,
+        insideMale: p ? p.inside.male : null,
+        insideFemale: p ? p.inside.female : null,
         dealed: dealRes.error ? null : dealRes.count,
       })
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
@@ -294,7 +307,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     return () => {
       cancelled = true
     }
-  }, [branch, date])
+  }, [branch, dateFrom, dateTo])
 
   const stats: {
     label: string
@@ -307,9 +320,9 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     { label: 'People Out', value: counts.outCount, male: counts.outMale, female: counts.outFemale, tone: 'out' },
     {
       label: 'People Still Inside',
-      value: diff(counts.inCount, counts.outCount),
-      male: diff(counts.inMale, counts.outMale),
-      female: diff(counts.inFemale, counts.outFemale),
+      value: counts.insideCount,
+      male: counts.insideMale,
+      female: counts.insideFemale,
       tone: 'inside',
     },
     { label: 'Transactions Dealed', value: counts.dealed },
@@ -329,20 +342,41 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
           ))}
         </select>
         <div className="ds-datefilter">
-          <input
-            type="date"
-            aria-label="Filter by date"
-            value={date}
-            min={dates.length ? dates[dates.length - 1].key : undefined}
-            max={dates.length && dates[0].key > dateKey(new Date().toISOString()) ? dates[0].key : dateKey(new Date().toISOString())}
-            onChange={(e) => setDate(e.target.value)}
-          />
+          <label className="ds-datefilter-field">
+            From
+            <input type="date" aria-label="From date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          </label>
+          <label className="ds-datefilter-field">
+            To
+            <input type="date" aria-label="To date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </label>
           <span className="ds-datefilter-label">
-            {date ? fmtDate(new Date(`${date}T00:00:00`)) : 'All dates'}
+            {!dateFrom && !dateTo
+              ? 'All dates'
+              : dateFrom && dateTo && dateFrom === dateTo
+                ? fmtDate(new Date(`${dateFrom}T00:00:00`))
+                : `${dateFrom ? fmtDate(new Date(`${dateFrom}T00:00:00`)) : 'Start'} – ${dateTo ? fmtDate(new Date(`${dateTo}T00:00:00`)) : 'Today'}`}
           </span>
-          {date && (
-            <button type="button" className="ds-datefilter-clear" onClick={() => setDate('')}>
-              Clear
+          <button
+            type="button"
+            className="ds-datefilter-clear"
+            onClick={() => {
+              setDateFrom(todayKey())
+              setDateTo(todayKey())
+            }}
+          >
+            Today
+          </button>
+          {(dateFrom || dateTo) && (
+            <button
+              type="button"
+              className="ds-datefilter-clear"
+              onClick={() => {
+                setDateFrom('')
+                setDateTo('')
+              }}
+            >
+              All dates
             </button>
           )}
         </div>
