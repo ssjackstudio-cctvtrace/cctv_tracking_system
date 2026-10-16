@@ -49,7 +49,12 @@ import numpy as np
 from .demographics import Estimate
 
 MAX_DISTANCE = float(os.getenv("REID_MAX_DISTANCE", "0.45"))  # 0 = identical look, 1 = nothing alike
-FORGET_MINUTES = float(os.getenv("VISITOR_FORGET_MINUTES", "60"))  # not seen by any camera this long → forgotten
+# A visitor stays inside until they go Out, however long no camera sees them (hidden behind
+# a shelf, in a fitting room). 0 = never forgotten during the day; at midnight the list starts again.
+FORGET_MINUTES = float(os.getenv("VISITOR_FORGET_MINUTES", "0"))
+HIDDEN_SECONDS = 3.0  # a visitor no camera has seen for this long is "hidden" (may come back)
+LOOSE_DISTANCE = min(0.9, float(os.getenv("REID_MAX_DISTANCE", "0.45")) * 1.8)  # clothes match for a hidden visitor
+HIDDEN_MOVE_METRES = 8.0  # how far a hidden person may have walked (cameras on the shop plan)
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
 POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long after it was seen
 H_BINS, S_BINS = 16, 8
@@ -133,6 +138,7 @@ class VisitorRegistry:
         self.same_place = same_place
         self._inside: dict[str, Visitor] = {}  # visit_id → visitor
         self._lock = threading.RLock()
+        self._day = time.localtime().tm_yday  # the list starts again every day
 
     # ---------- who is this person? ----------
     def _score(self, v: Visitor, sig: np.ndarray | None, floor: tuple[float, float] | None,
@@ -154,32 +160,37 @@ class VisitorRegistry:
             return None
         return 1.0 + app / self.max_distance
 
-    def _match_locked(self, sig, floor, exclude: set[str], now: float) -> Visitor | None:
+    def _match_locked(self, sig, floor, exclude: set[str], now: float, visible_only: bool = False) -> Visitor | None:
         best, best_s = None, None
         for v in self._inside.values():
             if v.visit_id in exclude:
                 continue
+            if visible_only and (not v.seen_on or now - max(v.seen_on.values()) >= HIDDEN_SECONDS):
+                continue  # hidden visitor: cannot be someone walking in from outside right now
             s = self._score(v, sig, floor, now)
             if s is not None and (best_s is None or s < best_s):
                 best, best_s = v, s
         return best
 
     def match(self, sig: np.ndarray | None, floor: tuple[float, float] | None = None,
-              exclude: set[str] | None = None, now: float | None = None) -> Visitor | None:
+              exclude: set[str] | None = None, now: float | None = None,
+              visible_only: bool = False) -> Visitor | None:
         """The visitor inside who is most likely this person, or None.
-        exclude = visit_ids already followed as other people in this camera's picture."""
+        exclude = visit_ids already followed as other people in this camera's picture.
+        visible_only: only visitors a camera sees right now (for someone who
+        just walked in from outside: they cannot be a visitor hidden inside)."""
         if sig is None and floor is None:
             return None
         with self._lock:
-            return self._match_locked(sig, floor, exclude or set(), time.time() if now is None else now)
+            return self._match_locked(sig, floor, exclude or set(), time.time() if now is None else now, visible_only)
 
     def find_or_create(self, sig, floor, exclude: set[str], create: Callable[[], Visitor],
-                       now: float | None = None) -> tuple[Visitor, bool]:
+                       now: float | None = None, visible_only: bool = False) -> tuple[Visitor, bool]:
         """Same as match, and if nobody matches, create the visitor — in one step,
         so two cameras seeing the same new person at once make only ONE visit."""
         now = time.time() if now is None else now
         with self._lock:
-            v = self._match_locked(sig, floor, exclude, now) if (sig is not None or floor is not None) else None
+            v = self._match_locked(sig, floor, exclude, now, visible_only) if (sig is not None or floor is not None) else None
             if v is not None:
                 return v, False
             v = create()
@@ -236,11 +247,59 @@ class VisitorRegistry:
             return True
 
     def forget_old(self, now: float | None = None) -> None:
-        """Visitors no camera has seen for a long time (left unseen): stop matching them."""
+        """At midnight the list starts again (nobody is inside a closed shop).
+        With VISITOR_FORGET_MINUTES > 0, also forget visitors unseen that long."""
         now = time.time() if now is None else now
         with self._lock:
-            for vid in [k for k, v in self._inside.items() if now - v.last_seen > self.forget_seconds]:
+            day = time.localtime(now).tm_yday
+            new_day = day != self._day
+            self._day = day
+            for vid in [k for k, v in self._inside.items()
+                        if new_day or (self.forget_seconds > 0 and now - v.last_seen > self.forget_seconds)]:
                 self._inside.pop(vid).left = True
+
+    # ---------- hidden people coming back ----------
+    def reclaim(self, sig: np.ndarray | None, floor: tuple[float, float] | None, exclude: set[str],
+                now: float | None = None) -> Visitor | None:
+        """Someone appeared INSIDE the shop (not walking in from outside) and no
+        visitor matched closely: they are most likely a visitor who was hidden
+        behind an obstacle and came back. Give them back the hidden visitor who
+        looks most alike (looser clothes match), so their track_id stays the
+        same until they go Out. None when nobody is hidden (then it is a new person)."""
+        now = time.time() if now is None else now
+        best, best_s = None, None
+        with self._lock:
+            for v in self._inside.values():
+                if v.left or v.visit_id in exclude:
+                    continue
+                last = max(v.seen_on.values()) if v.seen_on else v.last_seen
+                if now - last < HIDDEN_SECONDS:
+                    continue  # a camera sees them right now: not hidden
+                app = distance(sig, v.signature) if sig is not None and v.signature is not None else None
+                if app is not None and app > LOOSE_DISTANCE:
+                    continue  # clearly different clothes
+                moved = math.dist(floor, v.floor) if floor is not None and v.floor is not None else None
+                if moved is not None and moved > HIDDEN_MOVE_METRES:
+                    continue
+                s = (app if app is not None else 0.6) + (moved or 0.0) / 20 + min(now - last, 1800) / 3600
+                if best_s is None or s < best_s:
+                    best, best_s = v, s
+        return best
+
+    def restore(self, visits: list[dict], now: float | None = None) -> int:
+        """After the edge box restarts: put back today's visitors still inside
+        (an In but no Out), so they keep their track_id when a camera sees them again.
+        visits: [{"visit_id", "track_id", "cameras_in": [camera ids]}]"""
+        now = time.time() if now is None else now
+        with self._lock:
+            for row in visits:
+                if row["visit_id"] in self._inside:
+                    continue
+                v = Visitor(visit_id=row["visit_id"], track_id=row["track_id"],
+                            cameras_in=set(row.get("cameras_in") or []))
+                v.last_seen = now - HIDDEN_SECONDS - 1  # hidden until a camera sees them
+                self._inside[v.visit_id] = v
+            return len(visits)
 
     def count(self) -> int:
         with self._lock:

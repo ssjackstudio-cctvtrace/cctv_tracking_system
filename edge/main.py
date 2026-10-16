@@ -71,6 +71,36 @@ def main() -> None:
     # People inside the shop, shared by all cameras: one track_id per person
     visitors = VisitorRegistry()
 
+    def restore_visitors() -> None:
+        """After a restart: today's people still inside (an In on one of this box's
+        cameras and no Out since) are put back, so they keep their track_id."""
+        if supa is None:
+            return
+        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            rows = supa.select(
+                "cctv_event", "visit_id,direction,camera_id,camera!inner(edge_device_id),visit!inner(track_id)",
+                **{"camera.edge_device_id": f"eq.{settings.edge_device_id}",
+                   "event_time": f"gte.{midnight.isoformat()}", "order": "event_time.asc", "limit": "20000"},
+            )
+        except Exception as exc:
+            log.warning("Could not reload today's visitors (they get a new track_id if seen again): %s", exc)
+            return
+        open_visits: dict[str, dict] = {}
+        for r in rows:  # oldest first: the newest In / Out decides
+            vid = r["visit_id"]
+            if r["direction"] == "Out":
+                open_visits.pop(vid, None)
+                continue
+            v = open_visits.setdefault(vid, {"visit_id": vid, "track_id": (r.get("visit") or {}).get("track_id") or vid,
+                                             "cameras_in": []})
+            v["cameras_in"].append(r["camera_id"])
+        n = visitors.restore(list(open_visits.values()))
+        if n:
+            log.info("Restored %d visitor(s) still inside today: they keep their track_id", n)
+
+    restore_visitors()
+
     # Live video for the website (only sends pictures while someone watches)
     live = None
     if supa and settings.live_port:

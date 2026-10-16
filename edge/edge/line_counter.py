@@ -190,6 +190,7 @@ class _Track:
 class Crossing:
     track_id: int
     direction: str  # "In" | "Out"
+    from_out: bool = False  # In: really walked in from the Out area (not just seen inside)
 
 
 @dataclass
@@ -242,13 +243,14 @@ class LineCounter:
             if t.streak < self.steady_frames:
                 continue
             # Feet completely in a new area for long enough
+            came_from = t.area
             t.area, t.candidate, t.streak = area, None, 0
             if area == "out":
                 if t.counted_in or t.linked:
                     crossings.append(Crossing(track_id, "Out"))
                     t.counted_in = t.linked = False
             elif area == "in" and not t.counted_in:
-                crossings.append(Crossing(track_id, "In"))
+                crossings.append(Crossing(track_id, "In", from_out=came_from == "out"))
                 t.counted_in = True
 
         for track_id in [k for k, v in self._tracks.items() if now - v.last_seen > self.forget_after]:

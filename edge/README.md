@@ -181,6 +181,15 @@ so the box sees every camera at once and keeps ONE list of the people inside
 - The label never changes while the person is inside: if a camera's tracker
   loses them for a moment (behind a shelf, another shopper) and gives them a
   new number, the new number is linked back to the same visitor.
+- **Hidden behind an obstacle, for any length of time:** a visitor no camera
+  sees stays on the list as "hidden" until they go Out. When someone then
+  appears INSIDE the shop (not walking in from outside past the count line),
+  they are given back to the hidden visitor who looks most alike, so they keep
+  their track_id. A new visit is only made for someone who really walks in
+  from outside, or when nobody is hidden. Someone walking in from outside is
+  never given a hidden visitor's track_id.
+- **Restart:** when the edge box starts, it reloads today's visitors still
+  inside (an In on its cameras and no Out since), so they keep their track_id.
 - A new person only gets a visit after `NEW_VISITOR_HOLD_SECONDS` (default
   1 s), so a camera whose view overlaps another camera's has time to see that
   it is someone already inside. Two cameras asking at the same moment are
@@ -209,8 +218,10 @@ now: every visitor seen by any camera in the last 10 seconds, each person once
 
 Only numbers are kept in memory; no picture is saved. Only people inside the
 shop (In area) are compared, so a passer-by outside never takes a visitor's
-track_id. People who leave without any camera seeing them go Out are
-forgotten after `VISITOR_FORGET_MINUTES`.
+track_id. People who leave without any camera seeing them go Out stay on the
+list until midnight (or until `VISITOR_FORGET_MINUTES`, if you set it above 0);
+they are not counted in "People Still Inside", which only counts people a
+camera sees right now.
 
 The tracker keeps a hidden person's number for 60 frames
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
