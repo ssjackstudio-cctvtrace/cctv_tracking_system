@@ -9,7 +9,9 @@ and receives, many times a second, one binary message per picture:
 
     4 bytes   length of the JSON part (big-endian)
     JSON      {"f": frame no, "w": width, "h": height,
-               "boxes": [{"track": "ABT-01-3f9a2c-7", "b": [x1, y1, x2, y2], "area": "in"}],
+               "boxes": [{"track": "ABT-01-3f9a2c-7", "b": [x1, y1, x2, y2], "area": "in",
+                          "visit": true, "full": true, "xyz": [X, Y, Z] (metres) or null,
+                          "region": "Counter", "kind": "Counter", "g": "Female", "a": 29, "s": 71.5}],
                "counts": {"In": 3, "Out": 1}}
     JPEG      the picture
 

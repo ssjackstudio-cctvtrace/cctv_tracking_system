@@ -8,6 +8,7 @@ export type EventTab = 'cctv' | 'recognition'
 type CctvEventRow = {
   cctv_event_id: string
   direction: string
+  track_region: string | null
   confidence: number
   event_time: string
   camera: { camera_name: string; tapo_model: string | null } | null
@@ -76,7 +77,7 @@ export function CctvEventsTable({ limit = 100 }: { limit?: number }) {
       supabase
         .from(TABLES.cctvEvent)
         .select(
-          'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
+          'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
         )
         .order('event_time', { ascending: false })
         .limit(limit),
@@ -98,6 +99,7 @@ export function CctvEventsTable({ limit = 100 }: { limit?: number }) {
         { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
         { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
         { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+        { header: 'Track region', render: (r) => r.track_region ?? '—' },
         { header: 'Confidence', render: (r) => `${fmt2(r.confidence)}%` },
         { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
       ]}

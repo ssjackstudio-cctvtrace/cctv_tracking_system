@@ -10,6 +10,7 @@ Test on your Windows PC with no camera / no Supabase writes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -29,7 +30,10 @@ from edge.visitors import VisitorRegistry  # noqa: E402
 log = logging.getLogger("main")
 
 # camera has no branch_id: the branch comes from the camera's edge box (edge_device.branch_id)
-CAMERA_COLUMNS = "camera_id,camera_name,active_status,ip_address,stream_path,count_line,edge_device(branch_id)"
+# floor_areas = 3D floor calibration + shop areas (Counter / Point of Purchase ...), see edge/space3d.py
+CAMERA_COLUMNS = (
+    "camera_id,camera_name,active_status,ip_address,stream_path,count_line,floor_areas,edge_device(branch_id)"
+)
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
 STATUS_SECONDS = 5  # check each camera's active_status (sent only when it changes)
 
@@ -41,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--source", help="video file or webcam number instead of the camera's RTSP stream")
     p.add_argument("--camera", help="only run this camera_name (default: all active cameras of this edge box)")
     p.add_argument("--line", help="count line for --offline: x1,y1,x2,y2 in 0-1, e.g. 0.1,0.6,0.9,0.6")
+    p.add_argument("--zones", help="for --offline: JSON file with a camera.floor_areas value (3D floor + areas)")
     p.add_argument("--show", action="store_true", help="open a window with boxes, line and counts")
     return p.parse_args()
 
@@ -81,6 +86,7 @@ def main() -> None:
                 "camera_id": "offline", "camera_name": args.camera or "test", "branch_id": "offline",
                 "active_status": "Active", "ip_address": "", "stream_path": "stream2",
                 "count_line": {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}},
+                "floor_areas": json.load(open(args.zones, encoding="utf-8")) if args.zones else None,
             }]
         # Every camera of this box, Active or Inactive: the box itself decides
         # active_status from whether the camera picture is live and open.

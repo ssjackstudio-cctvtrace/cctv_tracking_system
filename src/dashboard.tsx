@@ -73,6 +73,7 @@ type Range = readonly [string, string] | null
 type LatestEvent = {
   cctv_event_id: string
   direction: string
+  track_region: string | null
   confidence: number
   event_time: string
   camera: { camera_name: string } | null
@@ -116,14 +117,12 @@ const fmtDateTime = (iso: string) => {
   const d = new Date(iso)
   return `${fmtDate(d)} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
 }
-// [start of the "from" day, start of the day after "to"] as ISO strings ('' = no limit on that side)
-const dateRange = (from: string, to: string): Range => {
-  if (!from && !to) return null
-  const [a, b] = from && to && from > to ? [to, from] : [from, to]
-  const start = a ? new Date(`${a}T00:00:00`) : new Date('2000-01-01T00:00:00')
-  const end = b ? new Date(`${b}T00:00:00`) : new Date()
-  if (b) end.setDate(end.getDate() + 1)
-  else end.setFullYear(end.getFullYear() + 1)
+// [start of the day, start of the next day] as ISO strings, for one date (YYYY-MM-DD)
+const dayRange = (day: string): Range => {
+  if (!day) return null
+  const start = new Date(`${day}T00:00:00`)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
   return [start.toISOString(), end.toISOString()]
 }
 const todayKey = () => dateKey(new Date().toISOString())
@@ -192,7 +191,7 @@ function latestEvents(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.cctvEvent)
     .select(
-      'cctv_event_id, direction, confidence, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(visit_type, est_gender, est_age)',
+      'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(visit_type, est_gender, est_age)',
     )
   if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
@@ -217,9 +216,8 @@ function latestRecognitions(branch: string, range: Range) {
 function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
   const [branches, setBranches] = useState<BranchOption[]>([])
   const [branch, setBranch] = useState('') // set to the first branch once the branches are loaded
-  // Date range (YYYY-MM-DD), any dates; starts on today. Both '' = all dates
-  const [dateFrom, setDateFrom] = useState(todayKey)
-  const [dateTo, setDateTo] = useState(todayKey)
+  // One date (YYYY-MM-DD); starts on today
+  const [day, setDay] = useState(todayKey)
 
   const [counts, setCounts] = useState<Counts>({
     inCount: null,
@@ -273,7 +271,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     let cancelled = false
     setLoading(true)
     setError('')
-    const range = dateRange(dateFrom, dateTo)
+    const range = dayRange(day)
 
     Promise.all([
       loadPersonEvents(branch, range).then(
@@ -307,7 +305,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     return () => {
       cancelled = true
     }
-  }, [branch, dateFrom, dateTo])
+  }, [branch, day])
 
   const stats: {
     label: string
@@ -343,40 +341,19 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
         </select>
         <div className="ds-datefilter">
           <label className="ds-datefilter-field">
-            From
-            <input type="date" aria-label="From date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            Date
+            <input
+              type="date"
+              aria-label="Date"
+              value={day}
+              required
+              onChange={(e) => setDay(e.target.value || todayKey())}
+            />
           </label>
-          <label className="ds-datefilter-field">
-            To
-            <input type="date" aria-label="To date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-          </label>
-          <span className="ds-datefilter-label">
-            {!dateFrom && !dateTo
-              ? 'All dates'
-              : dateFrom && dateTo && dateFrom === dateTo
-                ? fmtDate(new Date(`${dateFrom}T00:00:00`))
-                : `${dateFrom ? fmtDate(new Date(`${dateFrom}T00:00:00`)) : 'Start'} – ${dateTo ? fmtDate(new Date(`${dateTo}T00:00:00`)) : 'Today'}`}
-          </span>
-          <button
-            type="button"
-            className="ds-datefilter-clear"
-            onClick={() => {
-              setDateFrom(todayKey())
-              setDateTo(todayKey())
-            }}
-          >
-            Today
-          </button>
-          {(dateFrom || dateTo) && (
-            <button
-              type="button"
-              className="ds-datefilter-clear"
-              onClick={() => {
-                setDateFrom('')
-                setDateTo('')
-              }}
-            >
-              All dates
+          <span className="ds-datefilter-label">{fmtDate(new Date(`${day}T00:00:00`))}</span>
+          {day !== todayKey() && (
+            <button type="button" className="ds-datefilter-clear" onClick={() => setDay(todayKey())}>
+              Today
             </button>
           )}
         </div>
@@ -434,6 +411,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
             columns={[
               { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
               { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+              { header: 'Track region', render: (r) => r.track_region ?? '—' },
               { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
               { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
               { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },

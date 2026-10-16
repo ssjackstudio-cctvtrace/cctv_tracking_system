@@ -464,6 +464,144 @@
   background: #f97316;
 }
 
+/* Shop areas (3D) editor (Camera Details page) */
+.cam-areas-grid {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-areas-axis {
+  fill: none;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-areas-floor {
+  fill-opacity: 0.22;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-areas-edge {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-areas-side {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.cam-areas-tag,
+.cam-areas-markdot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.cam-areas-markdot {
+  min-width: 20px;
+  padding: 2px 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  text-align: center;
+}
+
+.cam-areas-marks,
+.cam-areas-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0 0 12px;
+}
+
+.cam-areas-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cam-areas-mark label,
+.cam-areas-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.8rem;
+  color: #475569;
+}
+
+.cam-areas-mark input {
+  width: 72px;
+}
+
+.cam-areas-mark input,
+.cam-areas-form input,
+.cam-areas-form select {
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.cam-areas-form input:disabled {
+  background: #f1f5f9;
+}
+
+.cam-areas-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.cam-area-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cam-area-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.cam-area-list li:last-child {
+  border-bottom: none;
+}
+
+.cam-area-kind {
+  color: #64748b;
+  font-size: 0.85rem;
+}
+
+.cam-area-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
 /* Toolbar buttons: Expand view + Add camera */
 .cam-toolbar-actions {
   display: flex;

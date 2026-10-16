@@ -4,8 +4,23 @@ import { getAdminToken } from './lib/supabase'
 // Live video from the edge box (edge/edge/live_server.py), over a WebSocket.
 // Each message is one picture plus where each tracked person is in it.
 
-// One tracked person in the picture: track = visit.track_id, b = box (0–1)
-export type LiveBox = { track: string; b: [number, number, number, number]; area: 'in' | 'out' | null }
+// One tracked person in the picture: track = visit.track_id, b = box (0–1).
+// visit: linked to a visitor (the track_id stays the same on every camera until they go Out)
+// full: whole body (head to feet) visible; xyz: floor spot X, Y and body height Z in metres
+// (calibrated camera); region / kind: shop area they stand in; g / a / s: gender, age, score
+export type LiveBox = {
+  track: string
+  b: [number, number, number, number]
+  area: 'in' | 'out' | null
+  visit?: boolean
+  full?: boolean
+  xyz?: [number, number, number] | null
+  region?: string | null
+  kind?: string | null
+  g?: string | null
+  a?: number | null
+  s?: number | null
+}
 export type LiveFrame = { f: number; w: number; h: number; boxes: LiveBox[]; counts: { In: number; Out: number } }
 export type LiveState = 'connecting' | 'live' | 'off' | 'failed'
 

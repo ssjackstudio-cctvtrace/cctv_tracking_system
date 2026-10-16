@@ -22,8 +22,9 @@ Rules (per tracked person on one camera):
   - In:  the feet are completely in the In area. This includes people who
          are already inside when the box starts (or walk into this camera's
          view from inside the shop).
-  - Out: only after this person was In, when their feet are then completely
-         back in the Out area. People never In are not counted Out.
+  - Out: only after this person was In (on this camera, or linked to a
+         visitor who went In on any camera), when their feet are then
+         completely back in the Out area. People never In are not counted Out.
 The camera worker then decides which visitor (track_id) the person is, so the
 same person keeps one track_id across all cameras (see visitors.py).
 """
@@ -182,6 +183,7 @@ class _Track:
     candidate: str | None = None
     streak: int = 0
     counted_in: bool = False  # counted In, and not counted Out since
+    linked: bool = False  # linked to a visitor already inside (In counted on this or another camera)
 
 
 @dataclass
@@ -208,6 +210,16 @@ class LineCounter:
         t = self._tracks.get(track_id)
         return t.area if t else None
 
+    def mark_in(self, track_id: int, now: float | None = None) -> None:
+        """This person is already inside (linked to a visitor that went In,
+        maybe on another camera): walking steadily into the Out area now counts
+        Out on this camera, even though this camera did not count them In."""
+        now = time.time() if now is None else now
+        t = self._tracks.setdefault(track_id, _Track(now))
+        t.linked = True
+        if t.area == "out":  # already standing in the Out area: count it on the next steady frames
+            t.area, t.candidate, t.streak = None, None, 0
+
     def update(self, feet: dict[int, list[Point]], now: float | None = None) -> list[Crossing]:
         now = time.monotonic() if now is None else now
         crossings: list[Crossing] = []
@@ -232,9 +244,9 @@ class LineCounter:
             # Feet completely in a new area for long enough
             t.area, t.candidate, t.streak = area, None, 0
             if area == "out":
-                if t.counted_in:
+                if t.counted_in or t.linked:
                     crossings.append(Crossing(track_id, "Out"))
-                    t.counted_in = False
+                    t.counted_in = t.linked = False
             elif area == "in" and not t.counted_in:
                 crossings.append(Crossing(track_id, "In"))
                 t.counted_in = True

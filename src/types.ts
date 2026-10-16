@@ -1,5 +1,6 @@
 // Types that match the Supabase tables (public schema).
 // uuid, timestamptz and inet columns come back from Supabase as strings.
+import type { FloorAreas, RegionKind } from './space3d'
 
 // ---------- BRANCH ----------
 export type Branch = {
@@ -59,7 +60,9 @@ export type CountLine =
   | { points: Point[]; in_point: Point; in_zone: Point[] }
   | { all_in: true }
   | { start: Point; end: Point }
-export type CounterZone = { points: Point[] }
+// camera.floor_areas: the camera's 3D floor calibration + shop areas
+// (Counter, Point of Purchase display, ...). See space3d.ts.
+export type CameraFloorAreas = FloorAreas
 
 export type Camera = {
   camera_id: string
@@ -71,7 +74,7 @@ export type Camera = {
   ip_address: string | null // inet
   stream_path: 'stream1' | 'stream2' | null
   count_line: CountLine | null // jsonb
-  counter_zone: CounterZone | null // jsonb
+  floor_areas: CameraFloorAreas | null // jsonb
   last_snapshot_url: string | null
   last_seen_at: string | null
   created_at: string
@@ -88,7 +91,7 @@ export type CameraEditable = Pick<
   | 'ip_address'
   | 'stream_path'
   | 'count_line'
-  | 'counter_zone'
+  | 'floor_areas'
 >
 
 // ---------- VISIT ----------
@@ -110,7 +113,9 @@ export type CctvEvent = {
   cctv_event_id: string
   camera_id: string
   visit_id: string
-  direction: 'In' | 'Out' | 'Counter' | 'Not Detected'
+  // In = came in, or walked into a shop area (Counter, POP display ...); Out = left the shop
+  direction: 'In' | 'Out'
+  track_region: RegionKind // where the person was: 'Outside Shop' | 'Purchasing' | 'Counter'
   confidence: number // 0–100
   event_time: string
 }

@@ -12,8 +12,10 @@ import DataTable, { Badge } from './Datatable'
 import { supabase } from './lib/supabase'
 import { TABLES, isOnline } from './Usetable'
 import type { Branch, Camera, EdgeDevice, Point } from './types'
-import { LiveVideo, type LiveFrame, type LiveState } from './Livevideo'
+import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside, type CountAreas } from './countZones'
+import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
+import { REGION_COLORS, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import './Camera.css'
 
 // How often the snapshot image and people counts refresh
@@ -185,8 +187,11 @@ export function CameraScreen({
 }
 
 // People In / Out / Inside for ONE camera, counted from CCTV_EVENT
-// (direction = 'In' / 'Out') since midnight today. reloadKey changes when the
-// edge box says a new row was saved, so the numbers change at once.
+// (direction = 'In' / 'Out') since midnight today. People, not rows: one
+// person (visit = one track_id) is counted once, even when this camera also
+// recorded them walking into a shop area (direction In, track_region =
+// the area's kind). reloadKey changes when the edge box says a new row was saved,
+// so the numbers change at once.
 function usePeopleCount(cameraId: string, reloadKey = 0) {
   const [counts, setCounts] = useState({ in: 0, out: 0 })
   const [error, setError] = useState('')
@@ -196,20 +201,30 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
     const load = async () => {
       const startOfToday = new Date()
       startOfToday.setHours(0, 0, 0, 0)
-      const countDirection = (direction: 'In' | 'Out') =>
-        supabase
-          .from(TABLES.cctvEvent)
-          .select('cctv_event_id', { count: 'exact', head: true })
-          .eq('camera_id', cameraId)
-          .eq('direction', direction)
-          .gte('event_time', startOfToday.toISOString())
-      const [inRes, outRes] = await Promise.all([countDirection('In'), countDirection('Out')])
+      const visitsWith = async (direction: 'In' | 'Out') => {
+        const ids = new Set<string>()
+        for (let from = 0; from < 20000; from += 1000) {
+          const { data, error } = await supabase
+            .from(TABLES.cctvEvent)
+            .select('visit_id')
+            .eq('camera_id', cameraId)
+            .eq('direction', direction)
+            .gte('event_time', startOfToday.toISOString())
+            .range(from, from + 999)
+          if (error) return { count: 0, error }
+          const rows = (data ?? []) as { visit_id: string }[]
+          rows.forEach((r) => ids.add(r.visit_id))
+          if (rows.length < 1000) break
+        }
+        return { count: ids.size, error: null }
+      }
+      const [inRes, outRes] = await Promise.all([visitsWith('In'), visitsWith('Out')])
       if (cancelled) return
       const err = inRes.error ?? outRes.error
       if (err) setError(err.message)
       else {
         setError('')
-        setCounts({ in: inRes.count ?? 0, out: outRes.count ?? 0 })
+        setCounts({ in: inRes.count, out: outRes.count })
       }
     }
     load()
@@ -232,6 +247,7 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
 type TrackRecord = {
   cctv_event_id: string
   direction: string
+  track_region: string | null
   confidence: number | null
   event_time: string
   visit: {
@@ -256,7 +272,7 @@ function useTrackRecords(cameraId: string, reloadKey = 0) {
       const { data, error } = await supabase
         .from(TABLES.cctvEvent)
         .select(
-          'cctv_event_id, direction, confidence, event_time, visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
+          'cctv_event_id, direction, track_region, confidence, event_time, visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
         )
         .eq('camera_id', cameraId)
         .order('event_time', { ascending: false })
@@ -334,28 +350,54 @@ function drawAreas(ctx: CanvasRenderingContext2D, areas: CountAreas) {
   ctx.restore()
 }
 
-// Rectangle around a counted person, with their record from the database
-function drawPerson(ctx: CanvasRenderingContext2D, box: [number, number, number, number], rec: TrackRecord | undefined, track: string) {
+// A tracked person: a 3D box on the floor (calibrated camera, full body) or a
+// rectangle, with their label. The label comes from the edge box with every
+// picture (track_id, gender, age, area, X / Y / Z), so it stays on the person
+// on every camera until they go Out, even before this camera saved a record.
+function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecord | undefined, cal: Calibration | null) {
   const { width: W, height: H } = ctx.canvas
-  const [x1, y1, x2, y2] = [box[0] * W, box[1] * H, box[2] * W, box[3] * H]
-  const color = rec ? (rec.direction === 'Out' ? OUT_COLOR : IN_COLOR) : 'rgba(226,232,240,0.9)'
+  const [x1, y1, x2, y2] = [box.b[0] * W, box.b[1] * H, box.b[2] * W, box.b[3] * H]
+  const linked = !!box.visit || !!rec
+  const color = !linked
+    ? 'rgba(226,232,240,0.9)'
+    : box.kind && box.kind in REGION_COLORS
+      ? REGION_COLORS[box.kind as RegionKind]
+      : rec?.direction === 'Out'
+        ? OUT_COLOR
+        : IN_COLOR
   ctx.save()
-  ctx.lineWidth = rec ? Math.max(2, W / 320) : 1
-  ctx.strokeStyle = color
-  if (!rec) ctx.setLineDash([6, 4])
-  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
-  ctx.setLineDash([])
+  let labelX = x1
+  let labelY = y1
+  const in3d = !!(cal && box.xyz && box.full)
+  if (in3d) {
+    const top = drawPersonBox3d(ctx, cal!, box.xyz!, color)
+    if (top) {
+      labelX = top.x * W - (x2 - x1) / 2
+      labelY = Math.min(top.y * H, y1)
+    }
+  } else {
+    ctx.lineWidth = linked ? Math.max(2, W / 320) : 1
+    ctx.strokeStyle = color
+    if (!linked || box.full === false) ctx.setLineDash([6, 4])
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+    ctx.setLineDash([])
+  }
 
   const v = rec?.visit
-  const lines = rec
+  const gender = box.g ?? v?.est_gender
+  const age = box.a ?? v?.est_age
+  const score = box.s ?? v?.demographic_score
+  const lines = linked
     ? [
-        v!.track_id,
-        `${v!.visit_type} · ${rec.direction}`,
-        `${v!.est_gender} · Age ${fmtAge(v!.est_age)}`,
-        `Match Confidence ${fmt2(rec.confidence)}%`,
-        `Demographic Score ${fmt2(v!.demographic_score)}`,
+        box.track,
+        `${v?.visit_type ?? 'Visitor'} · ${rec?.direction === 'Out' ? 'Out' : 'In'}${box.region ? ` · ${box.region}` : ''}`,
+        `${gender ?? 'Unknown'} · Age ${fmtAge(age)}`,
+        ...(box.xyz && box.full ? [`X ${box.xyz[0].toFixed(1)} · Y ${box.xyz[1].toFixed(1)} · Z ${box.xyz[2].toFixed(2)} m`] : []),
+        ...(rec ? [`Match Confidence ${fmt2(rec.confidence)}%`] : []),
+        `Demographic Score ${fmt2(score)}`,
+        ...(box.full === false ? ['Partly hidden'] : []),
       ]
-    : [track.split('-').pop() ?? track]
+    : [`${box.track.split('-').pop() ?? box.track}${box.full === false ? ' · partly hidden' : ''}`]
   const font = Math.max(11, Math.round(H * 0.024))
   ctx.font = `600 ${font}px system-ui, sans-serif`
   ctx.textAlign = 'left'
@@ -364,10 +406,10 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: [number, number, number,
   const lineH = Math.round(font * 1.25)
   const boxW = Math.max(...lines.map((l) => ctx.measureText(l).width)) + pad * 2
   const boxH = lines.length * lineH + pad * 2
-  const lx = Math.min(Math.max(x1, 0), W - boxW)
-  const ly = y1 - boxH >= 0 ? y1 - boxH : Math.min(y1, H - boxH) // above the person, or inside the top
+  const lx = Math.min(Math.max(labelX, 0), W - boxW)
+  const ly = labelY - boxH >= 0 ? labelY - boxH : Math.min(Math.max(labelY, 0), H - boxH) // above the person, or inside the top
   ctx.globalAlpha = 0.85
-  ctx.fillStyle = rec ? color : 'rgba(15,23,42,0.7)'
+  ctx.fillStyle = linked ? color : 'rgba(15,23,42,0.7)'
   ctx.fillRect(lx, ly, boxW, boxH)
   ctx.globalAlpha = 1
   ctx.fillStyle = '#fff'
@@ -689,6 +731,10 @@ export default function CameraDetails({
   const cam = info ?? { ...camera, edge_device: null } // until the query answers
   const edge = info?.edge_device ?? null
   const areas = useMemo(() => readCountLine(camera.count_line), [camera.count_line])
+  // 3D floor + shop areas (updated at once when saved below, before the camera list reloads)
+  const [floorAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
+  useEffect(() => setFloorAreas(readFloorAreas(camera.floor_areas)), [camera.floor_areas])
+  const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
   const [showAll, setShowAll] = useState(false)
   const [liveMsg, setLiveMsg] = useState<{ state: LiveState; msg: string }>({ state: 'connecting', msg: '' })
   const grabFrameRef = useRef<(() => string | null) | null>(null)
@@ -696,15 +742,18 @@ export default function CameraDetails({
   // People inside = people standing in this camera's In area right now (from the live video)
   const [insideNow, setInsideNow] = useState<number | null>(null)
 
-  // Count line + In area, then a rectangle and record for each counted person
+  // 3D view: floor grid + X / Y / Z axes + shop areas as 3D boxes, the count
+  // line and In area, then each person (3D box + label), and a floor map
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
     const nIn = frame.boxes.filter((b) => b.area === 'in').length
     setInsideNow((cur) => (cur === nIn ? cur : nIn))
+    drawSpace(ctx, space)
     if (areas) drawAreas(ctx, areas)
-    for (const box of frame.boxes) {
-      const rec = records.byTrack.get(box.track)
-      if (rec || showAll) drawPerson(ctx, box.b, rec, box.track)
-    }
+    const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
+    for (const box of shown) drawPerson(ctx, box, records.byTrack.get(box.track), floorAreas.calibration)
+    drawFloorMap(ctx, floorAreas, shown, (b) =>
+      b.kind && b.kind in REGION_COLORS ? REGION_COLORS[b.kind as RegionKind] : b.visit ? IN_COLOR : '#94a3b8',
+    )
   }
 
   const cameraRows: [string, ReactNode][] = [
@@ -728,7 +777,9 @@ export default function CameraDetails({
   const liveNote = !liveUrl
     ? 'Live video is not set up for this edge box yet, so the picture updates every few seconds.'
     : liveMsg.state === 'live'
-      ? 'Live video. Counted people are boxed with their record (green = In, orange = Out).'
+      ? floorAreas.calibration
+        ? '3D live tracking: each full-body person stands in a 3D box on the 1 m floor grid, with their floor spot (X, Y) and height (Z). The label keeps their track ID on every camera until they go Out.'
+        : 'Live video. Counted people are boxed with their record (green = In, orange = Out). Set the 3D floor below for 3D tracking.'
       : liveMsg.state === 'failed'
         ? `${liveMsg.msg || 'Cannot reach the live video'}. Showing the latest snapshot.`
         : liveMsg.state === 'off'
@@ -781,6 +832,13 @@ export default function CameraDetails({
         liveReady={liveMsg.state === 'live'}
       />
 
+      <AreasEditor
+        camera={camera}
+        grabFrame={() => grabFrameRef.current?.() ?? null}
+        liveReady={liveMsg.state === 'live'}
+        onSaved={setFloorAreas}
+      />
+
       {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}
       <p className="cam-count-note">People counted by this camera today</p>
       <div className="cam-counts">
@@ -811,6 +869,7 @@ export default function CameraDetails({
             { header: 'Track ID', render: (r) => r.visit.track_id },
             { header: 'Visit Type', render: (r) => <Badge text={r.visit.visit_type} /> },
             { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+            { header: 'Track Region', render: (r) => r.track_region ?? '—' },
             { header: 'Gender', render: (r) => r.visit.est_gender },
             { header: 'Age', render: (r) => fmtAge(r.visit.est_age) },
             { header: 'Match Confidence', render: (r) => `${fmt2(r.confidence)}%` },

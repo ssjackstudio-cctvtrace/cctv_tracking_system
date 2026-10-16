@@ -1,0 +1,11 @@
+# ByteTrack settings for the shop cameras (Ultralytics tracker file).
+# Same as Ultralytics' bytetrack.yaml, except track_buffer: a person hidden
+# behind a shelf or another shopper keeps the same tracker number for longer
+# (60 frames instead of 30), so their track_id label does not jump.
+tracker_type: bytetrack
+track_high_thresh: 0.25 # threshold for the first association
+track_low_thresh: 0.1 # threshold for the second association
+new_track_thresh: 0.25 # threshold to start a new track
+track_buffer: 60 # frames a lost person is kept before their number is dropped
+match_thresh: 0.8 # threshold for matching tracks
+fuse_score: True # fuse confidence scores with the iou distances before matching

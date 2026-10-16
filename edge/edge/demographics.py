@@ -1,14 +1,19 @@
-"""Estimated gender and age for each tracked person (visit.est_gender,
-visit.est_age, visit.demographic_score).
+"""Estimated gender and age for each visitor (visit.est_gender,
+visit.est_age, visit.demographic_score), from the WHOLE body.
 
-How it works, per person (track):
-  1. Look for a face in the top part of the person's box (YuNet face detector).
-  2. Run the gender and age models on that face.
-  3. Repeat on a few different frames while the person is walking, and average.
-     One frame is often blurred or half-turned; the average is steadier.
+Only people whose full body is in the picture (head to feet) are looked at.
+Per look, up to three kinds of evidence are added to the visitor's running
+average (shared by all cameras, so every camera that sees the person helps):
+  1. Face (when visible): YuNet face detector + gender / age face models.
+  2. Whole body (face, hands, upper body, lower body, feet): a pedestrian
+     attribute model (PA-100K attributes: Female, AgeLess18, Age18-60,
+     AgeOver60), so people seen from the side or from behind get an estimate
+     too. Optional: BODY_MODEL in .env (see README → Gender / age).
+  3. Body height in metres (cameras calibrated in "Areas (3D)"): a short body
+     makes a child more likely, a tall body an adult.
+Repeated on several frames and cameras while the person walks, and averaged.
 
-Only the numbers are kept. No face picture is saved or sent anywhere.
-People seen only from behind stay "Unknown".
+Only the numbers are kept. No face or body picture is saved or sent anywhere.
 
 Models (run on the CPU with OpenCV, nothing extra to install). Get them with:
     python download_models.py
@@ -16,6 +21,10 @@ Models (run on the CPU with OpenCV, nothing extra to install). Get them with:
   - gender_googlenet.onnx, age_googlenet.onnx   (ONNX Model Zoo, Levi & Hassner)
 The age model gives 8 age groups, so est_age is an estimate within a group,
 not an exact age.
+
+Whole-body model (optional): a PA-100K person attribute model exported to ONNX
+(e.g. PaddleClas PULC "person_attribute", 26 outputs, input 3x256x192 RGB).
+Put it at models/person_attribute_pa100k.onnx or set BODY_MODEL.
 """
 
 from __future__ import annotations
@@ -42,6 +51,24 @@ FACE_MIN_PIXELS = 36  # smaller faces are too blurry to judge
 FACE_MARGIN = 0.20  # extra border around the face, as a share of its size
 GENDER_MIN_CONFIDENCE = 0.60  # below this (after averaging) → "Unknown"
 
+# Whole-body attribute model (PA-100K order): index of Female and the 3 age groups
+PAR_FEMALE, PAR_AGE_OVER60, PAR_AGE_18_60, PAR_AGE_LESS18 = 22, 19, 20, 21
+PAR_SIZE = (192, 256)  # width, height
+PAR_MEAN, PAR_STD = np.array([0.485, 0.456, 0.406]), np.array([0.229, 0.224, 0.225])
+BODY_WEIGHT = float(os.getenv("BODY_WEIGHT", "0.6"))  # a body look counts this much against a face look (1.0)
+# The body model's 3 age groups spread over the face model's 8 groups
+BODY_AGE_SPREAD = np.array([
+    [0.05, 0.15, 0.35, 0.45, 0.00, 0.00, 0.00, 0.00],  # under 18
+    [0.00, 0.00, 0.00, 0.10, 0.35, 0.30, 0.25, 0.00],  # 18-60
+    [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.15, 0.85],  # over 60
+])
+# Body height (metres) → how likely each age group is
+HEIGHT_PRIORS = [
+    (1.30, np.array([1.0, 1.0, 1.0, 0.5, 0.15, 0.1, 0.1, 0.1])),  # shorter than 1.30 m: child
+    (1.50, np.array([0.3, 0.6, 1.0, 1.0, 0.7, 0.6, 0.6, 0.6])),  # 1.30–1.50 m
+    (9.99, np.array([0.05, 0.05, 0.2, 0.8, 1.0, 1.0, 1.0, 1.0])),  # taller: teenager / adult
+]
+
 
 def _path(env: str, default: str) -> str:
     p = os.getenv(env, default)
@@ -50,23 +77,39 @@ def _path(env: str, default: str) -> str:
 
 @dataclass
 class Estimate:
-    """Running average for one person."""
+    """Running (weighted) average for one person."""
 
     samples: int = 0
+    weight: float = 0.0
     gender_sum: np.ndarray = field(default_factory=lambda: np.zeros(2))
     age_sum: np.ndarray = field(default_factory=lambda: np.zeros(len(AGE_GROUPS)))
+    height: float | None = None  # body height in metres (None = not measured)
 
-    def add(self, gender_probs: np.ndarray, age_probs: np.ndarray) -> None:
+    def add(self, gender_probs: np.ndarray, age_probs: np.ndarray, weight: float = 1.0) -> None:
         self.samples += 1
-        self.gender_sum += gender_probs
-        self.age_sum += age_probs
+        self.weight += weight
+        self.gender_sum += np.asarray(gender_probs, dtype=float) * weight
+        self.age_sum += np.asarray(age_probs, dtype=float) * weight
+
+    def merge(self, other: "Estimate") -> None:
+        """Add another camera's / tracker's looks at the same person."""
+        self.samples += other.samples
+        self.weight += other.weight
+        self.gender_sum += other.gender_sum
+        self.age_sum += other.age_sum
+        if self.height is None:
+            self.height = other.height
 
     def visit_fields(self) -> dict:
         """est_gender / est_age / demographic_score for the visit row."""
-        if self.samples == 0:
+        if self.samples == 0 or self.weight <= 0:
             return {"est_gender": "Unknown", "est_age": 0, "demographic_score": 0.0}
-        g = self.gender_sum / self.samples
-        a = self.age_sum / self.samples
+        g = self.gender_sum / self.weight
+        a = self.age_sum / self.weight
+        if self.height is not None:
+            prior = next(p for limit, p in HEIGHT_PRIORS if self.height < limit)
+            a = a * prior
+            a = a / max(float(a.sum()), 1e-9)
         g_conf, a_conf = float(g.max()), float(a.max())
         gender = GENDERS[int(g.argmax())] if g_conf >= GENDER_MIN_CONFIDENCE else "Unknown"
         age = int(round(float((a / a.sum()) @ AGE_MIDDLE)))  # weighted over the age groups
@@ -101,6 +144,51 @@ class Demographics:
         self.face = cv2.FaceDetectorYN.create(face, "", (320, 320), FACE_MIN_SCORE)
         self.gender = cv2.dnn.readNetFromONNX(gender)
         self.age = cv2.dnn.readNetFromONNX(age)
+        # Whole-body attribute model (optional)
+        self.body = None
+        body = _path("BODY_MODEL", "models/person_attribute_pa100k.onnx")
+        if os.path.isfile(body):
+            try:
+                self.body = cv2.dnn.readNetFromONNX(body)
+            except cv2.error as exc:
+                log.warning("Whole-body gender / age model %s could not be loaded: %s", body, exc)
+        else:
+            log.info("Whole-body gender / age model not found (%s): using the face only. "
+                     "See README → Gender / age.", body)
+
+    def from_body(self, frame: np.ndarray, box: tuple[float, float, float, float]):
+        """Gender and age-group probabilities from the whole body (face, hands,
+        upper body, lower body, feet), or None (no body model / box too small)."""
+        if not self.enabled or self.body is None:
+            return None
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in box)
+        crop = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        if crop.shape[0] < 64 or crop.shape[1] < 24:
+            return None
+        rgb = cv2.cvtColor(cv2.resize(crop, PAR_SIZE), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        blob = ((rgb - PAR_MEAN) / PAR_STD).transpose(2, 0, 1)[None].astype(np.float32)
+        self.body.setInput(blob)
+        out = self.body.forward().flatten()
+        if out.size < 26:
+            return None
+        if out.min() < 0 or out.max() > 1:  # raw scores → probabilities
+            out = 1 / (1 + np.exp(-out))
+        female = float(out[PAR_FEMALE])
+        ages = np.array([out[PAR_AGE_LESS18], out[PAR_AGE_18_60], out[PAR_AGE_OVER60]], dtype=float)
+        ages = ages / max(float(ages.sum()), 1e-9)
+        return np.array([1 - female, female]), ages @ BODY_AGE_SPREAD
+
+    def from_whole_person(self, frame: np.ndarray, box: tuple[float, float, float, float]):
+        """All looks at one full-body person: [(gender_probs, age_probs, weight), ...]."""
+        found = []
+        face = self.from_person(frame, box)
+        if face is not None:
+            found.append((face[0], face[1], 1.0))
+        body = self.from_body(frame, box)
+        if body is not None:
+            found.append((body[0], body[1], BODY_WEIGHT))
+        return found
 
     def from_person(self, frame: np.ndarray, box: tuple[float, float, float, float]):
         """Gender and age-group probabilities from the face inside a person box

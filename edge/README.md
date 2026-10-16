@@ -152,9 +152,14 @@ picture. **Save**.
   in the Out area. People never In are not counted Out.
 - **Whole screen is In** (button in the editor): for a camera inside the shop
   that does not see the entrance. Everyone it sees is In; it never counts Out.
-- **Full body**: people whose feet are cut off by the bottom of the picture,
-  or whose box is not tall enough (`FULL_BODY_RATIO`, default 1.2), are
-  followed but not counted until their full body is seen.
+- **Full body**: only people whose whole body is in the picture (head,
+  upper body, lower body and feet) are counted, placed in 3D and looked at
+  for gender / age. With a pose model (`MODEL=yolo11n-pose.pt` on the PC) the
+  body parts are checked one by one; with the plain person model (the RKNN
+  model on the box) the box must not touch the top or bottom of the picture
+  and must be tall like a standing person (`FULL_BODY_RATIO`, default 1.2).
+  People partly hidden are still followed, and keep their track_id label,
+  but are not counted until their full body is seen.
 - For a camera looking straight down use `ANCHOR=center` (the box middle is
   used instead of the feet).
 
@@ -162,22 +167,89 @@ Older two-point lines still work (In = the side the green arrow pointed to).
 
 ## One track ID per person (all cameras)
 
-All cameras of the box share one list of the people inside. When a camera
-sees someone go In, the box compares the colours of their clothes (upper and
-lower body) with everyone already inside:
+All 4 cameras send their video over the same Wi-Fi router to this one box,
+so the box sees every camera at once and keeps ONE list of the people inside
+(`edge/edge/visitors.py`):
 
-- **Looks the same** → it is that person: the camera records its own In
-  event, but with the **same visit / track_id** they got on the first camera.
-  Each camera records In at most once per visit.
-- **No match** → a new person: new visit, new track_id.
-- **Out** on any camera ends the visit (the person leaves the list). If they
-  come back later, that is a new visit.
+- The **first camera** that sees a new person go In makes the visit row; its
+  track_id (e.g. `ABT-01-3f9a2c-7`) is the person's track_id until they go Out.
+- Every other camera that sees the same person — at the same moment (views
+  that overlap) or later (another part of the shop) — is **linked** to that
+  visitor. It may record its own `cctv_event` rows (In once per camera per
+  visit, areas walked into), always with the **same visit_id / track_id**.
+  It never makes a second visit for someone already inside.
+- The label never changes while the person is inside: if a camera's tracker
+  loses them for a moment (behind a shelf, another shopper) and gives them a
+  new number, the new number is linked back to the same visitor.
+- A new person only gets a visit after `NEW_VISITOR_HOLD_SECONDS` (default
+  1 s), so a camera whose view overlaps another camera's has time to see that
+  it is someone already inside. Two cameras asking at the same moment are
+  answered one at a time, so only one visit can be made.
+- **Out** on any camera (or walking into an "Outside Shop" area) ends the
+  visit on all cameras. If they come back later, that is a new visit.
 
-Only colour numbers are kept in memory; no picture is saved. Clothes colour
-is not perfect: two people in the same plain black shirt can be mixed up, and
-very different camera colours can split one person into two. Tune with
-`REID_MAX_DISTANCE` in `.env` (lower = stricter). People who leave without
-any camera seeing them go Out are forgotten after `VISITOR_FORGET_MINUTES`.
+How the box knows it is the same person:
+
+1. **Floor position (best)** — set the **3D floor** of every camera (Camera
+   page → camera → *Shop areas (3D)*), all measured from the **same corner
+   of the shop**. Then one person seen by two cameras stands on the same floor
+   spot (within `SAME_PLACE_METRES`, default 0.9 m), and two people in the
+   same clothes standing apart are never mixed up.
+2. **Clothes colour** (upper and lower body), for cameras without a 3D floor
+   and for people walking from one camera's view into another's. Tune with
+   `REID_MAX_DISTANCE` (lower = stricter).
+3. Someone already followed as a different person in the same picture is
+   never a match (two people side by side).
+
+Only numbers are kept in memory; no picture is saved. Only people inside the
+shop (In area) are compared, so a passer-by outside never takes a visitor's
+track_id. People who leave without any camera seeing them go Out are
+forgotten after `VISITOR_FORGET_MINUTES`.
+
+The tracker keeps a hidden person's number for 60 frames
+(`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
+
+## Shop areas (3D) and track_region
+
+Camera page → camera → **Shop areas (3D)** (saved in `camera.floor_areas`):
+
+1. **Set 3D floor** (once per camera; the camera is fixed). Put 4 tape marks
+   on the floor that this camera sees, spread out (e.g. the corners of a
+   2 m × 3 m rectangle). Measure each one from the shop's reference corner:
+   X along one wall, Y along the other, in metres. Click the 4 marks on the
+   picture and type their X / Y. The page works out the camera's lens and
+   height and shows a 1 m grid on the floor: check that the grid lies flat
+   on the floor and the camera height it shows is right.
+2. **+ Add area**: click the corners of the area on the floor (counter, each
+   Point of Purchase display, the corridor outside...), give it any name and a
+   kind, and a height range (Z). With a 3D floor it is a 3D box.
+
+The box then knows, for every full-body person, their floor spot X / Y, their
+height Z and the area they are in (shown live on the camera details page, with
+a top-view floor map). `cctv_event.direction` is only **In** or **Out**; every
+row also gets `track_region` (where the person was):
+
+| Event | direction | track_region |
+|---|---|---|
+| Walks In past the count line (or first seen on a "whole screen is In" camera) | In | Purchasing, or Counter when standing in a Counter area |
+| Walks into a **Counter** area | In | Counter |
+| Walks into a **Purchasing** area (POP display...) | In | Purchasing |
+| Walks Out (count line, or into an **Outside Shop** area) | Out | Outside Shop |
+
+The area's own name (e.g. "POP Display – Shoes") is only shown on the live
+video, not saved.
+
+People are counted once per visit, so the extra In rows for areas never make
+"People In" bigger.
+
+A visitor walking into an area gets ONE event, whichever camera sees it
+first. `REGION_MIN_SECONDS` (default 1 s) is how long they must stand in the
+area before it counts. Run `supabase/cctv_event_track_region.sql` once first
+(it also makes sure `camera.floor_areas` exists, removes `cctv_event.zone_name`
+and limits `direction` to In / Out).
+
+Test on the PC with a saved area file:
+`python main.py --offline --source test.mp4 --line 0.1,0.6,0.9,0.6 --zones zone.json --show`
 
 The dashboard counts **people** (visits), not events: People In = visits with
 an In, People Out = visits with an Out, People Still Inside = visits whose
@@ -222,16 +294,29 @@ every few seconds, as before.
 When a person is counted, the box tells the open camera details page at
 once, so the counts and records update without refreshing.
 
-## Gender and age (estimated)
+## Gender and age (estimated, whole body)
 
 Once per machine, with the `.venv` active: `python download_models.py`
 (about 48 MB into `edge/models/`, not in GitHub). Then restart `main.py`.
 
-While a person is tracked, the box looks at their face up to 5 times
-(every 0.5 s), averages the results and writes `est_gender`
-(Male / Female / Unknown), `est_age` and `demographic_score` (how sure the
-models are, 0-100) to their `visit` row. No face picture is saved or sent.
-People seen only from behind stay `Unknown`. The age model works in age
+Only full-body people are looked at. Each visitor's estimate is shared by all
+cameras: up to `DEMOGRAPHIC_SAMPLES` (default 8) looks, every 0.5 s, from any
+camera, averaged and written to their `visit` row (`est_gender`
+Male / Female / Unknown, `est_age`, `demographic_score` 0-100). Each look uses:
+
+- **Face** (when visible): face detector + gender / age face models.
+- **Whole body** (face, hands, upper body, lower body, feet), optional: a
+  PA-100K pedestrian attribute model (Female, AgeLess18, Age18-60,
+  AgeOver60), so people seen from the side or from behind get an estimate
+  too. Export PaddleClas PULC `person_attribute` to ONNX
+  (`paddle2onnx --model_dir ... --save_file person_attribute_pa100k.onnx`),
+  copy it to `edge/models/person_attribute_pa100k.onnx` (or set
+  `BODY_MODEL=`). Without it, only the face is used. `BODY_WEIGHT`
+  (default 0.6) is how much a body look counts against a face look.
+- **Body height** in metres (cameras with a 3D floor): a short body makes a
+  child more likely.
+
+No face or body picture is saved or sent. The age model works in age
 groups (25-32, 38-43, ...), so `est_age` is a rough estimate. With `--show`
 the window prints it next to each person, e.g. `7 F 29`.
 Turn it off with `DEMOGRAPHICS=off` in `.env`.
