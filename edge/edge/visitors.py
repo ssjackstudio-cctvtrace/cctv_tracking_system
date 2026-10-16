@@ -14,8 +14,12 @@ Rules
   - A link is never dropped while the person is inside, even when the
     camera's tracker loses them for a moment and gives them a new number:
     the new number is linked back to the same visitor.
-  - Only Out (on any camera) ends the visit. If the person comes back later,
-    that is a new visit.
+  - Out (on any camera) is recorded once, only for someone who came into the
+    shop. After Out the person keeps their track_id: while any camera still
+    sees them outside, and for OUTSIDE_KEEP_MINUTES (10) after the last camera
+    saw them. No second Out is recorded until they come back in; coming back
+    in is the same visit and track_id (a new In event). After that time, a
+    later return is a new visit.
 
 Is this the same person? The registry compares, for every visitor inside:
   1. Floor position (cameras calibrated in "Areas (3D)"): all cameras use the
@@ -55,6 +59,9 @@ FORGET_MINUTES = float(os.getenv("VISITOR_FORGET_MINUTES", "0"))
 HIDDEN_SECONDS = 3.0  # a visitor no camera has seen for this long is "hidden" (may come back)
 LOOSE_DISTANCE = min(0.9, float(os.getenv("REID_MAX_DISTANCE", "0.45")) * 1.8)  # clothes match for a hidden visitor
 HIDDEN_MOVE_METRES = 8.0  # how far a hidden person may have walked (cameras on the shop plan)
+# After Out, the person's track_id is remembered while any camera still sees them, and
+# for this long after the last camera saw them: coming back in = same visit, same track_id.
+OUTSIDE_KEEP_MINUTES = float(os.getenv("OUTSIDE_KEEP_MINUTES", "10"))
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
 POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long after it was seen
 H_BINS, S_BINS = 16, 8
@@ -114,7 +121,8 @@ class Visitor:
     region_camera: str | None = None  # camera that set the area
     estimate: Estimate = field(default_factory=Estimate)  # gender / age from all cameras
     sent_faces: int = 0  # samples already written to the visit row
-    left: bool = False  # counted Out: visit ended
+    outside: bool = False  # counted Out, still remembered (seen outside, or < OUTSIDE_KEEP_MINUTES ago)
+    left: bool = False  # forgotten: visit ended for good
 
     def add_look(self, sig: np.ndarray | None) -> None:
         """Keep a running average of how the visitor looks (several frames, several cameras)."""
@@ -160,13 +168,16 @@ class VisitorRegistry:
             return None
         return 1.0 + app / self.max_distance
 
-    def _match_locked(self, sig, floor, exclude: set[str], now: float, visible_only: bool = False) -> Visitor | None:
+    def _match_locked(self, sig, floor, exclude: set[str], now: float, visible_only: bool = False,
+                      outside_only: bool = False) -> Visitor | None:
         best, best_s = None, None
         for v in self._inside.values():
             if v.visit_id in exclude:
                 continue
-            if visible_only and (not v.seen_on or now - max(v.seen_on.values()) >= HIDDEN_SECONDS):
-                continue  # hidden visitor: cannot be someone walking in from outside right now
+            if outside_only and not v.outside:
+                continue  # someone standing outside can only be a visitor who went Out
+            if visible_only and not v.outside and (not v.seen_on or now - max(v.seen_on.values()) >= HIDDEN_SECONDS):
+                continue  # hidden inside: cannot be someone walking in from outside right now
             s = self._score(v, sig, floor, now)
             if s is not None and (best_s is None or s < best_s):
                 best, best_s = v, s
@@ -174,15 +185,18 @@ class VisitorRegistry:
 
     def match(self, sig: np.ndarray | None, floor: tuple[float, float] | None = None,
               exclude: set[str] | None = None, now: float | None = None,
-              visible_only: bool = False) -> Visitor | None:
+              visible_only: bool = False, outside_only: bool = False) -> Visitor | None:
         """The visitor inside who is most likely this person, or None.
         exclude = visit_ids already followed as other people in this camera's picture.
         visible_only: only visitors a camera sees right now (for someone who
-        just walked in from outside: they cannot be a visitor hidden inside)."""
+        just walked in from outside: they cannot be a visitor hidden inside;
+        a visitor who went Out may come back in).
+        outside_only: only visitors who went Out (for someone standing outside)."""
         if sig is None and floor is None:
             return None
         with self._lock:
-            return self._match_locked(sig, floor, exclude or set(), time.time() if now is None else now, visible_only)
+            return self._match_locked(sig, floor, exclude or set(), time.time() if now is None else now,
+                                      visible_only, outside_only)
 
     def find_or_create(self, sig, floor, exclude: set[str], create: Callable[[], Visitor],
                        now: float | None = None, visible_only: bool = False) -> tuple[Visitor, bool]:
@@ -221,7 +235,7 @@ class VisitorRegistry:
         """The person is steadily in this area (or in none). True when the area
         changed, i.e. a cctv_event should be recorded (once, whichever camera saw it)."""
         with self._lock:
-            if visitor.left:
+            if visitor.left or visitor.outside:
                 return False
             new = region.id if region is not None else None
             if new == visitor.region:
@@ -237,13 +251,28 @@ class VisitorRegistry:
             visitor.region_camera = camera_id
             return True
 
-    def leave(self, visitor: Visitor) -> bool:
-        """Counted Out: the visit ends. False if it had already ended (Out seen by another camera)."""
+    def leave(self, visitor: Visitor, now: float | None = None) -> bool:
+        """Counted Out: the person left the shop. Their track_id is still
+        remembered: while any camera sees them outside, and for
+        OUTSIDE_KEEP_MINUTES after the last camera saw them. Coming back in is
+        the same visit and the same track_id. False if they are already outside
+        (Out already recorded, by this or another camera): no second Out until
+        they come back in."""
         with self._lock:
-            if visitor.left:
+            if visitor.left or visitor.outside:
                 return False
-            visitor.left = True
-            self._inside.pop(visitor.visit_id, None)
+            visitor.outside = True
+            visitor.last_seen = time.time() if now is None else now
+            visitor.cameras_in.clear()  # each camera records In again when they come back
+            visitor.region = visitor.region_name = visitor.region_kind = visitor.region_camera = None
+            return True
+
+    def come_back(self, visitor: Visitor) -> bool:
+        """A visitor who went Out walks back into the shop: same visit, same track_id."""
+        with self._lock:
+            if visitor.left or not visitor.outside:
+                return False
+            visitor.outside = False
             return True
 
     def forget_old(self, now: float | None = None) -> None:
@@ -254,8 +283,17 @@ class VisitorRegistry:
             day = time.localtime(now).tm_yday
             new_day = day != self._day
             self._day = day
-            for vid in [k for k, v in self._inside.items()
-                        if new_day or (self.forget_seconds > 0 and now - v.last_seen > self.forget_seconds)]:
+            keep_outside = OUTSIDE_KEEP_MINUTES * 60
+
+            def gone(v: Visitor) -> bool:
+                if new_day:
+                    return True
+                last = max([v.last_seen, *v.seen_on.values()])
+                if v.outside:  # went Out and no camera has seen them for 10 minutes
+                    return now - last > keep_outside
+                return self.forget_seconds > 0 and now - last > self.forget_seconds
+
+            for vid in [k for k, v in self._inside.items() if gone(v)]:
                 self._inside.pop(vid).left = True
 
     # ---------- hidden people coming back ----------
@@ -270,8 +308,8 @@ class VisitorRegistry:
         best, best_s = None, None
         with self._lock:
             for v in self._inside.values():
-                if v.left or v.visit_id in exclude:
-                    continue
+                if v.left or v.outside or v.visit_id in exclude:
+                    continue  # people who went Out come back through the entrance, not from hiding
                 last = max(v.seen_on.values()) if v.seen_on else v.last_seen
                 if now - last < HIDDEN_SECONDS:
                     continue  # a camera sees them right now: not hidden
@@ -288,8 +326,9 @@ class VisitorRegistry:
 
     def restore(self, visits: list[dict], now: float | None = None) -> int:
         """After the edge box restarts: put back today's visitors still inside
-        (an In but no Out), so they keep their track_id when a camera sees them again.
-        visits: [{"visit_id", "track_id", "cameras_in": [camera ids]}]"""
+        (an In but no Out), and those who went Out less than OUTSIDE_KEEP_MINUTES
+        ago, so they keep their track_id when a camera sees them again.
+        visits: [{"visit_id", "track_id", "cameras_in": [camera ids], "outside": bool, "last_seen": epoch}]"""
         now = time.time() if now is None else now
         with self._lock:
             for row in visits:
@@ -298,12 +337,16 @@ class VisitorRegistry:
                 v = Visitor(visit_id=row["visit_id"], track_id=row["track_id"],
                             cameras_in=set(row.get("cameras_in") or []))
                 v.last_seen = now - HIDDEN_SECONDS - 1  # hidden until a camera sees them
+                if row.get("outside"):
+                    v.outside, v.last_seen = True, float(row.get("last_seen") or now)
+                    v.cameras_in.clear()
                 self._inside[v.visit_id] = v
             return len(visits)
 
     def count(self) -> int:
+        """People inside the shop (not those who went Out and are only remembered)."""
         with self._lock:
-            return len(self._inside)
+            return sum(1 for v in self._inside.values() if not v.outside)
 
     def inside_now(self, seen_seconds: float = 10.0, now: float | None = None) -> dict:
         """People inside the shop right now, as the 4 cameras see them: visitors
@@ -313,8 +356,8 @@ class VisitorRegistry:
         out = {"all": 0, "male": 0, "female": 0, "unknown": 0}
         with self._lock:
             for v in self._inside.values():
-                if v.left or not v.seen_on or now - max(v.seen_on.values()) > seen_seconds:
-                    continue
+                if v.left or v.outside or not v.seen_on or now - max(v.seen_on.values()) > seen_seconds:
+                    continue  # went Out (seen outside), or not seen right now
                 gender = v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown"
                 out["all"] += 1
                 out[{"Male": "male", "Female": "female"}.get(gender, "unknown")] += 1

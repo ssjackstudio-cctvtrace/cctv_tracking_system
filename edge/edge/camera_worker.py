@@ -467,6 +467,10 @@ class CameraWorker(threading.Thread):
                                         visible_only=tid in self._from_outside)
                 how = "same person, seen by another camera" if v is not None and v.seen_on.keys() - {cam_id} \
                     else "same person, seen before"
+            elif v is None:
+                # standing outside: can only be a visitor who went Out (keeps their track_id label)
+                v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now, outside_only=True)
+                how = "same person, outside the shop"
             if v is not None:
                 self._attach(tid, v, now, how)
                 busy.add(v.visit_id)
@@ -483,7 +487,7 @@ class CameraWorker(threading.Thread):
                 d.pop(tid, None)
         if now - self._last_forget > 10:
             self._last_forget = now
-            self.registry.forget_old()
+            self.registry.forget_old(now)
 
     def _plan(self, p: Person) -> tuple[float, float] | None:
         """Floor spot on the SHOP plan (shared by all cameras), or None when this
@@ -526,7 +530,8 @@ class CameraWorker(threading.Thread):
 
     def _attach(self, tid: int, v: Visitor, now: float, how: str) -> None:
         self._link[tid] = v
-        self.counter.mark_in(tid, now)  # inside: walking out through this camera's Out area ends the visit
+        if not v.outside:
+            self.counter.mark_in(tid, now)  # inside: walking out through this camera's Out area is Out
         est = self._estimates.pop(tid, None)  # gender / age seen before the link
         if est is not None and est.samples:
             with self.registry._lock:
@@ -610,7 +615,10 @@ class CameraWorker(threading.Thread):
         return v
 
     def _camera_in(self, v: Visitor, conf: float, tid: int, when: float) -> None:
-        """In event of this camera for this visit (once per camera per visit)."""
+        """In event of this camera for this visit (once per camera per visit).
+        A visitor who went Out and walks back in keeps the same visit / track_id."""
+        if v.outside and self.registry.come_back(v):
+            log.info("person %s (%s) came back into the shop", tid, v.track_id)
         if not self.registry.first_in(v, self.camera["camera_id"]):
             return
         st = self._regions.get(tid)
@@ -620,13 +628,12 @@ class CameraWorker(threading.Thread):
                     area=r.name if inside_area else None)
 
     def _went_out(self, v: Visitor, conf: float, tid: int, when: float, area: str | None = None) -> None:
-        if not self.registry.leave(v):
-            return  # Out already recorded by another camera
+        if not self.registry.leave(v, when):
+            return  # already outside (Out recorded before): no second Out until they come back in
         self._send_estimate(v, final=True)
-        # visit ends; coming back later is a new visit
+        # The person keeps their track_id label outside (links stay), and is remembered for
+        # OUTSIDE_KEEP_MINUTES after the last camera saw them: coming back in = same track_id
         self._event(v, "Out", conf, tid, "Outside Shop", when, area=area)
-        for t in [t for t, lv in self._link.items() if lv is v]:
-            del self._link[t]
 
     # ---------- Shop areas (3D regions) ----------
     def _walk_regions(self, people: list[Person], now: float) -> None:

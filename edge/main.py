@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from edge.config import load_settings, rtsp_url  # noqa: E402
 from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
 from edge.uploader import SnapshotUploader, Writer  # noqa: E402
-from edge.visitors import VisitorRegistry  # noqa: E402
+from edge.visitors import OUTSIDE_KEEP_MINUTES, VisitorRegistry  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -73,13 +74,14 @@ def main() -> None:
 
     def restore_visitors() -> None:
         """After a restart: today's people still inside (an In on one of this box's
-        cameras and no Out since) are put back, so they keep their track_id."""
+        cameras and no Out since), and people who went Out less than
+        OUTSIDE_KEEP_MINUTES ago, are put back, so they keep their track_id."""
         if supa is None:
             return
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         try:
             rows = supa.select(
-                "cctv_event", "visit_id,direction,camera_id,camera!inner(edge_device_id),visit!inner(track_id)",
+                "cctv_event", "visit_id,direction,event_time,camera_id,camera!inner(edge_device_id),visit!inner(track_id)",
                 **{"camera.edge_device_id": f"eq.{settings.edge_device_id}",
                    "event_time": f"gte.{midnight.isoformat()}", "order": "event_time.asc", "limit": "20000"},
             )
@@ -87,14 +89,24 @@ def main() -> None:
             log.warning("Could not reload today's visitors (they get a new track_id if seen again): %s", exc)
             return
         open_visits: dict[str, dict] = {}
+        keep_outside = OUTSIDE_KEEP_MINUTES * 60
         for r in rows:  # oldest first: the newest In / Out decides
             vid = r["visit_id"]
-            if r["direction"] == "Out":
-                open_visits.pop(vid, None)
-                continue
             v = open_visits.setdefault(vid, {"visit_id": vid, "track_id": (r.get("visit") or {}).get("track_id") or vid,
                                              "cameras_in": []})
+            if r["direction"] == "Out":
+                try:  # went Out: remembered for OUTSIDE_KEEP_MINUTES (fraction padded to 6 digits for Python 3.10)
+                    stamp = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"),
+                                   str(r["event_time"]).replace("Z", "+00:00"))
+                    out_at = datetime.fromisoformat(stamp).timestamp()
+                except ValueError:
+                    out_at = 0.0
+                v.update(outside=True, last_seen=out_at, cameras_in=[])
+                continue
+            v["outside"] = False
             v["cameras_in"].append(r["camera_id"])
+        open_visits = {k: v for k, v in open_visits.items()
+                       if not v.get("outside") or time.time() - v["last_seen"] < keep_outside}
         n = visitors.restore(list(open_visits.values()))
         if n:
             log.info("Restored %d visitor(s) still inside today: they keep their track_id", n)

@@ -194,8 +194,14 @@ so the box sees every camera at once and keeps ONE list of the people inside
   1 s), so a camera whose view overlaps another camera's has time to see that
   it is someone already inside. Two cameras asking at the same moment are
   answered one at a time, so only one visit can be made.
-- **Out** on any camera (or walking into an "Outside Shop" area) ends the
-  visit on all cameras. If they come back later, that is a new visit.
+- **Out** on any camera (or walking into an "Outside Shop" area) is recorded
+  once, and only for someone who came into the shop: a person seen only
+  outside never gets an Out. After Out the person keeps their track_id label
+  while any of the cameras still sees them outside, and for
+  `OUTSIDE_KEEP_MINUTES` (default 10) after the last camera saw them. No
+  second Out is recorded while they stay outside. If they walk back in within
+  that time, it is the same visit and the same track_id (a new In event);
+  after that, a return is a new visit.
 
 How the box knows it is the same person:
 
