@@ -238,6 +238,160 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
   return { ...counts, inside: Math.max(counts.in - counts.out, 0), error }
 }
 
+// ---------- People Comes In / Comes Out timeline (today, 30-minute steps) ----------
+// Opening hours: 10:00 AM – 10:30 PM on Friday and Saturday, 10:00 AM – 10:00 PM other days.
+// Each person (visit_id) is counted once per direction, in the 30 minutes of
+// their first In / Out row from this camera today, like the cards above.
+const SLOT_MINUTES = 30
+const OPEN_MINUTES = 10 * 60
+const closeMinutes = (day: Date) => (day.getDay() === 5 || day.getDay() === 6 ? 22 * 60 + 30 : 22 * 60)
+
+type TimelineSlot = { start: Date; in: number; out: number }
+
+function usePeopleTimeline(cameraId: string, reloadKey = 0) {
+  const [slots, setSlots] = useState<TimelineSlot[]>([])
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const now = new Date()
+      const open = new Date(now)
+      open.setHours(0, OPEN_MINUTES, 0, 0)
+      const close = new Date(now)
+      close.setHours(0, closeMinutes(now), 0, 0)
+      const rows: { visit_id: string; direction: string; event_time: string }[] = []
+      for (let from = 0; from < 20000; from += 1000) {
+        const { data, error } = await supabase
+          .from(TABLES.cctvEvent)
+          .select('visit_id, direction, event_time')
+          .eq('camera_id', cameraId)
+          .in('direction', ['In', 'Out'])
+          .gte('event_time', open.toISOString())
+          .lt('event_time', close.toISOString())
+          .order('event_time', { ascending: true })
+          .range(from, from + 999)
+        if (cancelled) return
+        if (error) {
+          setError(error.message)
+          return
+        }
+        rows.push(...((data ?? []) as typeof rows))
+        if ((data ?? []).length < 1000) break
+      }
+      const count = (closeMinutes(now) - OPEN_MINUTES) / SLOT_MINUTES
+      const next: TimelineSlot[] = Array.from({ length: count }, (_, i) => ({
+        start: new Date(open.getTime() + i * SLOT_MINUTES * 60_000),
+        in: 0,
+        out: 0,
+      }))
+      const seen = { In: new Set<string>(), Out: new Set<string>() }
+      for (const r of rows) {
+        const dir = r.direction as 'In' | 'Out'
+        if (seen[dir].has(r.visit_id)) continue
+        seen[dir].add(r.visit_id)
+        const i = Math.floor((new Date(r.event_time).getTime() - open.getTime()) / (SLOT_MINUTES * 60_000))
+        if (i >= 0 && i < count) next[i][dir === 'In' ? 'in' : 'out'] += 1
+      }
+      setError('')
+      // Only up to now: the rest of the day has not happened yet
+      setSlots(next.filter((s) => s.start <= now))
+    }
+    load()
+    const timer = setInterval(load, COUNT_REFRESH_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [cameraId, reloadKey])
+
+  return { slots, error }
+}
+
+// "10:00 AM"
+const fmtClock = (d: Date) => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+
+function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: number }) {
+  const { slots, error } = usePeopleTimeline(cameraId, reloadKey)
+  const today = new Date()
+  const closeAt = closeMinutes(today)
+  const total = closeAt - OPEN_MINUTES
+
+  const W = 800
+  const H = 260
+  const pad = { left: 40, right: 16, top: 16, bottom: 32 }
+  const plotW = W - pad.left - pad.right
+  const plotH = H - pad.top - pad.bottom
+  const peak = Math.max(0, ...slots.map((s) => Math.max(s.in, s.out)))
+  const yMax = Math.max(4, Math.ceil(peak / 4) * 4)
+  const xAt = (minutes: number) => pad.left + ((minutes - OPEN_MINUTES) / total) * plotW
+  const yAt = (v: number) => pad.top + plotH - (v / yMax) * plotH
+  // Each point sits in the middle of its 30 minutes
+  const slotX = (s: TimelineSlot) => xAt(s.start.getHours() * 60 + s.start.getMinutes() + SLOT_MINUTES / 2)
+  const hours = Array.from({ length: Math.floor(closeAt / 60) - OPEN_MINUTES / 60 + 1 }, (_, i) => OPEN_MINUTES + i * 60)
+  const lines = [
+    { key: 'in' as const, label: 'People Comes In', color: IN_COLOR },
+    { key: 'out' as const, label: 'People Comes Out', color: OUT_COLOR },
+  ]
+
+  return (
+    <section className="cam-timeline">
+      <div className="cam-timeline-head">
+        <h2>People Comes In / Comes Out today</h2>
+        <div className="cam-timeline-legend">
+          {lines.map((l) => (
+            <span key={l.key}>
+              <i style={{ background: l.color }} />
+              {l.label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <p className="cam-count-note">
+        People per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
+        {fmtClock(new Date(new Date(today).setHours(0, closeAt, 0, 0)))}
+      </p>
+      {error && <p className="cam-error">Could not load the people timeline: {error}</p>}
+      <svg viewBox={`0 0 ${W} ${H}`} className="cam-timeline-chart" role="img" aria-label="People comes in and comes out today">
+        {Array.from({ length: 5 }, (_, i) => (yMax / 4) * i).map((v) => (
+          <g key={v}>
+            <line x1={pad.left} x2={W - pad.right} y1={yAt(v)} y2={yAt(v)} className="cam-timeline-grid" />
+            <text x={pad.left - 8} y={yAt(v)} textAnchor="end" dominantBaseline="middle" className="cam-timeline-tick">
+              {v}
+            </text>
+          </g>
+        ))}
+        {hours.map((m) => (
+          <text key={m} x={xAt(m)} y={H - 10} textAnchor="middle" className="cam-timeline-tick">
+            {`${((m / 60 + 11) % 12) + 1}${m < 12 * 60 ? 'am' : 'pm'}`}
+          </text>
+        ))}
+        {closeAt % 60 !== 0 && (
+          <text x={xAt(closeAt)} y={H - 10} textAnchor="middle" className="cam-timeline-tick">
+            {`${((Math.floor(closeAt / 60) + 11) % 12) + 1}:${String(closeAt % 60).padStart(2, '0')}pm`}
+          </text>
+        )}
+        {lines.map((l) => (
+          <g key={l.key}>
+            <polyline
+              points={slots.map((s) => `${slotX(s)},${yAt(s[l.key])}`).join(' ')}
+              fill="none"
+              stroke={l.color}
+              strokeWidth={2}
+              strokeLinejoin="round"
+            />
+            {slots.map((s) => (
+              <circle key={s.start.getTime()} cx={slotX(s)} cy={yAt(s[l.key])} r={3} fill={l.color}>
+                <title>{`${fmtClock(s.start)} – ${fmtClock(new Date(s.start.getTime() + SLOT_MINUTES * 60_000))}: ${s[l.key]} ${l.label}`}</title>
+              </circle>
+            ))}
+          </g>
+        ))}
+      </svg>
+    </section>
+  )
+}
+
 // ---------- People records of this camera (labels on the live video) ----------
 //   select v.track_id, v.visit_type, ce.direction, v.est_gender, v.est_age,
 //          ce.confidence, v.demographic_score
@@ -861,11 +1015,11 @@ export default function CameraDetails({
       <p className="cam-count-note">People counted by this camera today</p>
       <div className="cam-counts">
         <div className="cam-count-card">
-          <span className="cam-count-label">People In</span>
+          <span className="cam-count-label">People Comes In</span>
           <span className="cam-count-value">{people.in}</span>
         </div>
         <div className="cam-count-card">
-          <span className="cam-count-label">People Out</span>
+          <span className="cam-count-label">People Comes Out</span>
           <span className="cam-count-value">{people.out}</span>
         </div>
         <div className="cam-count-card">
@@ -873,6 +1027,8 @@ export default function CameraDetails({
           <span className="cam-count-value">{liveMsg.state === 'live' && insideNow !== null ? insideNow : '—'}</span>
         </div>
       </div>
+
+      <PeopleTimeline cameraId={camera.camera_id} reloadKey={savedTick} />
 
       <section className="cam-records">
         <h2>Latest records from this camera</h2>

@@ -188,6 +188,65 @@
   cursor: pointer;
 }
 
+/* People Comes In / Comes Out timeline (Camera Details page) */
+.cam-timeline {
+  margin: 24px 0 0;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cam-timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 4px;
+}
+
+.cam-timeline-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.cam-timeline-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 0.9rem;
+  color: #334155;
+}
+
+.cam-timeline-legend span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cam-timeline-legend i {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.cam-timeline-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.cam-timeline-grid {
+  stroke: #e2e8f0;
+  stroke-width: 1;
+}
+
+.cam-timeline-tick {
+  fill: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Latest records table (Camera Details page) */
 .cam-records {
   margin: 24px 0;
