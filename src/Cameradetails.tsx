@@ -8,6 +8,7 @@ import {
   type MutableRefObject,
   type ReactNode,
 } from 'react'
+import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import DataTable, { Badge } from './Datatable'
 import { supabase } from './lib/supabase'
 import { TABLES, isOnline } from './Usetable'
@@ -311,83 +312,54 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
 // "10:00 AM"
 const fmtClock = (d: Date) => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
 
+// Minutes after midnight → "10am", "12pm", "10:30pm"
+const fmtHour = (m: number) =>
+  `${((Math.floor(m / 60) + 11) % 12) + 1}${m % 60 ? `:${String(m % 60).padStart(2, '0')}` : ''}${m < 12 * 60 ? 'am' : 'pm'}`
+
 function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: number }) {
   const { slots, error } = usePeopleTimeline(cameraId, reloadKey)
   const today = new Date()
   const closeAt = closeMinutes(today)
-  const total = closeAt - OPEN_MINUTES
-
-  const W = 800
-  const H = 260
-  const pad = { left: 40, right: 16, top: 16, bottom: 32 }
-  const plotW = W - pad.left - pad.right
-  const plotH = H - pad.top - pad.bottom
-  const peak = Math.max(0, ...slots.map((s) => Math.max(s.in, s.out)))
-  const yMax = Math.max(4, Math.ceil(peak / 4) * 4)
-  const xAt = (minutes: number) => pad.left + ((minutes - OPEN_MINUTES) / total) * plotW
-  const yAt = (v: number) => pad.top + plotH - (v / yMax) * plotH
   // Each point sits in the middle of its 30 minutes
-  const slotX = (s: TimelineSlot) => xAt(s.start.getHours() * 60 + s.start.getMinutes() + SLOT_MINUTES / 2)
-  const hours = Array.from({ length: Math.floor(closeAt / 60) - OPEN_MINUTES / 60 + 1 }, (_, i) => OPEN_MINUTES + i * 60)
-  const lines = [
-    { key: 'in' as const, label: 'People Comes In', color: IN_COLOR },
-    { key: 'out' as const, label: 'People Comes Out', color: OUT_COLOR },
-  ]
+  const data = slots.map((s) => ({
+    minute: s.start.getHours() * 60 + s.start.getMinutes() + SLOT_MINUTES / 2,
+    range: `${fmtClock(s.start)} – ${fmtClock(new Date(s.start.getTime() + SLOT_MINUTES * 60_000))}`,
+    in: s.in,
+    out: s.out,
+  }))
+  const ticks = Array.from({ length: Math.floor(closeAt / 60) - OPEN_MINUTES / 60 + 1 }, (_, i) => OPEN_MINUTES + i * 60)
+  if (closeAt % 60) ticks.push(closeAt)
 
   return (
     <section className="cam-timeline">
-      <div className="cam-timeline-head">
-        <h2>People Comes In / Comes Out today</h2>
-        <div className="cam-timeline-legend">
-          {lines.map((l) => (
-            <span key={l.key}>
-              <i style={{ background: l.color }} />
-              {l.label}
-            </span>
-          ))}
-        </div>
-      </div>
+      <h2>People Comes In / Comes Out today</h2>
       <p className="cam-count-note">
         People per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
         {fmtClock(new Date(new Date(today).setHours(0, closeAt, 0, 0)))}
       </p>
       {error && <p className="cam-error">Could not load the people timeline: {error}</p>}
-      <svg viewBox={`0 0 ${W} ${H}`} className="cam-timeline-chart" role="img" aria-label="People comes in and comes out today">
-        {Array.from({ length: 5 }, (_, i) => (yMax / 4) * i).map((v) => (
-          <g key={v}>
-            <line x1={pad.left} x2={W - pad.right} y1={yAt(v)} y2={yAt(v)} className="cam-timeline-grid" />
-            <text x={pad.left - 8} y={yAt(v)} textAnchor="end" dominantBaseline="middle" className="cam-timeline-tick">
-              {v}
-            </text>
-          </g>
-        ))}
-        {hours.map((m) => (
-          <text key={m} x={xAt(m)} y={H - 10} textAnchor="middle" className="cam-timeline-tick">
-            {`${((m / 60 + 11) % 12) + 1}${m < 12 * 60 ? 'am' : 'pm'}`}
-          </text>
-        ))}
-        {closeAt % 60 !== 0 && (
-          <text x={xAt(closeAt)} y={H - 10} textAnchor="middle" className="cam-timeline-tick">
-            {`${((Math.floor(closeAt / 60) + 11) % 12) + 1}:${String(closeAt % 60).padStart(2, '0')}pm`}
-          </text>
-        )}
-        {lines.map((l) => (
-          <g key={l.key}>
-            <polyline
-              points={slots.map((s) => `${slotX(s)},${yAt(s[l.key])}`).join(' ')}
-              fill="none"
-              stroke={l.color}
-              strokeWidth={2}
-              strokeLinejoin="round"
-            />
-            {slots.map((s) => (
-              <circle key={s.start.getTime()} cx={slotX(s)} cy={yAt(s[l.key])} r={3} fill={l.color}>
-                <title>{`${fmtClock(s.start)} – ${fmtClock(new Date(s.start.getTime() + SLOT_MINUTES * 60_000))}: ${s[l.key]} ${l.label}`}</title>
-              </circle>
-            ))}
-          </g>
-        ))}
-      </svg>
+      <ResponsiveContainer width="100%" height={280}>
+        <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
+          <CartesianGrid stroke="#e2e8f0" vertical={false} />
+          <XAxis
+            type="number"
+            dataKey="minute"
+            domain={[OPEN_MINUTES, closeAt]}
+            ticks={ticks}
+            tickFormatter={fmtHour}
+            tick={{ fill: '#64748b', fontSize: 12 }}
+            stroke="#cbd5e1"
+          />
+          <YAxis allowDecimals={false} tick={{ fill: '#64748b', fontSize: 12 }} stroke="#cbd5e1" />
+          <Tooltip
+            labelFormatter={(_, payload) => payload?.[0]?.payload.range ?? ''}
+            contentStyle={{ borderRadius: 8, borderColor: '#e2e8f0' }}
+          />
+          <Legend verticalAlign="top" align="right" height={32} iconType="plainline" />
+          <Line type="monotone" dataKey="in" name="People Comes In" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="out" name="People Comes Out" stroke={OUT_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
     </section>
   )
 }
