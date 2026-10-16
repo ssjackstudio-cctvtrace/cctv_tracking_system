@@ -190,14 +190,20 @@ so the box sees every camera at once and keeps ONE list of the people inside
 
 How the box knows it is the same person:
 
-1. **Floor position (best)** — set the **3D floor** of every camera (Camera
-   page → camera → *Shop areas (3D)*), all measured from the **same corner
-   of the shop**. Then one person seen by two cameras stands on the same floor
-   spot (within `SAME_PLACE_METRES`, default 0.9 m), and two people in the
-   same clothes standing apart are never mixed up.
-2. **Clothes colour** (upper and lower body), for cameras without a 3D floor
-   and for people walking from one camera's view into another's. Tune with
-   `REID_MAX_DISTANCE` (lower = stricter).
+1. **Floor position (best)** — place every camera on one **shop plan**
+   (Camera page → camera → *Shop areas (3D)* → *Adjust 3D floor* → "Placed on
+   the shop plan": camera X / Y in metres from one corner of the shop, and the
+   direction it faces). Then one person seen by two cameras stands on the same
+   floor spot (within `SAME_PLACE_METRES`, default 0.9 m), and two people in
+   the same clothes standing apart are never mixed up.
+2. **Clothes colour** (upper and lower body), for cameras not placed on the
+   shop plan and for people walking from one camera's view into another's.
+   Tune with `REID_MAX_DISTANCE` (lower = stricter).
+
+**People Still Inside** on the dashboard (today) is what the cameras see right
+now: every visitor seen by any camera in the last 10 seconds, each person once
+(someone in the overlap of 2 cameras is one visitor). The box writes it to
+`edge_device.people_inside` — run `supabase/people_inside.sql` once.
 3. Someone already followed as a different person in the same picture is
    never a match (two people side by side).
 
@@ -213,16 +219,22 @@ The tracker keeps a hidden person's number for 60 frames
 
 Camera page → camera → **Shop areas (3D)** (saved in `camera.floor_areas`):
 
-1. **Set 3D floor** (once per camera; the camera is fixed). Put 4 tape marks
-   on the floor that this camera sees, spread out (e.g. the corners of a
-   2 m × 3 m rectangle). Measure each one from the shop's reference corner:
-   X along one wall, Y along the other, in metres. Click the 4 marks on the
-   picture and type their X / Y. The page works out the camera's lens and
-   height and shows a 1 m grid on the floor: check that the grid lies flat
-   on the floor and the camera height it shows is right.
+1. **3D floor — automatic.** Every camera hangs at the same fixed height,
+   `CAMERA_HEIGHT` = **3.25 m**. Until you adjust it, each camera uses an
+   automatic floor (usual tilt 25°, Tapo C230 lens: 75° across, 41° up-down,
+   88° corner to corner = lens width 63.6° at the centre + lens curve −0.52).
+   The Tapo lens is wide and round, so a flat floor looks bent at the sides
+   of the picture; the lens curve straightens it before anything is measured.
+   To fit it to a camera: open the camera page with the live video playing
+   while people walk past, click **Adjust 3D floor** → **Auto-fit tilt from
+   people** (the tilt that makes everyone's feet on the floor and head about
+   1.65 m up), then fine-tune the sliders until the 1 m grid lies flat on the
+   floor and follows the tile lines, also at the sides (Lens curve). Save.
+   No measuring in the shop is needed.
 2. **+ Add area**: click the corners of the area on the floor (counter, each
    Point of Purchase display, the corridor outside...), give it any name and a
-   kind, and a height range (Z). With a 3D floor it is a 3D box.
+   kind, and a height range (Z). It is a 3D box on the floor; edit or delete
+   it any time.
 
 The box then knows, for every full-body person, their floor spot X / Y, their
 height Z and the area they are in (shown live on the camera details page, with

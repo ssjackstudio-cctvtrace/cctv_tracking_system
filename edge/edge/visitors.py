@@ -245,3 +245,18 @@ class VisitorRegistry:
     def count(self) -> int:
         with self._lock:
             return len(self._inside)
+
+    def inside_now(self, seen_seconds: float = 10.0, now: float | None = None) -> dict:
+        """People inside the shop right now, as the 4 cameras see them: visitors
+        seen by ANY camera in the last few seconds. One visitor = one person, so
+        someone seen by 2 cameras at once (overlapping views) is counted once."""
+        now = time.time() if now is None else now
+        out = {"all": 0, "male": 0, "female": 0, "unknown": 0}
+        with self._lock:
+            for v in self._inside.values():
+                if v.left or not v.seen_on or now - max(v.seen_on.values()) > seen_seconds:
+                    continue
+                gender = v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown"
+                out["all"] += 1
+                out[{"Male": "male", "Female": "female"}.get(gender, "unknown")] += 1
+        return out

@@ -203,7 +203,8 @@ class CameraWorker(threading.Thread):
         self._estimates: dict[int, Estimate] = {}  # tracker id → gender / age seen BEFORE it is linked to a visitor
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
         self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
-        self.space = Space.from_json(camera.get("floor_areas"))  # 3D floor + shop areas
+        # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
+        self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
         self.dark_since: float | None = None  # when the picture went black (camera closed)
@@ -270,7 +271,7 @@ class CameraWorker(threading.Thread):
     # Called by main when the dashboard changes the camera (e.g. a new count line or areas)
     def update_camera(self, camera: dict[str, Any]) -> None:
         if camera.get("floor_areas") != self.camera.get("floor_areas"):
-            self.space = Space.from_json(camera.get("floor_areas"))
+            self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
             self._regions.clear()
         self.camera = camera
         self.counter.set_line(CountLine.from_json(camera.get("count_line")))
@@ -303,9 +304,9 @@ class CameraWorker(threading.Thread):
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
         if self.counter.line is None:
             log.warning("no count line / In area yet — draw it on the Camera page; counting is paused")
-        if self.space is None or not self.space.calibrated:
-            log.info("no 3D floor calibration yet (Camera page → Areas (3D)): people are matched across "
-                     "cameras by the look of their clothes only")
+        if not self.space.shared:
+            log.info("camera not placed on the shop plan yet (Camera page → Shop areas (3D)): people are "
+                     "matched across cameras by the look of their clothes only")
 
         last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
         paused = False  # True while the camera picture is closed (black)
@@ -449,7 +450,7 @@ class CameraWorker(threading.Thread):
 
             v = self._link.get(tid)
             if v is not None:  # already linked: the label stays the same until the person goes Out
-                self.registry.seen(v, cam_id, now, p.floor, p.height)
+                self.registry.seen(v, cam_id, now, self._plan(p), p.height)
                 continue
             if now - self._tried_at.get(tid, 0.0) < LINK_EVERY_SECONDS:
                 continue
@@ -457,13 +458,13 @@ class CameraWorker(threading.Thread):
             v = self._relink_lost(p, present, busy, now)
             how = "same person, new tracker number"
             if v is None and self._may_be_inside(p):
-                v = self.registry.match(self._look.get(tid), p.floor, exclude=busy, now=now)
+                v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now)
                 how = "same person, seen by another camera" if v is not None and v.seen_on.keys() - {cam_id} \
                     else "same person, seen before"
             if v is not None:
                 self._attach(tid, v, now, how)
                 busy.add(v.visit_id)
-                self.registry.seen(v, cam_id, now, p.floor, p.height)
+                self.registry.seen(v, cam_id, now, self._plan(p), p.height)
 
         # Forget tracker numbers gone for a long time (the visitor stays in the registry)
         for tid in [t for t, seen in self._seen_at.items() if now - seen > FORGET_TRACK_SECONDS]:
@@ -476,6 +477,12 @@ class CameraWorker(threading.Thread):
         if now - self._last_forget > 10:
             self._last_forget = now
             self.registry.forget_old()
+
+    def _plan(self, p: Person) -> tuple[float, float] | None:
+        """Floor spot on the SHOP plan (shared by all cameras), or None when this
+        camera is not placed on the plan: then its floor is its own and cannot be
+        compared with the other cameras' floor spots."""
+        return p.floor if self.space is not None and self.space.shared else None
 
     def _may_be_inside(self, p: Person) -> bool:
         """Only people inside the shop are compared with the visitors inside, so
@@ -560,10 +567,10 @@ class CameraWorker(threading.Thread):
             sig = self._look.get(tid)
             busy = {self._link[t].visit_id for t in by_tid if t in self._link and not self._link[t].left}
             v, created = self.registry.find_or_create(
-                sig, p.floor, busy, lambda: self._new_visitor(tid, sig, p, now), now=now
+                sig, self._plan(p), busy, lambda: self._new_visitor(tid, sig, p, now), now=now
             )
             self._attach(tid, v, now, "new visitor" if created else "same person, seen by another camera")
-            self.registry.seen(v, cam_id, now, p.floor, p.height)
+            self.registry.seen(v, cam_id, now, self._plan(p), p.height)
             self._camera_in(v, conf, tid, when)
 
     def _new_visitor(self, tid: int, sig: np.ndarray | None, p: Person, now: float) -> Visitor:
@@ -572,7 +579,7 @@ class CameraWorker(threading.Thread):
         cam = self.camera
         v = Visitor(visit_id=str(uuid.uuid4()), track_id=self.track_name(tid), first_camera=cam["camera_id"])
         v.add_look(sig)
-        v.floor, v.floor_at, v.height = p.floor, now, p.height
+        v.floor, v.floor_at, v.height = self._plan(p), now, p.height
         v.seen_on[cam["camera_id"]] = now
         row = {"visit_id": v.visit_id, "branch_id": cam["branch_id"], "track_id": v.track_id}
         est = self._estimates.pop(tid, None)

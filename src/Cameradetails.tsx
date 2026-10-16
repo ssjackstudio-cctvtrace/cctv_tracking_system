@@ -15,7 +15,7 @@ import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside, type CountAreas } from './countZones'
 import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
-import { REGION_COLORS, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
+import { REGION_COLORS, floorOrAuto, readFloorAreas, regionFloor, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import './Camera.css'
 
 // How often the snapshot image and people counts refresh
@@ -732,9 +732,17 @@ export default function CameraDetails({
   const edge = info?.edge_device ?? null
   const areas = useMemo(() => readCountLine(camera.count_line), [camera.count_line])
   // 3D floor + shop areas (updated at once when saved below, before the camera list reloads)
-  const [floorAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
+  const [savedAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
   useEffect(() => setFloorAreas(readFloorAreas(camera.floor_areas)), [camera.floor_areas])
+  // The saved floor, or the automatic floor (camera 3.25 m high) until one is saved
+  const floorAreas = useMemo<FloorAreas>(() => {
+    const calibration = floorOrAuto(savedAreas.calibration)
+    return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: regionFloor(calibration, r.image) })) }
+  }, [savedAreas])
   const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
+  // Full-body people seen on the live video (feet + top of head), for "Auto-fit tilt from people"
+  const peopleSeen = useRef<{ foot: Point; head: Point }[]>([])
+  const lastSample = useRef(0)
   const [showAll, setShowAll] = useState(false)
   const [liveMsg, setLiveMsg] = useState<{ state: LiveState; msg: string }>({ state: 'connecting', msg: '' })
   const grabFrameRef = useRef<(() => string | null) | null>(null)
@@ -747,6 +755,15 @@ export default function CameraDetails({
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
     const nIn = frame.boxes.filter((b) => b.area === 'in').length
     setInsideNow((cur) => (cur === nIn ? cur : nIn))
+    if (Date.now() - lastSample.current > 500) {
+      lastSample.current = Date.now()
+      for (const b of frame.boxes) {
+        if (!b.full) continue
+        const x = (b.b[0] + b.b[2]) / 2
+        peopleSeen.current.push({ foot: { x, y: b.b[3] }, head: { x, y: b.b[1] } })
+      }
+      if (peopleSeen.current.length > 400) peopleSeen.current.splice(0, peopleSeen.current.length - 400)
+    }
     drawSpace(ctx, space)
     if (areas) drawAreas(ctx, areas)
     const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
@@ -777,9 +794,9 @@ export default function CameraDetails({
   const liveNote = !liveUrl
     ? 'Live video is not set up for this edge box yet, so the picture updates every few seconds.'
     : liveMsg.state === 'live'
-      ? floorAreas.calibration
+      ? savedAreas.calibration
         ? '3D live tracking: each full-body person stands in a 3D box on the 1 m floor grid, with their floor spot (X, Y) and height (Z). The label keeps their track ID on every camera until they go Out.'
-        : 'Live video. Counted people are boxed with their record (green = In, orange = Out). Set the 3D floor below for 3D tracking.'
+        : '3D live tracking on the automatic floor (camera 3.25 m high). Click "Adjust 3D floor" below to fit the floor to this camera.'
       : liveMsg.state === 'failed'
         ? `${liveMsg.msg || 'Cannot reach the live video'}. Showing the latest snapshot.`
         : liveMsg.state === 'off'
@@ -837,6 +854,7 @@ export default function CameraDetails({
         grabFrame={() => grabFrameRef.current?.() ?? null}
         liveReady={liveMsg.state === 'live'}
         onSaved={setFloorAreas}
+        people={peopleSeen}
       />
 
       {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}

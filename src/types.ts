@@ -42,6 +42,8 @@ export type EdgeDevice = {
   status: 'Online' | 'Offline'
   last_heartbeat: string | null
   live_url?: string | null // live video address (supabase/live_video.sql), set by the edge box
+  // people the 4 cameras see inside right now, each person once (supabase/people_inside.sql), set by the edge box
+  people_inside?: { all: number; male: number; female: number; unknown: number; at: string } | null
   created_at: string
 }
 

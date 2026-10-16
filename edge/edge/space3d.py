@@ -1,15 +1,25 @@
 """3D floor space of one camera, and the shop areas (regions) drawn on it.
 
-Saved by the website (Camera details page → "Areas (3D)") in camera.floor_areas:
+The floor is made AUTOMATICALLY: every camera hangs at the same, fixed height
+(CAMERA_HEIGHT, 3.25 m). From that height, the camera's tilt (worked out on
+the Camera details page from people walking past), the lens width and the lens
+curve, the box knows the whole floor. The Tapo lens is wide and round, so a
+flat floor looks bent at the sides of the picture; the lens curve (k1) undoes
+that before anything is measured.
+
+Saved by the website (Camera details page → "Shop areas (3D)") in camera.floor_areas:
 
     {"version": 3,
      "calibration": {
+        "mode": "auto",                                     # floor made automatically
         "aspect": 1.7778,                                  # picture width / height
-        "image_points": [{"x": 0.12, "y": 0.91}, ... 4],    # 4 floor marks in the picture (0-1)
-        "floor_points": [{"x": 0.0, "y": 0.0}, ... 4],      # the same 4 marks on the SHOP floor (metres)
-        "img_to_floor": [9 numbers],                        # picture → floor (homography)
-        "projection":   [12 numbers],                       # floor 3D (X, Y, Z metres) → picture
-        "camera_height": 2.7},                              # metres, worked out from the 4 marks
+        "camera_height": 3.25,                              # metres, fixed
+        "tilt": 35, "hfov": 95,                             # degrees: tilt down, lens width
+        "k1": -0.2, "focal": 0.83,                          # lens curve, focal length (picture units)
+        "placed": false, "place": {"x": 0, "y": 0, "yaw": 0},  # camera position on the shop plan
+        "image_points": [...], "floor_points": [...],       # 4 floor points (for the grid)
+        "img_to_floor": [9 numbers],                        # picture (lens curve removed) → floor
+        "projection":   [12 numbers]},                      # floor 3D (X, Y, Z metres) → picture (before lens curve)
      "regions": [
         {"id": "r1", "name": "Counter", "kind": "Counter",
          "image": [{"x": .., "y": ..}, ...],                # outline on the floor, in the picture (0-1)
@@ -20,9 +30,12 @@ kind is one of "Counter", "Purchasing" (any display / Point of Purchase area,
 the name is free text) or "Outside Shop". It is what the box writes to
 cctv_event.track_region.
 
-Every camera of a shop uses the SAME floor coordinates (metres from one corner
-of the shop), so a person seen by two cameras at once lands on the same floor
-spot: that is how the box knows it is one person, not two.
+When the cameras are placed on one shop plan ("placed": true, position X / Y
+and facing direction set on the Camera page), they share the SAME floor
+coordinates, so a person seen by two cameras at once lands on the same floor
+spot: that is how the box knows it is one person, not two. Without a shared
+plan, each camera has its own floor (centred under the camera) and people are
+matched across cameras by the look of their clothes instead.
 
 Picture coordinates: x, y are 0-1 fractions of the picture. The homography and
 projection work in "square" picture units: u = x * aspect, v = y.
@@ -30,6 +43,8 @@ projection work in "square" picture units: u = x * aspect, v = y.
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -38,6 +53,33 @@ Point = tuple[float, float]
 
 REGION_KINDS = ("Outside Shop", "Purchasing", "Counter")
 MIN_HEIGHT, MAX_HEIGHT = 0.6, 2.3  # metres: a measured body height outside this is not trusted
+
+# Automatic floor (same values as the website, src/space3d.ts)
+CAMERA_HEIGHT = float(os.getenv("CAMERA_HEIGHT", "3.25"))  # metres, all cameras
+AUTO_TILT = 25.0  # degrees down from level, until the Camera page works it out
+# Tapo C230 lens (spec 75° across, 41° up-down, 88° corner to corner) =
+# straight-lens width 63.6° at the centre + lens curve -0.52 (same angles within 0.2°)
+AUTO_HFOV = 63.6  # degrees, lens width at the centre
+AUTO_K1 = -0.52  # lens curve (negative = round / barrel, like the Tapo lens)
+
+
+def auto_matrices(aspect: float, height: float, tilt: float, hfov: float,
+                  place: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> tuple[np.ndarray, np.ndarray, float]:
+    """img_to_floor (3x3), projection (3x4) and focal length of a camera at
+    `height` metres, tilted `tilt` degrees down, facing `yaw` degrees (0 = +Y),
+    standing over (x, y) on the floor. Same maths as autoCalibration() on the website."""
+    f = (aspect / 2) / math.tan(math.radians(hfov) / 2)
+    K = np.array([[f, 0, aspect / 2], [0, f, 0.5], [0, 0, 1.0]])
+    th, yaw = math.radians(tilt), math.radians(place[2])
+    facing = np.array([math.sin(yaw), math.cos(yaw), 0.0])
+    right = np.array([math.cos(yaw), -math.sin(yaw), 0.0])
+    fwd = math.cos(th) * facing + np.array([0.0, 0.0, -math.sin(th)])
+    down = np.cross(fwd, right)
+    R = np.vstack([right, down, fwd])
+    C = np.array([place[0], place[1], height])
+    P = K @ np.hstack([R, (-R @ C)[:, None]])
+    H = P[:, [0, 1, 3]]
+    return np.linalg.inv(H), P, f
 
 
 def inside(poly: list[Point], p: Point) -> bool:
@@ -71,19 +113,57 @@ class Space:
     img_to_floor: np.ndarray | None  # 3x3
     projection: np.ndarray | None  # 3x4
     regions: tuple[Region, ...]
+    k1: float = 0.0  # lens curve
+    focal: float = 0.0  # focal length in picture units (needed for the lens curve)
+    shared: bool = False  # floor coordinates shared with the other cameras (placed on one shop plan)
 
     @property
     def calibrated(self) -> bool:
         return self.img_to_floor is not None and self.projection is not None
 
     @staticmethod
+    def automatic(aspect: float = 16 / 9, regions: tuple[Region, ...] = ()) -> "Space":
+        """The floor before the Camera page saved one: fixed height, usual tilt and lens."""
+        h_inv, P, f = auto_matrices(aspect, CAMERA_HEIGHT, AUTO_TILT, AUTO_HFOV)
+        return Space(aspect, h_inv, P, regions, AUTO_K1, f, False)
+
+    # ---------- lens curve (division model, same as the website) ----------
+    def _straighten(self, p: Point) -> Point:
+        """Picture point → where it would be with a straight (not round) lens:
+        straight = picture / (1 + k1·r²), k1 < 0 for a round lens."""
+        if not self.k1 or not self.focal:
+            return p
+        cx, f = self.aspect / 2, self.focal
+        nx, ny = (p[0] * self.aspect - cx) / f, (p[1] - 0.5) / f
+        s = max(1 + self.k1 * (nx * nx + ny * ny), 0.05)
+        return (cx + f * nx / s) / self.aspect, 0.5 + f * ny / s
+
+    def _bend(self, x: float, y: float) -> Point:
+        """Straight-lens picture point → where the round Tapo lens shows it
+        (never folds back: far-away floor bends towards the lens rim)."""
+        if not self.k1 or not self.focal:
+            return x, y
+        cx, f = self.aspect / 2, self.focal
+        ux, uy = (x * self.aspect - cx) / f, (y - 0.5) / f
+        ru = math.hypot(ux, uy)
+        if ru < 1e-9:
+            return x, y
+        rd = (1 - math.sqrt(1 - 4 * self.k1 * ru * ru)) / (2 * self.k1 * ru)
+        s = rd / ru
+        return (cx + f * ux * s) / self.aspect, 0.5 + f * uy * s
+
+    @staticmethod
     def from_json(value: dict | None) -> "Space | None":
         if not isinstance(value, dict) or value.get("version") != 3:
-            return None  # empty, or saved in an older layout: set the areas again on the Camera page
+            return None  # empty, or saved in an older layout: the automatic floor is used
         pt = lambda d: (float(d["x"]), float(d["y"]))  # noqa: E731
         cal = value.get("calibration") or {}
         aspect = float(cal.get("aspect") or 16 / 9)
         h_inv = proj = None
+        try:
+            k1, focal = float(cal.get("k1") or 0.0), float(cal.get("focal") or 0.0)
+        except (TypeError, ValueError):
+            k1 = focal = 0.0
         try:
             if len(cal.get("img_to_floor") or []) == 9 and len(cal.get("projection") or []) == 12:
                 h_inv = np.array(cal["img_to_floor"], dtype=float).reshape(3, 3)
@@ -107,15 +187,16 @@ class Space:
                 ))
             except (TypeError, KeyError, ValueError):
                 continue
-        if h_inv is None and not regions:
-            return None
-        return Space(aspect, h_inv, proj, tuple(regions))
+        if h_inv is None:  # areas saved but no floor yet: automatic floor
+            return Space.automatic(aspect, tuple(regions))
+        return Space(aspect, h_inv, proj, tuple(regions), k1, focal, bool(cal.get("placed")))
 
     # ---------- picture ↔ floor ----------
     def floor_of(self, p: Point) -> Point | None:
         """Floor spot (metres) under a picture point that touches the floor (the feet)."""
         if self.img_to_floor is None:
             return None
+        p = self._straighten(p)
         X, Y, W = self.img_to_floor @ np.array([p[0] * self.aspect, p[1], 1.0])
         if abs(W) < 1e-9:
             return None
@@ -127,7 +208,7 @@ class Space:
             return None
         P = self.projection
         base = np.array([floor[0], floor[1], 0.0, 1.0])
-        v = head[1]
+        v = self._straighten(head)[1]
         den = v * P[2, 2] - P[1, 2]
         if abs(den) < 1e-12:
             return None
@@ -140,7 +221,7 @@ class Space:
         u, v, w = self.projection @ np.array([X, Y, Z, 1.0])
         if w <= 1e-9:
             return None
-        return float(u / w / self.aspect), float(v / w)
+        return self._bend(float(u / w / self.aspect), float(v / w))
 
     # ---------- regions ----------
     def region_at(self, foot: Point | None, floor: Point | None, height: float | None) -> Region | None:

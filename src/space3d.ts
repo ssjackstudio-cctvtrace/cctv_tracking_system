@@ -8,12 +8,14 @@ import type { Point } from './types'
 //                img_to_floor: [9], projection: [12], camera_height},
 //  regions: [{id, name, kind, image: [{x,y} 0–1], floor: [{x,y} metres] | null, z_min, z_max}]}
 //
-// The camera is fixed, so 4 marks on the floor whose position in the shop is
-// known (metres from one corner of the shop — the SAME corner for every
-// camera) are enough to work out the whole 3D view: floor ↔ picture
-// (homography), and the camera's lens and height (projection). From that the
-// box knows where on the shop floor each person stands (X, Y) and how tall
-// they are (Z), and the website can draw areas as 3D boxes on the picture.
+// The floor is made AUTOMATICALLY (autoCalibration): every camera hangs at the
+// same fixed height (CAMERA_HEIGHT, 3.25 m); the camera's tilt is worked out
+// from people walking past (fitTilt), and the Tapo lens width and lens curve
+// are known. The Tapo lens is wide and round, so a flat floor looks bent at the
+// sides of the picture: the lens curve (k1) is removed before measuring, and
+// added back when drawing. From that the box knows where on the floor each
+// person stands (X, Y) and how tall they are (Z), and the website draws the
+// floor grid and areas as 3D boxes on the picture.
 //
 // Picture units: u = x * aspect, v = y (square pixels).
 
@@ -34,9 +36,174 @@ export type Calibration = {
   aspect: number
   image_points: Point[]
   floor_points: Point[]
-  img_to_floor: number[] // 3×3, row by row
-  projection: number[] // 3×4, row by row
+  img_to_floor: number[] // 3×3, row by row (picture with the lens curve removed → floor)
+  projection: number[] // 3×4, row by row (floor 3D → picture before the lens curve)
   camera_height: number // metres
+  // Automatic floor (autoCalibration)
+  mode?: 'auto'
+  tilt?: number // degrees down from level
+  hfov?: number // lens width, degrees
+  k1?: number // lens curve (negative = round / barrel lens)
+  focal?: number // focal length in picture units
+  placed?: boolean // camera placed on the shop plan: floor shared with the other cameras
+  place?: { x: number; y: number; yaw: number } // camera position (metres) and facing (degrees, 0 = +Y)
+}
+
+// ---------- automatic floor ----------
+export const CAMERA_HEIGHT = 3.25 // metres, every camera (fixed)
+// Tapo C230 lens (spec: 75° across, 41° up-down, 88° corner to corner). As a
+// straight-lens width at the centre + lens curve, these give the same angles
+// (within 0.2°): 63.6° wide at the centre, curve -0.52.
+export const TAPO_C230 = { hfov: 63.6, k1: -0.52 }
+export const AUTO_FLOOR = { tilt: 25, ...TAPO_C230 } // tilt: until it is worked out from people
+
+// Real view angles of a lens setting (degrees): across, up-down, corner to corner
+export function lensAngles(aspect: number, hfov: number, k1: number) {
+  const f = aspect / 2 / Math.tan((hfov * Math.PI) / 360)
+  const angle = (r: number) => {
+    const n = r / f
+    const s = Math.max(1 + k1 * n * n, 0.05)
+    return Math.round(((2 * Math.atan(n / s) * 180) / Math.PI) * 10) / 10
+  }
+  return { across: angle(aspect / 2), upDown: angle(0.5), corner: angle(Math.hypot(aspect / 2, 0.5)) }
+}
+const PERSON_HEIGHT = 1.65 // metres, average shopper (top of the head)
+
+export type AutoFloor = {
+  tilt: number
+  hfov: number
+  k1: number
+  placed: boolean
+  place: { x: number; y: number; yaw: number }
+}
+
+// Lens curve (division model: straight = picture / (1 + k1·r²), k1 < 0 for a
+// round lens). It never folds back: far-away floor bends smoothly towards the
+// lens rim, like the wide Tapo picture. Same maths as edge/edge/space3d.py.
+// Picture point (0–1) → where a straight lens would show it
+function straighten(cal: Pick<Calibration, 'aspect' | 'k1' | 'focal'>, p: Point): Point {
+  const { k1 = 0, focal = 0, aspect } = cal
+  if (!k1 || !focal) return p
+  const cx = aspect / 2
+  const nx = (p.x * aspect - cx) / focal
+  const ny = (p.y - 0.5) / focal
+  const s = Math.max(1 + k1 * (nx * nx + ny * ny), 0.05)
+  return { x: (cx + (focal * nx) / s) / aspect, y: 0.5 + (focal * ny) / s }
+}
+
+// Straight-lens point → where the round Tapo lens shows it
+function bend(cal: Pick<Calibration, 'aspect' | 'k1' | 'focal'>, p: Point): Point {
+  const { k1 = 0, focal = 0, aspect } = cal
+  if (!k1 || !focal) return p
+  const cx = aspect / 2
+  const ux = (p.x * aspect - cx) / focal
+  const uy = (p.y - 0.5) / focal
+  const ru = Math.hypot(ux, uy)
+  if (ru < 1e-9) return p
+  const rd = (1 - Math.sqrt(1 - 4 * k1 * ru * ru)) / (2 * k1 * ru)
+  const s = rd / ru
+  return { x: (cx + focal * ux * s) / aspect, y: 0.5 + focal * uy * s }
+}
+
+// The whole 3D floor of a camera from its fixed height, tilt and lens.
+// Same maths as auto_matrices() on the edge box (edge/edge/space3d.py).
+export function autoCalibration(aspect: number, a: AutoFloor, height = CAMERA_HEIGHT): Calibration {
+  const f = aspect / 2 / Math.tan((a.hfov * Math.PI) / 360)
+  const th = (a.tilt * Math.PI) / 180
+  const yaw = (a.place.yaw * Math.PI) / 180
+  const facing = [Math.sin(yaw), Math.cos(yaw), 0]
+  const right = [Math.cos(yaw), -Math.sin(yaw), 0]
+  const fwd = [Math.cos(th) * facing[0], Math.cos(th) * facing[1], -Math.sin(th)]
+  const down = cross(fwd, right)
+  const R = [right, down, fwd]
+  const C = [a.place.x, a.place.y, height]
+  const t = R.map((r) => -(r[0] * C[0] + r[1] * C[1] + r[2] * C[2]))
+  const K = [
+    [f, 0, aspect / 2],
+    [0, f, 0.5],
+    [0, 0, 1],
+  ]
+  const P: M34 = []
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 4; j++) {
+      const col = (k: number) => (j < 3 ? R[k][j] : t[k])
+      P.push(K[i][0] * col(0) + K[i][1] * col(1) + K[i][2] * col(2))
+    }
+  const H = [P[0], P[1], P[3], P[4], P[5], P[7], P[8], P[9], P[11]]
+  const Hinv = invert3(H) ?? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  const r6 = (v: number) => Math.round(v * 1e6) / 1e6
+  const cal: Calibration = {
+    aspect: r6(aspect),
+    image_points: [],
+    floor_points: [],
+    img_to_floor: Hinv.map(r6),
+    projection: P.map(r6),
+    camera_height: height,
+    mode: 'auto',
+    tilt: a.tilt,
+    hfov: a.hfov,
+    k1: a.k1,
+    focal: r6(f),
+    placed: a.placed,
+    place: a.place,
+  }
+  // 4 floor points in the lower part of the picture (they set where the 1 m grid is drawn)
+  for (const top of [0.62, 0.72, 0.82]) {
+    const img = [
+      { x: 0.2, y: 0.95 },
+      { x: 0.8, y: 0.95 },
+      { x: 0.8, y: top },
+      { x: 0.2, y: top },
+    ]
+    const floor = img.map((p) => floorOf(cal, p))
+    if (floor.every((p) => p && Math.hypot(p.x - a.place.x, p.y - a.place.y) < 40)) {
+      cal.image_points = img
+      cal.floor_points = (floor as Point[]).map((p) => ({ x: r6(p.x), y: r6(p.y) }))
+      break
+    }
+  }
+  return cal
+}
+
+// The calibration to use: the saved one, or the automatic floor
+export function floorOrAuto(cal: Calibration | null, aspect = 16 / 9): Calibration {
+  return cal ?? autoCalibration(aspect, { ...AUTO_FLOOR, placed: false, place: { x: 0, y: 0, yaw: 0 } })
+}
+
+// Tilt (degrees) that best fits people walking past: their feet are on the
+// floor and their heads PERSON_HEIGHT above it, seen from CAMERA_HEIGHT.
+// samples: feet and top-of-head points (0–1) of full-body people.
+export function fitTilt(samples: { foot: Point; head: Point }[], aspect: number, hfov: number, k1: number): number | null {
+  const f = aspect / 2 / Math.tan((hfov * Math.PI) / 360)
+  const lens = { aspect, k1, focal: f }
+  const pts = samples.map((s) => ({ foot: straighten(lens, s.foot), head: straighten(lens, s.head) }))
+  if (pts.length < 8) return null
+  const h = CAMERA_HEIGHT
+  const top = h - PERSON_HEIGHT
+  let best: number | null = null
+  let bestErr = Infinity
+  for (let deg = 5; deg <= 85; deg += 0.5) {
+    const th = (deg * Math.PI) / 180
+    const [c, s] = [Math.cos(th), Math.sin(th)]
+    const errs: number[] = []
+    for (const p of pts) {
+      const a = (p.foot.y - 0.5) / f
+      const den = a * c + s
+      if (den <= 1e-6) continue
+      const Y = (h * (c - a * s)) / den // distance along the floor, in front of the camera
+      if (Y < 0.3) continue
+      const vHead = (top * c - Y * s) / (Y * c + top * s)
+      errs.push(Math.abs(vHead - (p.head.y - 0.5) / f))
+    }
+    if (errs.length < pts.length * 0.6) continue
+    errs.sort((x, y) => x - y)
+    const med = errs[Math.floor(errs.length / 2)]
+    if (med < bestErr) {
+      bestErr = med
+      best = deg
+    }
+  }
+  return best
 }
 
 export type FloorAreas = { version: 3; calibration: Calibration | null; regions: Region[] }
@@ -180,8 +347,9 @@ export function calibrate(
 
 // ---------- using a calibration ----------
 // Floor spot (metres) under a picture point that touches the floor
-export function floorOf(cal: Calibration, p: Point): Point | null {
+export function floorOf(cal: Calibration, picture: Point): Point | null {
   const m = cal.img_to_floor
+  const p = straighten(cal, picture) // remove the lens curve first
   const u = p.x * cal.aspect
   const X = m[0] * u + m[1] * p.y + m[2]
   const Y = m[3] * u + m[4] * p.y + m[5]
@@ -195,7 +363,7 @@ export function toPicture(cal: Calibration, X: number, Y: number, Z: number): Po
   const u = P[0] * X + P[1] * Y + P[2] * Z + P[3]
   const v = P[4] * X + P[5] * Y + P[6] * Z + P[7]
   const w = P[8] * X + P[9] * Y + P[10] * Z + P[11]
-  return w <= 1e-9 ? null : { x: u / w / cal.aspect, y: v / w }
+  return w <= 1e-9 ? null : bend(cal, { x: u / w / cal.aspect, y: v / w }) // add the lens curve
 }
 
 // ---------- reading camera.floor_areas ----------

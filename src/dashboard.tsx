@@ -94,13 +94,39 @@ type Counts = {
   inCount: number | null
   inMale: number | null
   inFemale: number | null
+  inUnknown: number | null
   outCount: number | null
   outMale: number | null
   outFemale: number | null
+  outUnknown: number | null
   insideCount: number | null
   insideMale: number | null
   insideFemale: number | null
+  insideUnknown: number | null
   dealed: number | null
+}
+
+// People inside right now, as the edge box's 4 cameras see them (edge_device.people_inside).
+// One person = one track_id, so someone seen by 2 cameras at once is counted once.
+type Tally = { all: number; male: number; female: number; unknown: number }
+const LIVE_INSIDE_FRESH_MS = 2 * 60_000 // older than this: the box is off, the number is not live
+const LIVE_INSIDE_REFRESH_MS = 10_000
+
+async function loadLiveInside(branch: string): Promise<Tally | null> {
+  const { data, error } = await supabase.from(TABLES.edgeDevice).select('people_inside').eq('branch_id', branch)
+  if (error) return null // supabase/people_inside.sql not run yet
+  const sum: Tally = { all: 0, male: 0, female: 0, unknown: 0 }
+  let fresh = false
+  for (const row of (data ?? []) as { people_inside: (Tally & { at?: string }) | null }[]) {
+    const p = row.people_inside
+    if (!p?.at || Date.now() - new Date(p.at).getTime() > LIVE_INSIDE_FRESH_MS) continue
+    fresh = true
+    sum.all += p.all ?? 0
+    sum.male += p.male ?? 0
+    sum.female += p.female ?? 0
+    sum.unknown += p.unknown ?? 0
+  }
+  return fresh ? sum : null
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -127,8 +153,13 @@ const dayRange = (day: string): Range => {
 }
 const todayKey = () => dateKey(new Date().toISOString())
 
-// One row per cctv_event: the visit (person) it belongs to, its direction and time
-type PersonEvent = { visit_id: string; direction: string; event_time: string; visit: { est_gender: string } | null }
+// One row per cctv_event: the visit (person, track_id) it belongs to, its direction and time
+type PersonEvent = {
+  visit_id: string
+  direction: string
+  event_time: string
+  visit: { est_gender: string; track_id: string } | null
+}
 
 // All cctv_event rows of the branch in the date range, oldest first
 // (read in pages of 1,000, up to 50,000 rows)
@@ -137,7 +168,7 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
   for (let from = 0; from < 50000; from += 1000) {
     let q = supabase
       .from(TABLES.cctvEvent)
-      .select('visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender)')
+      .select('visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender, track_id)')
     if (branch) q = q.eq('camera.edge_device.branch_id', branch)
     if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
     const { data, error } = await q.order('event_time', { ascending: true }).range(from, from + 999)
@@ -149,27 +180,28 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
   return out
 }
 
-// People, not events: one person (visit = one track_id) can be seen going In by
-// several cameras, so each number counts different visits.
-//   People In           = visits with an In event
-//   People Out          = visits with an Out event
-//   People Still Inside = visits whose newest event is In (in the In region now)
+// People, not events: one person (one track_id) can be seen going In by several
+// cameras and walk into several areas, so each number counts distinct track_ids.
+//   People In           = distinct track_ids with an In event
+//   People Out          = distinct track_ids with an Out event
+//   People Still Inside = distinct track_ids whose newest event is In
+//                         (used for other days; today shows the live count of the 4 cameras)
+// Male + Female + Unknown = the total.
 export function countPeople(events: PersonEvent[]) {
   const people = new Map<string, { gender: string; wentIn: boolean; wentOut: boolean; last: string }>()
   for (const e of events) {
-    const p = people.get(e.visit_id) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, wentOut: false, last: '' }
+    const key = e.visit?.track_id ?? e.visit_id
+    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, wentOut: false, last: '' }
     if (e.direction === 'In') p.wentIn = true
     if (e.direction === 'Out') p.wentOut = true
     if (e.direction === 'In' || e.direction === 'Out') p.last = e.direction // events come oldest first
-    people.set(e.visit_id, p)
+    people.set(key, p)
   }
-  const tally = (keep: (p: { wentIn: boolean; wentOut: boolean; last: string }) => boolean) => {
+  const tally = (keep: (p: { wentIn: boolean; wentOut: boolean; last: string }) => boolean): Tally => {
     const list = [...people.values()].filter(keep)
-    return {
-      all: list.length,
-      male: list.filter((p) => p.gender === 'Male').length,
-      female: list.filter((p) => p.gender === 'Female').length,
-    }
+    const male = list.filter((p) => p.gender === 'Male').length
+    const female = list.filter((p) => p.gender === 'Female').length
+    return { all: list.length, male, female, unknown: list.length - male - female }
   }
   return { in: tally((p) => p.wentIn), out: tally((p) => p.wentOut), inside: tally((p) => p.last === 'In') }
 }
@@ -223,14 +255,19 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     inCount: null,
     inMale: null,
     inFemale: null,
+    inUnknown: null,
     outCount: null,
     outMale: null,
     outFemale: null,
+    outUnknown: null,
     insideCount: null,
     insideMale: null,
     insideFemale: null,
+    insideUnknown: null,
     dealed: null,
   })
+  // Today: people inside right now, from the 4 cameras (refreshed every 10 s)
+  const [liveInside, setLiveInside] = useState<Tally | null>(null)
   const [events, setEvents] = useState<LatestEvent[]>([])
   const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
   const [eventTab, setEventTab] = useState<EventTab>('cctv')
@@ -290,12 +327,15 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
         inCount: p ? p.in.all : null,
         inMale: p ? p.in.male : null,
         inFemale: p ? p.in.female : null,
+        inUnknown: p ? p.in.unknown : null,
         outCount: p ? p.out.all : null,
         outMale: p ? p.out.male : null,
         outFemale: p ? p.out.female : null,
+        outUnknown: p ? p.out.unknown : null,
         insideCount: p ? p.inside.all : null,
         insideMale: p ? p.inside.male : null,
         insideFemale: p ? p.inside.female : null,
+        insideUnknown: p ? p.inside.unknown : null,
         dealed: dealRes.error ? null : dealRes.count,
       })
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
@@ -307,22 +347,62 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
     }
   }, [branch, day])
 
+  // People still inside today = what the 4 cameras see now (each person once)
+  const isToday = day === todayKey()
+  useEffect(() => {
+    setLiveInside(null)
+    if (!branch || !isToday) return
+    let cancelled = false
+    const load = () => loadLiveInside(branch).then((t) => !cancelled && setLiveInside(t))
+    load()
+    const timer = setInterval(load, LIVE_INSIDE_REFRESH_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [branch, isToday])
+
   const stats: {
     label: string
     value: number | null
     male?: number | null
     female?: number | null
+    unknown?: number | null
     tone?: 'in' | 'out' | 'inside'
   }[] = [
-    { label: 'People In', value: counts.inCount, male: counts.inMale, female: counts.inFemale, tone: 'in' },
-    { label: 'People Out', value: counts.outCount, male: counts.outMale, female: counts.outFemale, tone: 'out' },
     {
-      label: 'People Still Inside',
-      value: counts.insideCount,
-      male: counts.insideMale,
-      female: counts.insideFemale,
-      tone: 'inside',
+      label: 'People In',
+      value: counts.inCount,
+      male: counts.inMale,
+      female: counts.inFemale,
+      unknown: counts.inUnknown,
+      tone: 'in',
     },
+    {
+      label: 'People Out',
+      value: counts.outCount,
+      male: counts.outMale,
+      female: counts.outFemale,
+      unknown: counts.outUnknown,
+      tone: 'out',
+    },
+    liveInside
+      ? {
+          label: 'People Still Inside (now, 4 cameras)',
+          value: liveInside.all,
+          male: liveInside.male,
+          female: liveInside.female,
+          unknown: liveInside.unknown,
+          tone: 'inside',
+        }
+      : {
+          label: 'People Still Inside',
+          value: counts.insideCount,
+          male: counts.insideMale,
+          female: counts.insideFemale,
+          unknown: counts.insideUnknown,
+          tone: 'inside',
+        },
     { label: 'Transactions Dealed', value: counts.dealed },
   ]
 
@@ -378,6 +458,10 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
                 <div className="ds-stat-sub">
                   <span>Female:</span>
                   <span>{s.female ?? '—'}</span>
+                </div>
+                <div className="ds-stat-sub">
+                  <span>Unknown:</span>
+                  <span>{s.unknown ?? '—'}</span>
                 </div>
               </>
             )}

@@ -151,6 +151,23 @@ def main() -> None:
             supa.update("camera", values, camera_id=f"eq.{cam_id}")
             w.reported_status = status
             log.info("%s is now %s", w.camera["camera_name"], status)
+        report_inside()
+
+    # Dashboard "People Still Inside": people the 4 cameras see right now, each
+    # person once (edge_device.people_inside, supabase/people_inside.sql).
+    # Sent when it changes, and at least once a minute so the dashboard knows it is fresh.
+    last_inside: dict = {"value": None, "at": 0.0}
+
+    def report_inside() -> None:
+        now = visitors.inside_now()
+        if now == last_inside["value"] and time.time() - last_inside["at"] < 60:
+            return
+        try:
+            supa.update("edge_device", {"people_inside": {**now, "at": utc_now()}},
+                        edge_device_id=f"eq.{settings.edge_device_id}")
+        except Exception as exc:
+            log.warning("Could not save people_inside (run supabase/people_inside.sql once): %s", exc)
+        last_inside.update(value=now, at=time.time())
 
     sync_workers()
     if not workers:

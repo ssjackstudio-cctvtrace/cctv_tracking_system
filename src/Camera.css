@@ -559,6 +559,19 @@
   background: #f1f5f9;
 }
 
+.cam-areas-form input[type='range'] {
+  padding: 0;
+  border: none;
+  min-width: 160px;
+}
+
+.cam-areas-form .cam-areas-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-end;
+}
+
 .cam-areas-chip {
   display: inline-flex;
   align-items: center;
