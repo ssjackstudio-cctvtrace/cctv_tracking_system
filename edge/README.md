@@ -230,6 +230,36 @@ Only numbers are kept in memory; no picture is saved.
 The tracker keeps a hidden person's number for 60 frames
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
 
+## 3D shop floor map: one plan for all cameras
+
+Camera page → any camera → **3D shop floor map** (saved in `branch.floor_plan`,
+run `supabase/branch_floor_plan.sql` once). For JackStudio @ Aeon Bukit Tinggi it
+starts from the shop drawing (`src/shopLayouts.ts`): the walls (5.86 m × 4.21 m,
+7.31 m along the top, shop front on the diagonal), the areas **Counter**,
+**Purchasing** and **Outside Shop**, and the 4 cameras in the corners (ABT-01
+top left, ABT-02 top right, ABT-03 bottom right by the entrance, ABT-04 bottom
+left). Check it, drag cameras / corners if needed, then **Save**.
+
+For every camera placed on the map the box then uses the SHOP plan:
+
+- **Area** (Counter / Purchasing / Outside Shop) = the area under the person's
+  feet on the shop plan: the same answer on all 4 cameras.
+- **In / Out** = feet inside / outside the shop outline (no count line needed).
+- **Feet confirmed first.** A box can end above the feet (legs hidden by a
+  table or the counter) without touching the picture border; its bottom is then
+  NOT on the floor, and the floor spot would wrongly land far away, e.g.
+  "Outside Shop". So the box only counts as feet on the floor when the body
+  height it gives is a whole person (`FOOT_MIN_HEIGHT`, and at least
+  `FOOT_HEIGHT_SHARE` of the height this person had when their feet were
+  seen). Otherwise the person keeps the area they were in. If their height is
+  already known, the floor spot under their head is used for the area
+  (`FLOOR_FROM_HEAD`), never for Out.
+- **No double counting in overlaps**: two cameras that see one person give the
+  same floor spot, so it is one visitor and one track_id.
+
+A pose model (`MODEL=yolo11n-pose...`) checks the ankles directly and is the
+most exact; with the plain RKNN person model the height check above is used.
+
 ## Shop areas (3D) and track_region
 
 Camera page → camera → **Shop areas (3D)** (saved in `camera.floor_areas`):

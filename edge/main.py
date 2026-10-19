@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--camera", help="only run this camera_name (default: all active cameras of this edge box)")
     p.add_argument("--line", help="count line for --offline: x1,y1,x2,y2 in 0-1, e.g. 0.1,0.6,0.9,0.6")
     p.add_argument("--zones", help="for --offline: JSON file with a camera.floor_areas value (3D floor + areas)")
+    p.add_argument("--shop", help="for --offline: JSON file with a branch.floor_plan value (shop outline + areas)")
     p.add_argument("--show", action="store_true", help="open a window with boxes, line and counts")
     return p.parse_args()
 
@@ -150,12 +151,24 @@ def main() -> None:
                 "active_status": "Active", "ip_address": "", "stream_path": "stream2",
                 "count_line": {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}},
                 "floor_areas": json.load(open(args.zones, encoding="utf-8")) if args.zones else None,
+                "shop_plan": json.load(open(args.shop, encoding="utf-8")) if args.shop else None,
             }]
         # Every camera of this box, Active or Inactive: the box itself decides
         # active_status from whether the camera picture is live and open.
         rows = supa.select("camera", CAMERA_COLUMNS, edge_device_id=f"eq.{settings.edge_device_id}")
         for c in rows:  # visit.branch_id = branch of this edge box
             c["branch_id"] = (c.pop("edge_device", None) or {}).get("branch_id")
+        # The shop on one floor plan (3D shop floor map → branch.floor_plan): the same
+        # areas (Counter / Purchasing / Outside Shop) and In / Out for every placed camera
+        plans: dict[str, object] = {}
+        for branch_id in {c["branch_id"] for c in rows if c.get("branch_id")}:
+            try:
+                found = supa.select("branch", "floor_plan", branch_id=f"eq.{branch_id}")
+                plans[branch_id] = (found[0] if found else {}).get("floor_plan")
+            except Exception as exc:  # column not there yet (supabase/branch_floor_plan.sql not run)
+                log.debug("No shop floor plan: %s", exc)
+        for c in rows:
+            c["shop_plan"] = plans.get(c.get("branch_id"))
         return [c for c in rows if not args.camera or c["camera_name"] == args.camera]
 
     def source_for(cam: dict) -> str | int:

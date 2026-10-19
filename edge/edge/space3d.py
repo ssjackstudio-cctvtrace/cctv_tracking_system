@@ -223,6 +223,27 @@ class Space:
             return None
         return self._bend(float(u / w / self.aspect), float(v / w))
 
+    def floor_from_head(self, head: Point, height: float) -> Point | None:
+        """Floor spot (metres) under a person whose feet are HIDDEN, from the top
+        of their head and their body height measured earlier (when their feet
+        were seen): the spot whose point `height` metres up lands on the head."""
+        if self.projection is None or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
+            return None
+        P = self.projection
+        u, v = self._straighten(head)
+        u *= self.aspect
+        # (row0 - u*row2) . (X, Y, height, 1) = 0 and (row1 - v*row2) . (X, Y, height, 1) = 0
+        a = P[0] - u * P[2]
+        b = P[1] - v * P[2]
+        A = np.array([[a[0], a[1]], [b[0], b[1]]])
+        rhs = -np.array([a[2] * height + a[3], b[2] * height + b[3]])
+        if abs(np.linalg.det(A)) < 1e-12:
+            return None
+        X, Y = np.linalg.solve(A, rhs)
+        if self.to_picture(float(X), float(Y), 0.0) is None:
+            return None  # behind the camera
+        return float(X), float(Y)
+
     # ---------- regions ----------
     def region_at(self, foot: Point | None, floor: Point | None, height: float | None) -> Region | None:
         """First region (in the order the admin listed them) the person stands in.
@@ -239,3 +260,68 @@ class Space:
             if foot is not None and len(r.image) >= 3 and inside(list(r.image), foot):
                 return r
         return None
+
+
+OUTSIDE = Region(id="outside", name="Outside Shop", kind="Outside Shop", image=(), floor=None)
+
+
+@dataclass(frozen=True)
+class ShopPlan:
+    """The whole shop on ONE floor plan (metres), shared by all cameras that
+    are placed on it (3D shop floor map on the website → branch.floor_plan):
+
+        {"width": 7.31, "depth": 5.86,
+         "outline": [{"x": 0, "y": 0}, ...],                    # shop walls / shop front (inside = In)
+         "regions": [{"id", "name", "kind", "floor": [{"x", "y"}, ...], "z_min", "z_max"}, ...]}
+
+    A person's floor spot decides their area (Counter / Purchasing / Outside
+    Shop) the same way on every camera, and In / Out: inside the outline = In,
+    outside = Out. Only floor spots of CONFIRMED feet (or the head of a person
+    whose height is known) are used, never the bottom of a box cut by a table."""
+
+    outline: tuple[Point, ...]
+    regions: tuple[Region, ...]
+
+    @staticmethod
+    def from_json(value: dict | None) -> "ShopPlan | None":
+        if not isinstance(value, dict):
+            return None
+        pt = lambda d: (float(d["x"]), float(d["y"]))  # noqa: E731
+        try:
+            outline = tuple(pt(p) for p in value.get("outline") or [])
+            if len(outline) < 3:
+                w, d = float(value.get("width") or 0), float(value.get("depth") or 0)
+                if w <= 0 or d <= 0:
+                    return None
+                outline = ((0.0, 0.0), (w, 0.0), (w, d), (0.0, d))
+        except (TypeError, KeyError, ValueError):
+            return None
+        regions: list[Region] = []
+        for i, r in enumerate(value.get("regions") or []):
+            try:
+                floor = tuple(pt(p) for p in r.get("floor") or [])
+                if len(floor) < 3:
+                    continue
+                kind = r.get("kind") if r.get("kind") in REGION_KINDS else "Purchasing"
+                regions.append(Region(id=f"shop-{r.get('id') or i + 1}", name=str(r.get("name") or kind), kind=kind,
+                                      image=(), floor=floor, z_min=float(r.get("z_min") or 0.0),
+                                      z_max=float(r.get("z_max") or 2.5)))
+            except (TypeError, KeyError, ValueError, AttributeError):
+                continue
+        return ShopPlan(outline, tuple(regions))
+
+    def inside(self, floor: Point) -> bool:
+        """The floor spot is inside the shop (In)."""
+        return inside(list(self.outline), floor)
+
+    def region_at(self, floor: Point) -> Region:
+        """Area of a floor spot: the first shop area that contains it; outside
+        the shop outline with no area there = "Outside Shop"."""
+        shop = self.inside(floor)
+        for r in self.regions:
+            if (r.kind == "Outside Shop") == (not shop) and inside(list(r.floor), floor):
+                return r
+        if not shop:
+            return next((r for r in self.regions if r.kind == "Outside Shop"), OUTSIDE)
+        return next((r for r in self.regions if r.kind == "Purchasing"), Region(
+            id="shop-floor", name="Purchasing", kind="Purchasing", image=(), floor=None))

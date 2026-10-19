@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
 import type { Camera, Point } from './types'
@@ -6,6 +14,7 @@ import {
   AUTO_FLOOR,
   CAMERA_HEIGHT,
   REGION_COLORS,
+  REGION_KINDS,
   autoCalibration,
   floorOf,
   readFloorAreas,
@@ -14,24 +23,29 @@ import {
   type Calibration,
   type FloorAreas,
   type Region,
+  type RegionKind,
 } from './space3d'
+import { layoutFor, type ShopLayout, type ShopRegion } from './shopLayouts'
 
 // ---------- 3D shop floor map ----------
 // All cameras of the branch on ONE shop floor plan (metres, seen in 3D or from
-// the top). Each camera is placed at its X / Y on the plan, facing a direction,
-// 3.25 m high. The map then shows:
-//  - the floor each camera sees (coloured), and where 2 or more cameras see the
-//    SAME floor (red): a person standing there is seen twice, and the edge box
-//    counts them once because both cameras give the same floor spot;
+// the top): the shop outline (walls + shop front), the shop areas (Counter,
+// Purchasing, Outside Shop) and the 4 cameras, each at its X / Y, facing a
+// direction, 3.25 m high. The map shows:
+//  - the floor each camera sees, and where 2 or more cameras see the SAME
+//    floor (red), also per shop area: a person standing there is seen twice,
+//    and the edge box counts them once because both cameras give the same
+//    floor spot;
 //  - each camera's latest picture laid flat on the floor, so the 4 pictures
 //    join into one picture of the shop: when a camera is placed right, the
-//    floor tiles, shelves' feet and the counter line up with the other cameras;
-//  - the shop areas (Counter, Purchasing, Outside Shop) of every camera as 3D boxes.
-// Drag a camera to move it, set its facing / tilt on the right, then Save.
-// Saved in camera.floor_areas (calibration.placed = true, place = {x, y, yaw}),
-// the shop size in branch.floor_plan (supabase/branch_floor_plan.sql).
+//    floor tiles, shelves' feet and the counter line up with the other cameras.
+// Drag a camera to move it; with "Edit corners & areas", drag the corners of
+// the shop and of its areas. Save stores the plan in branch.floor_plan (read
+// by the edge box: same areas and In / Out for all cameras) and each camera's
+// place in camera.floor_areas (calibration.placed = true, place = {x, y, yaw}).
+// The JackStudio @ Aeon Bukit Tinggi drawing (shopLayouts.ts) is the start.
 
-type ShopPlan = { width: number; depth: number }
+type ShopPlan = { outline: Point[]; regions: ShopRegion[] }
 type Draft = {
   id: string
   name: string
@@ -43,13 +57,23 @@ type Draft = {
   placed: boolean // saved as placed on the shop plan
   manual: boolean // saved with 4 hand-measured floor marks (not the automatic floor)
   place: { x: number; y: number; yaw: number }
-  regions: Region[]
+  regions: Region[] // this camera's own areas (drawn on its picture)
   dirty: boolean
 }
 type View = { mode: '3d' | 'top'; yaw: number; pitch: number; dist: number; target: [number, number] }
 type P3 = [number, number, number]
+// a corner being dragged: the outline (-1) or a shop area (index), and the corner's index
+type CornerRef = { shape: number; i: number }
 
-const DEFAULT_PLAN: ShopPlan = { width: 10, depth: 8 }
+const rectPlan = (w: number, d: number): ShopPlan => ({
+  outline: [
+    { x: 0, y: 0 },
+    { x: w, y: 0 },
+    { x: w, y: d },
+    { x: 0, y: d },
+  ],
+  regions: [],
+})
 const COLORS = ['#2563eb', '#16a34a', '#f97316', '#9333ea', '#0891b2', '#ca8a04']
 const OVERLAP_COLOR = '#dc2626'
 const RANGE = 12 // metres: farther floor is too small in the picture to track people on
@@ -57,14 +81,33 @@ const CELL = 0.25 // metres, coverage grid
 const MARGIN = 2 // metres around the shop that are drawn
 const FOV = (45 * Math.PI) / 180
 const r2 = (v: number) => Math.round(v * 100) / 100
+const r3 = (v: number) => Math.round(v * 1000) / 1000
 
-// Camera position suggested before a camera is placed: one per shop corner, facing the middle
-function suggestedPlace(i: number, plan: ShopPlan) {
+function bounds(plan: ShopPlan) {
+  const xs = plan.outline.map((p) => p.x)
+  const ys = plan.outline.map((p) => p.y)
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) }
+}
+
+function inPoly(poly: Point[], x: number, y: number) {
+  let hit = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [a, b] = [poly[i], poly[j]]
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) hit = !hit
+  }
+  return hit
+}
+
+// Camera position suggested before a camera is placed: from the shop drawing, or one per corner
+function suggestedPlace(i: number, name: string, plan: ShopPlan, layout: ShopLayout | null) {
+  const fromDrawing = layout?.cameras[name]
+  if (fromDrawing) return { x: fromDrawing.x, y: fromDrawing.y, yaw: fromDrawing.yaw }
+  const b = bounds(plan)
   const corners = [
-    { x: 0.4, y: 0.4, yaw: 45 },
-    { x: plan.width - 0.4, y: 0.4, yaw: 315 },
-    { x: plan.width - 0.4, y: plan.depth - 0.4, yaw: 225 },
-    { x: 0.4, y: plan.depth - 0.4, yaw: 135 },
+    { x: b.x0 + 0.4, y: b.y0 + 0.4, yaw: 45 },
+    { x: b.x1 - 0.4, y: b.y0 + 0.4, yaw: 315 },
+    { x: b.x1 - 0.4, y: b.y1 - 0.4, yaw: 225 },
+    { x: b.x0 + 0.4, y: b.y1 - 0.4, yaw: 135 },
   ]
   return corners[i % corners.length]
 }
@@ -104,6 +147,17 @@ type Projector = {
 }
 
 function projector(v: View, W: number, H: number): Projector {
+  if (v.mode === 'top') {
+    // Top view: a flat plan (no perspective), so the cameras stand right over their floor spot
+    const scale = H / (2 * v.dist * Math.tan(FOV / 2))
+    const [tx, ty] = v.target
+    return {
+      W,
+      H,
+      at: (X, Y) => [W / 2 + (X - tx) * scale, H / 2 - (Y - ty) * scale],
+      ray: (sx, sy) => [tx + (sx - W / 2) / scale, ty - (sy - H / 2) / scale],
+    }
+  }
   const { eye, f, r, u } = viewBasis(v)
   const focal = H / 2 / Math.tan(FOV / 2)
   return {
@@ -139,10 +193,11 @@ type Coverage = {
 }
 
 function coverage(drafts: Draft[], plan: ShopPlan): Coverage {
-  const x0 = -MARGIN
-  const y0 = -MARGIN
-  const nx = Math.ceil((plan.width + 2 * MARGIN) / CELL)
-  const ny = Math.ceil((plan.depth + 2 * MARGIN) / CELL)
+  const b = bounds(plan)
+  const x0 = b.x0 - MARGIN
+  const y0 = b.y0 - MARGIN
+  const nx = Math.ceil((b.x1 - b.x0 + 2 * MARGIN) / CELL)
+  const ny = Math.ceil((b.y1 - b.y0 + 2 * MARGIN) / CELL)
   const count = new Uint8Array(nx * ny)
   const seen = drafts.map((d) => {
     const cal = calOf(d)
@@ -290,18 +345,24 @@ function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number
 export default function ShopFloorMap({
   camera,
   onSaved,
+  onPlan,
 }: {
   camera: Camera
   onSaved?: (cameraId: string, value: FloorAreas) => void
+  // the shop areas shared by all cameras (also while being edited, before Save)
+  onPlan?: (regions: ShopRegion[]) => void
 }) {
   const [branch, setBranch] = useState<{ id: string; name: string } | null>(null)
-  const [plan, setPlan] = useState<ShopPlan>(DEFAULT_PLAN)
-  const [planSaved, setPlanSaved] = useState<ShopPlan>(DEFAULT_PLAN)
+  const [layout, setLayout] = useState<ShopLayout | null>(null) // the shop drawing of this branch
+  const [plan, setPlan] = useState<ShopPlan>(() => rectPlan(10, 8))
+  const [planDirty, setPlanDirty] = useState(false)
   const [planColumn, setPlanColumn] = useState(true) // branch.floor_plan exists (SQL run)
   const [drafts, setDrafts] = useState<Draft[]>([])
   const [selected, setSelected] = useState<string>(camera.camera_id)
   const [view, setView] = useState<View>({ mode: '3d', yaw: 25, pitch: 48, dist: 17, target: [5, 4] })
-  const [layers, setLayers] = useState({ pictures: true, coverage: true, areas: true })
+  const [layers, setLayers] = useState({ pictures: true, coverage: true, areas: true, cameraAreas: false })
+  const [editCorners, setEditCorners] = useState(false)
+  const [corner, setCorner] = useState<CornerRef | null>(null) // corner picked (its X / Y can be typed)
   const [images, setImages] = useState<Record<string, HTMLImageElement>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -330,19 +391,27 @@ export default function ShopFloorMap({
         setMessage(`Could not load the branch: ${ed.error?.message ?? 'edge box not found'}`)
         return
       }
-      setBranch({ id: row.branch_id, name: row.branch?.branch_name ?? 'Shop' })
+      const name = row.branch?.branch_name ?? 'Shop'
+      const drawing = layoutFor(name)
+      setBranch({ id: row.branch_id, name })
+      setLayout(drawing)
 
-      let shop = DEFAULT_PLAN
+      // Saved plan → the shop drawing → a 10 × 8 m rectangle
+      let shop: ShopPlan | null = null
       const fp = await supabase.from(TABLES.branch).select('floor_plan').eq('branch_id', row.branch_id).maybeSingle()
       if (cancelled) return
       if (fp.error) setPlanColumn(false)
       else {
         setPlanColumn(true)
-        const v = (fp.data as { floor_plan: Partial<ShopPlan> | null } | null)?.floor_plan
-        if (v && Number(v.width) > 0 && Number(v.depth) > 0) shop = { width: Number(v.width), depth: Number(v.depth) }
+        const v = (fp.data as { floor_plan: Partial<ShopPlan & { width: number; depth: number }> | null } | null)?.floor_plan
+        if (v && Array.isArray(v.outline) && v.outline.length >= 3)
+          shop = { outline: v.outline, regions: Array.isArray(v.regions) ? v.regions : [] }
+        else if (v && Number(v.width) > 0 && Number(v.depth) > 0) shop = rectPlan(Number(v.width), Number(v.depth))
       }
+      const fromDrawing = !shop && !!drawing
+      if (!shop) shop = drawing ? { outline: drawing.outline, regions: drawing.regions } : rectPlan(10, 8)
       setPlan(shop)
-      setPlanSaved(shop)
+      setPlanDirty(fromDrawing) // the drawing is not saved yet: Save stores it
 
       const cams = await supabase
         .from(TABLES.camera)
@@ -361,23 +430,31 @@ export default function ShopFloorMap({
           const fa = readFloorAreas(c.floor_areas)
           const cal = fa.calibration
           const auto = cal?.mode === 'auto'
+          const placed = !!(auto && cal!.placed && cal!.place)
+          const fromDrawingCam = drawing?.cameras[c.camera_name]
           return {
             id: c.camera_id,
             name: c.camera_name,
             snapshot: c.last_snapshot_url,
             aspect: cal?.aspect || 16 / 9,
-            tilt: auto ? (cal!.tilt ?? AUTO_FLOOR.tilt) : AUTO_FLOOR.tilt,
+            // tilt worked out on "Adjust 3D floor" is kept; otherwise the drawing's / usual tilt
+            tilt: auto ? (cal!.tilt ?? AUTO_FLOOR.tilt) : (fromDrawingCam?.tilt ?? AUTO_FLOOR.tilt),
             hfov: auto ? (cal!.hfov ?? AUTO_FLOOR.hfov) : AUTO_FLOOR.hfov,
             k1: auto ? (cal!.k1 ?? AUTO_FLOOR.k1) : AUTO_FLOOR.k1,
-            placed: !!(auto && cal!.placed),
+            placed,
             manual: !!cal && !auto,
-            place: auto && cal!.placed && cal!.place ? cal!.place : suggestedPlace(i, shop),
+            place: placed ? cal!.place! : suggestedPlace(i, c.camera_name, shop!, drawing),
             regions: fa.regions,
-            dirty: false,
+            dirty: !placed && !!fromDrawingCam, // placed from the drawing: Save stores it
           }
         }),
       )
-      setView((v) => ({ ...v, target: [shop.width / 2, shop.depth / 2], dist: Math.max(shop.width, shop.depth) * 1.7 + 4 }))
+      const b = bounds(shop)
+      setView((v) => ({
+        ...v,
+        target: [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2],
+        dist: Math.max(b.x1 - b.x0, b.y1 - b.y0) * 1.7 + 4,
+      }))
     }
     load()
     return () => {
@@ -405,19 +482,44 @@ export default function ShopFloorMap({
     return { each, overlap }
   }, [cov, drafts])
 
-  // Floor seen by 2+ cameras, per pair (m²)
+  // Floor seen by 2+ cameras: per pair of cameras, and per shop area (m²)
   const overlaps = useMemo(() => {
-    const out: { a: string; b: string; m2: number }[] = []
+    const pairs: { a: string; b: string; m2: number }[] = []
     for (let i = 0; i < drafts.length; i++)
       for (let j = i + 1; j < drafts.length; j++) {
         let n = 0
         for (let k = 0; k < cov.count.length; k++) if (cov.seen[i][k] && cov.seen[j][k]) n++
-        if (n) out.push({ a: drafts[i].name, b: drafts[j].name, m2: n * CELL * CELL })
+        if (n) pairs.push({ a: drafts[i].name, b: drafts[j].name, m2: n * CELL * CELL })
       }
-    let any = 0
-    for (let k = 0; k < cov.count.length; k++) if (cov.count[k] >= 2) any++
-    return { pairs: out, total: any * CELL * CELL }
-  }, [cov, drafts])
+    const cell = CELL * CELL
+    const areas = plan.regions.map((r) => {
+      let total = 0
+      let twice = 0
+      let none = 0
+      const by = drafts.map(() => 0)
+      for (let j = 0; j < cov.ny; j++)
+        for (let i = 0; i < cov.nx; i++) {
+          const X = cov.x0 + (i + 0.5) * CELL
+          const Y = cov.y0 + (j + 0.5) * CELL
+          if (!inPoly(r.floor, X, Y)) continue
+          // an area outside the shop counts only outside the walls, an area inside only inside them
+          if ((r.kind === 'Outside Shop') === inPoly(plan.outline, X, Y)) continue
+          const k = j * cov.nx + i
+          total++
+          if (cov.count[k] >= 2) twice++
+          if (!cov.count[k]) none++
+          drafts.forEach((_, n) => cov.seen[n][k] && (by[n] += 1))
+        }
+      return {
+        region: r,
+        m2: total * cell,
+        twice: twice * cell,
+        none: none * cell,
+        cameras: drafts.filter((_, n) => by[n] > 0).map((d) => d.name),
+      }
+    })
+    return { pairs, areas }
+  }, [cov, drafts, plan])
 
   // ---------- canvas ----------
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -449,36 +551,81 @@ export default function ShopFloorMap({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.fillStyle = '#0f172a'
     ctx.fillRect(0, 0, size.w, size.h)
+    const walls: P3[] = plan.outline.map((p) => [p.x, p.y, 0])
+    const b = bounds(plan)
 
     // Shop floor
     ctx.fillStyle = '#1e293b'
-    if (line(ctx, pr, [[0, 0, 0], [plan.width, 0, 0], [plan.width, plan.depth, 0], [0, plan.depth, 0]], true)) ctx.fill()
+    if (line(ctx, pr, walls, true)) ctx.fill()
 
     // Cameras' pictures on the floor, then the floor each camera sees and the overlaps
-    if (layers.pictures)
+    if (layers.pictures) {
+      // only the shop and a little around it (MARGIN), so far-away floor does not cover the map
+      ctx.save()
+      const m = MARGIN
+      const box: P3[] = [[b.x0 - m, b.y0 - m, 0], [b.x1 + m, b.y0 - m, 0], [b.x1 + m, b.y1 + m, 0], [b.x0 - m, b.y1 + m, 0]]
+      if (line(ctx, pr, box, true)) ctx.clip()
       drafts.forEach((d) => {
         const img = images[d.id]
         if (img) drawPictureOnFloor(ctx, pr, img, d, 0.85)
       })
+      ctx.restore()
+    }
     if (layers.coverage && coverLayers) {
-      coverLayers.each.forEach((img) => drawFloorImage(ctx, pr, img, cov, layers.pictures ? 0.16 : 0.32))
-      drawFloorImage(ctx, pr, coverLayers.overlap, cov, layers.pictures ? 0.35 : 0.5)
+      coverLayers.each.forEach((img) => drawFloorImage(ctx, pr, img, cov, layers.pictures ? 0.14 : 0.3))
+      drawFloorImage(ctx, pr, coverLayers.overlap, cov, layers.pictures ? 0.32 : 0.45)
     }
 
-    // 1 m grid and the shop walls
+    // Shop areas (Counter / Purchasing / Outside Shop): the same for every camera
+    if (layers.areas)
+      plan.regions.forEach((r) => {
+        const color = REGION_COLORS[r.kind]
+        const pts: P3[] = r.floor.map((p) => [p.x, p.y, 0])
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.globalAlpha = 0.16
+        if (line(ctx, pr, pts, true)) ctx.fill()
+        ctx.globalAlpha = 1
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2.5
+        if (line(ctx, pr, pts, true)) ctx.stroke()
+        ctx.restore()
+        // label in the middle of the part inside (or, for Outside Shop, outside) the walls
+        let sx = 0
+        let sy = 0
+        let n = 0
+        for (let y = Math.floor(b.y0 - 1); y <= b.y1 + 1; y += 0.25)
+          for (let x = Math.floor(b.x0 - 1); x <= b.x1 + 3; x += 0.25)
+            if (inPoly(r.floor, x, y) && (r.kind === 'Outside Shop') !== inPoly(plan.outline, x, y)) {
+              sx += x
+              sy += y
+              n++
+            }
+        const at = n ? pr.at(sx / n, sy / n, 0) : null
+        if (at) label(ctx, r.name, at[0], at[1], color)
+      })
+
+    // 1 m grid inside the shop, and the walls with their lengths
+    ctx.save()
+    if (line(ctx, pr, walls, true)) ctx.clip()
     ctx.lineWidth = 1
     ctx.strokeStyle = 'rgba(255,255,255,0.13)'
-    for (let x = 0; x <= plan.width + 1e-6; x++) if (line(ctx, pr, [[x, 0, 0], [x, plan.depth, 0]])) ctx.stroke()
-    for (let y = 0; y <= plan.depth + 1e-6; y++) if (line(ctx, pr, [[0, y, 0], [plan.width, y, 0]])) ctx.stroke()
-    ctx.strokeStyle = 'rgba(226,232,240,0.85)'
-    ctx.lineWidth = 2
-    if (line(ctx, pr, [[0, 0, 0], [plan.width, 0, 0], [plan.width, plan.depth, 0], [0, plan.depth, 0]], true)) ctx.stroke()
-    if (view.mode === '3d') {
-      ctx.strokeStyle = 'rgba(226,232,240,0.25)'
-      ctx.lineWidth = 1
-      for (const [x, y] of [[0, 0], [plan.width, 0], [plan.width, plan.depth], [0, plan.depth]] as const)
-        if (line(ctx, pr, [[x, y, 0], [x, y, CAMERA_HEIGHT]])) ctx.stroke()
-    }
+    for (let x = Math.floor(b.x0); x <= b.x1 + 1e-6; x++) if (line(ctx, pr, [[x, b.y0, 0], [x, b.y1, 0]])) ctx.stroke()
+    for (let y = Math.floor(b.y0); y <= b.y1 + 1e-6; y++) if (line(ctx, pr, [[b.x0, y, 0], [b.x1, y, 0]])) ctx.stroke()
+    ctx.restore()
+    ctx.strokeStyle = 'rgba(226,232,240,0.9)'
+    ctx.lineWidth = 3
+    if (line(ctx, pr, walls, true)) ctx.stroke()
+    plan.outline.forEach((p, i) => {
+      const q = plan.outline[(i + 1) % plan.outline.length]
+      const mid = pr.at((p.x + q.x) / 2, (p.y + q.y) / 2, 0)
+      if (mid) label(ctx, `${Math.hypot(q.x - p.x, q.y - p.y).toFixed(2)} m`, mid[0], mid[1], 'rgba(15,23,42,0.85)')
+      if (view.mode === '3d') {
+        ctx.strokeStyle = 'rgba(226,232,240,0.25)'
+        ctx.lineWidth = 1
+        if (line(ctx, pr, [[p.x, p.y, 0], [p.x, p.y, CAMERA_HEIGHT]])) ctx.stroke()
+      }
+    })
     const o = pr.at(0, 0, 0)
     if (o) {
       ctx.font = '600 11px system-ui, sans-serif'
@@ -487,39 +634,41 @@ export default function ShopFloorMap({
       ctx.textBaseline = 'top'
       ctx.fillText('0,0', o[0] + 4, o[1] + 4)
     }
-    const xEnd = pr.at(plan.width, 0, 0)
-    if (xEnd) label(ctx, `X ${plan.width} m`, xEnd[0], xEnd[1] + 14, '#ef4444')
-    const yEnd = pr.at(0, plan.depth, 0)
-    if (yEnd) label(ctx, `Y ${plan.depth} m`, yEnd[0], yEnd[1] - 14, '#22c55e')
 
-    // Shop areas of every camera (3D boxes); the same area drawn by 2 cameras should land on the same floor
-    if (layers.areas)
+    // Each camera's own areas (drawn on its picture), placed on the plan with its floor
+    if (layers.cameraAreas)
       drafts.forEach((d) => {
         const cal = calOf(d)
         for (const r of d.regions) {
           const fl = regionFloor(cal, r.image)
           if (!fl) continue
-          const color = REGION_COLORS[r.kind]
-          ctx.strokeStyle = color
-          ctx.fillStyle = color
-          ctx.lineWidth = 2
-          const bottom: P3[] = fl.map((p) => [p.x, p.y, r.z_min])
-          const top: P3[] = fl.map((p) => [p.x, p.y, Math.min(r.z_max, 2.4)])
-          ctx.globalAlpha = 0.25
-          if (line(ctx, pr, bottom, true)) ctx.fill()
-          ctx.globalAlpha = 1
-          if (line(ctx, pr, bottom, true)) ctx.stroke()
-          if (view.mode === '3d') {
-            ctx.globalAlpha = 0.6
-            if (line(ctx, pr, top, true)) ctx.stroke()
-            bottom.forEach((b, i) => line(ctx, pr, [b, top[i]]) && ctx.stroke())
-            ctx.globalAlpha = 1
-          }
+          ctx.strokeStyle = REGION_COLORS[r.kind]
+          ctx.lineWidth = 1.5
+          ctx.setLineDash([4, 4])
+          if (line(ctx, pr, fl.map((p) => [p.x, p.y, 0] as P3), true)) ctx.stroke()
+          ctx.setLineDash([])
           const c = fl.reduce((s, p) => ({ x: s.x + p.x / fl.length, y: s.y + p.y / fl.length }), { x: 0, y: 0 })
-          const at = pr.at(c.x, c.y, view.mode === '3d' ? Math.min(r.z_max, 2.4) : 0)
-          if (at) label(ctx, `${r.name} · ${d.name}`, at[0], at[1], color)
+          const at = pr.at(c.x, c.y, 0)
+          if (at) label(ctx, `${r.name} · ${d.name}`, at[0], at[1], REGION_COLORS[r.kind])
         }
       })
+
+    // Corners that can be dragged
+    if (editCorners) {
+      const shapes = [plan.outline, ...plan.regions.map((r) => r.floor)]
+      shapes.forEach((pts, s) =>
+        pts.forEach((p, i) => {
+          const at = pr.at(p.x, p.y, 0)
+          if (!at) return
+          const sel = corner && corner.shape === s - 1 && corner.i === i
+          ctx.fillStyle = sel ? '#facc15' : '#fff'
+          ctx.strokeStyle = s === 0 ? '#0f172a' : REGION_COLORS[plan.regions[s - 1].kind]
+          ctx.lineWidth = 2
+          ctx.fillRect(at[0] - 5, at[1] - 5, 10, 10)
+          ctx.strokeRect(at[0] - 5, at[1] - 5, 10, 10)
+        }),
+      )
+    }
 
     // Cameras: pole, body, view direction, name
     drafts.forEach((d, n) => {
@@ -561,11 +710,14 @@ export default function ShopFloorMap({
       ctx.stroke()
       label(ctx, `${d.name}${d.placed || d.dirty ? '' : ' (not placed)'}`, body[0], body[1] - 20, color)
     })
-  }, [pr, size, plan, drafts, images, layers, cov, coverLayers, selected, view.mode])
+  }, [pr, size, plan, drafts, images, layers, cov, coverLayers, selected, view.mode, editCorners, corner])
 
-  // ---------- mouse: drag a camera to move it, drag elsewhere to turn (3D) / move (top) the view ----------
+  // ---------- mouse ----------
+  // drag a camera to move it; with "Edit corners & areas" drag a corner;
+  // elsewhere drag to turn (3D) / move (top) the view
   const drag = useRef<
     | { kind: 'camera'; id: string; dx: number; dy: number }
+    | { kind: 'corner'; refs: CornerRef[] }
     | { kind: 'orbit'; x: number; y: number; view: View }
     | { kind: 'pan'; start: [number, number]; view: View }
     | null
@@ -575,6 +727,8 @@ export default function ShopFloorMap({
     const box = e.currentTarget.getBoundingClientRect()
     return [e.clientX - box.left, e.clientY - box.top] as const
   }
+
+  const shapePoints = (p: ShopPlan, s: number) => (s < 0 ? p.outline : p.regions[s].floor)
 
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const [sx, sy] = screenPoint(e)
@@ -597,11 +751,48 @@ export default function ShopFloorMap({
       drag.current = { kind: 'camera', id: hit.id, dx: g ? hit.place.x - g[0] : 0, dy: g ? hit.place.y - g[1] : 0 }
       return
     }
+    if (editCorners) {
+      // nearest corner; corners at the same spot (shared by the walls and areas) move together
+      let near: { s: number; i: number; p: Point } | null = null
+      let bestC = 12
+      for (let s = -1; s < plan.regions.length; s++)
+        shapePoints(plan, s).forEach((p, i) => {
+          const at = pr.at(p.x, p.y, 0)
+          const dd = at ? Math.hypot(at[0] - sx, at[1] - sy) : Infinity
+          if (dd < bestC) {
+            bestC = dd
+            near = { s, i, p }
+          }
+        })
+      if (near) {
+        const n = near as { s: number; i: number; p: Point }
+        const refs: CornerRef[] = []
+        for (let s = -1; s < plan.regions.length; s++)
+          shapePoints(plan, s).forEach((p, i) => {
+            if (Math.hypot(p.x - n.p.x, p.y - n.p.y) < 0.02) refs.push({ shape: s, i })
+          })
+        setCorner({ shape: n.s, i: n.i })
+        drag.current = { kind: 'corner', refs }
+        return
+      }
+    }
     if (view.mode === '3d' && !e.shiftKey) drag.current = { kind: 'orbit', x: sx, y: sy, view }
     else {
       const g = pr.ray(sx, sy, 0)
       drag.current = g ? { kind: 'pan', start: g, view } : null
     }
+  }
+
+  const moveCorners = (refs: CornerRef[], x: number, y: number) => {
+    setPlan((p) => {
+      const next: ShopPlan = { outline: [...p.outline], regions: p.regions.map((r) => ({ ...r, floor: [...r.floor] })) }
+      for (const ref of refs) {
+        const pts = ref.shape < 0 ? next.outline : next.regions[ref.shape].floor
+        pts[ref.i] = { x: r3(x), y: r3(y) }
+      }
+      return next
+    })
+    setPlanDirty(true)
   }
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -614,6 +805,9 @@ export default function ShopFloorMap({
       const x = Math.round((g[0] + d.dx) * 20) / 20
       const y = Math.round((g[1] + d.dy) * 20) / 20
       updateDraft(d.id, (c) => ({ ...c, place: { ...c.place, x, y } }))
+    } else if (d.kind === 'corner') {
+      const g = pr.ray(sx, sy, 0)
+      if (g) moveCorners(d.refs, Math.round(g[0] * 20) / 20, Math.round(g[1] * 20) / 20)
     } else if (d.kind === 'orbit') {
       setView({
         ...d.view,
@@ -632,6 +826,105 @@ export default function ShopFloorMap({
     drag.current = null
   }
 
+  // The live video of this camera draws the shared shop areas too
+  useEffect(() => {
+    if (!loading) onPlan?.(plan.regions)
+  }, [plan, loading, onPlan])
+
+  // All corners (walls + areas) at the same floor spot: they move / go together
+  const cornersAt = (p: ShopPlan, at: Point) => {
+    const refs: CornerRef[] = []
+    for (let s = -1; s < p.regions.length; s++)
+      shapePoints(p, s).forEach((q, i) => Math.hypot(q.x - at.x, q.y - at.y) < 0.02 && refs.push({ shape: s, i }))
+    return refs
+  }
+
+  // Add a corner in the middle of an edge (a → b): in every shape that has this edge
+  const addCornerOnEdge = (a: Point, b: Point, at: Point) => {
+    const same = (p: Point, q: Point) => Math.hypot(p.x - q.x, p.y - q.y) < 0.02
+    setPlan((p) => {
+      const insert = (pts: Point[]) => {
+        for (let i = 0; i < pts.length; i++) {
+          const [u, v] = [pts[i], pts[(i + 1) % pts.length]]
+          if ((same(u, a) && same(v, b)) || (same(u, b) && same(v, a))) {
+            const out = [...pts]
+            out.splice(i + 1, 0, { x: r3(at.x), y: r3(at.y) })
+            return out
+          }
+        }
+        return pts
+      }
+      return { outline: insert(p.outline), regions: p.regions.map((r) => ({ ...r, floor: insert(r.floor) })) }
+    })
+    setPlanDirty(true)
+  }
+
+  // Delete the picked corner (from every shape that has a corner there; a shape keeps at least 3)
+  const deleteCorner = () => {
+    if (!corner) return
+    const at = shapePoints(plan, corner.shape)[corner.i]
+    if (!at) return
+    const refs = cornersAt(plan, at)
+    if (refs.some((r) => shapePoints(plan, r.shape).length <= 3)) {
+      setMessage('Could not delete: an area or the shop needs at least 3 corners.')
+      return
+    }
+    setPlan((p) => {
+      const drop = (pts: Point[], s: number) => pts.filter((_, i) => !refs.some((r) => r.shape === s && r.i === i))
+      return { outline: drop(p.outline, -1), regions: p.regions.map((r, s) => ({ ...r, floor: drop(r.floor, s) })) }
+    })
+    setPlanDirty(true)
+    setCorner(null)
+  }
+
+  // Double-click on an edge (Edit corners & areas): a new corner there
+  const onDoubleClick = (e: ReactMouseEvent<HTMLCanvasElement>) => {
+    if (!editCorners) return
+    const box = e.currentTarget.getBoundingClientRect()
+    const [sx, sy] = [e.clientX - box.left, e.clientY - box.top]
+    let best: { a: Point; b: Point; d: number } | null = null
+    for (let s = -1; s < plan.regions.length; s++) {
+      const pts = shapePoints(plan, s)
+      pts.forEach((a, i) => {
+        const b = pts[(i + 1) % pts.length]
+        const [pa, pb] = [pr.at(a.x, a.y, 0), pr.at(b.x, b.y, 0)]
+        if (!pa || !pb) return
+        const [dx, dy] = [pb[0] - pa[0], pb[1] - pa[1]]
+        const t = Math.max(0, Math.min(1, ((sx - pa[0]) * dx + (sy - pa[1]) * dy) / (dx * dx + dy * dy || 1)))
+        const d = Math.hypot(pa[0] + dx * t - sx, pa[1] + dy * t - sy)
+        if (d < 10 && (!best || d < best.d)) best = { a, b, d }
+      })
+    }
+    const g = pr.ray(sx, sy, 0)
+    const hit = best as { a: Point; b: Point; d: number } | null
+    if (hit && g) addCornerOnEdge(hit.a, hit.b, { x: g[0], y: g[1] })
+  }
+
+  // ---------- the 4 camera pictures: the shared areas drawn on each, corners dragged on any ----------
+  const picDrag = useRef<{ draft: Draft; refs: CornerRef[]; pick: CornerRef } | null>(null)
+  const startPictureDrag = (e: ReactPointerEvent<HTMLElement>, d: Draft, at: Point, s: number, i: number) => {
+    e.stopPropagation()
+    ;(e.currentTarget.parentElement as HTMLElement).setPointerCapture(e.pointerId)
+    // the corner is picked when the drag ends: picking it now would open its X / Y boxes
+    // and move the pictures under the pointer while dragging
+    picDrag.current = { draft: d, refs: cornersAt(plan, at), pick: { shape: s, i } }
+  }
+  const endPictureDrag = () => {
+    if (picDrag.current) setCorner(picDrag.current.pick)
+    picDrag.current = null
+  }
+  const movePictureDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const g = picDrag.current
+    if (!g) return
+    const box = e.currentTarget.getBoundingClientRect()
+    const pic = {
+      x: Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1),
+      y: Math.min(Math.max((e.clientY - box.top) / box.height, 0), 1),
+    }
+    const f = floorOf(calOf(g.draft), pic) // where that point of the picture is on the shop floor
+    if (f && Math.hypot(f.x - g.draft.place.x, f.y - g.draft.place.y) <= RANGE) moveCorners(g.refs, r3(f.x), r3(f.y))
+  }
+
   // Zoom with the mouse wheel (not a passive listener, so the page does not scroll)
   useEffect(() => {
     const canvas = canvasRef.current
@@ -648,16 +941,59 @@ export default function ShopFloorMap({
     setDrafts((list) => list.map((d) => (d.id === id ? { ...change(d), dirty: true } : d)))
   }, [])
 
-  const setMode = (mode: View['mode']) =>
+  const setMode = (mode: View['mode']) => {
+    const b = bounds(plan)
     setView((v) =>
       mode === 'top'
-        ? { ...v, mode, yaw: 0, pitch: 89.5, target: [plan.width / 2, plan.depth / 2] }
+        ? { ...v, mode, yaw: 0, pitch: 89.5, target: [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2] }
         : { ...v, mode, yaw: 25, pitch: 48 },
     )
+  }
+
+  // Put back the shop drawing: walls, areas and the 4 camera places (tilt is kept)
+  const useDrawing = () => {
+    if (!layout) return
+    setPlan({ outline: layout.outline, regions: layout.regions })
+    setPlanDirty(true)
+    setCorner(null)
+    setDrafts((list) =>
+      list.map((d) => {
+        const c = layout.cameras[d.name]
+        return c ? { ...d, place: { x: c.x, y: c.y, yaw: c.yaw }, dirty: true } : d
+      }),
+    )
+    setMessage('Shop drawing put back: walls, Counter / Purchasing / Outside Shop and the camera places. Click Save to keep it.')
+  }
+
+  const addArea = (kind: RegionKind) => {
+    const b = bounds(plan)
+    const cx = (b.x0 + b.x1) / 2
+    const cy = (b.y0 + b.y1) / 2
+    setPlan((p) => ({
+      ...p,
+      regions: [
+        ...p.regions,
+        {
+          id: `a${Date.now().toString(36)}`,
+          name: kind,
+          kind,
+          floor: [
+            { x: r3(cx - 0.75), y: r3(cy - 0.75) },
+            { x: r3(cx + 0.75), y: r3(cy - 0.75) },
+            { x: r3(cx + 0.75), y: r3(cy + 0.75) },
+            { x: r3(cx - 0.75), y: r3(cy + 0.75) },
+          ],
+          z_min: 0,
+          z_max: kind === 'Outside Shop' ? 2.5 : 2.2,
+        },
+      ],
+    }))
+    setPlanDirty(true)
+    setEditCorners(true)
+  }
 
   // ---------- save ----------
   const changed = drafts.filter((d) => d.dirty)
-  const planChanged = plan.width !== planSaved.width || plan.depth !== planSaved.depth
 
   const save = async () => {
     setSaving(true)
@@ -677,21 +1013,26 @@ export default function ShopFloorMap({
         onSaved?.(d.id, value)
       }
     }
-    if (planChanged && branch) {
-      const { error } = await supabase.from(TABLES.branch).update({ floor_plan: plan }).eq('branch_id', branch.id)
-      if (error) errors.push(`Shop size: ${error.message} (run supabase/branch_floor_plan.sql once)`)
-      else setPlanSaved(plan)
+    if (planDirty && branch) {
+      const b = bounds(plan)
+      const value = { width: r3(b.x1 - b.x0), depth: r3(b.y1 - b.y0), outline: plan.outline, regions: plan.regions }
+      const { error } = await supabase.from(TABLES.branch).update({ floor_plan: value }).eq('branch_id', branch.id)
+      if (error) errors.push(`Shop plan: ${error.message} (run supabase/branch_floor_plan.sql once)`)
+      else setPlanDirty(false)
     }
     setSaving(false)
     setMessage(
       errors.length
         ? `Could not save: ${errors.join('; ')}`
-        : 'Saved. The cameras now share one shop floor: the edge box uses it within a minute, so a person seen by 2 cameras at the same floor spot is one person.',
+        : 'Saved. Within a minute the edge box uses this shop plan on every placed camera: the area (Counter / Purchasing / Outside Shop) and In / Out come from where the feet stand on it, and a person seen by 2 cameras at the same floor spot is one person.',
     )
   }
 
   const sel = drafts.find((d) => d.id === selected) ?? drafts[0]
   const selIndex = sel ? drafts.indexOf(sel) : 0
+  const pickedPoints = corner ? shapePoints(plan, corner.shape) : null
+  const picked = pickedPoints && corner ? pickedPoints[corner.i] : null
+  const pickedName = corner ? (corner.shape < 0 ? 'Shop wall corner' : `${plan.regions[corner.shape]?.name} corner`) : ''
 
   if (loading && !drafts.length) {
     return (
@@ -715,29 +1056,36 @@ export default function ShopFloorMap({
               Top view
             </button>
           </div>
+          {layout && (
+            <button type="button" className="cam-toggle" disabled={saving} onClick={useDrawing}>
+              Use shop drawing
+            </button>
+          )}
           <button
             type="button"
             className="cam-toggle"
             disabled={saving}
             onClick={() => {
               setMessage('')
+              setCorner(null)
               setReloadKey((k) => k + 1)
             }}
           >
             Undo changes
           </button>
-          <button type="button" className="cam-line-save" disabled={saving || (!changed.length && !planChanged)} onClick={save}>
-            {saving ? 'Saving…' : `Save placement${changed.length ? ` (${changed.length})` : ''}`}
+          <button type="button" className="cam-line-save" disabled={saving || (!changed.length && !planDirty)} onClick={save}>
+            {saving ? 'Saving…' : `Save${changed.length || planDirty ? ` (${changed.length + (planDirty ? 1 : 0)})` : ''}`}
           </button>
         </div>
       </div>
 
       <p className="cam-count-note">
-        All cameras of this shop on one floor plan. Drag a camera to move it (3D: drag the floor to turn the view, Shift +
-        drag to move it; Top view: drag to move; wheel to zoom). Each camera&apos;s latest picture is laid flat on the
-        floor: when a camera is placed right, its floor tiles, shelves and counter line up with the other cameras&apos;
-        pictures. <strong className="shop-map-red">Red</strong> floor is seen by 2 or more cameras: a person standing
-        there is one person on the same floor spot, so the edge box counts them once.
+        All cameras of this shop on one floor plan, with the shop areas shared by every camera. Drag a camera to move it
+        (3D: drag the floor to turn the view, Shift + drag to move it; Top view: drag to move; wheel to zoom). Each
+        camera&apos;s latest picture is laid flat on the floor: when a camera is placed right, its floor tiles, shelves
+        and counter line up with the other cameras&apos; pictures. <strong className="shop-map-red">Red</strong> floor is
+        seen by 2 or more cameras: a person standing there is one person on the same floor spot, so the edge box counts
+        them once. A person&apos;s area and In / Out are only recorded where their feet are seen on the floor.
       </p>
 
       <div className="shop-map-body">
@@ -749,7 +1097,8 @@ export default function ShopFloorMap({
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
-            aria-label="3D floor map of the shop with its cameras"
+            onDoubleClick={onDoubleClick}
+            aria-label="3D floor map of the shop with its cameras and areas"
           />
           <div className="shop-map-layers">
             {(
@@ -757,6 +1106,7 @@ export default function ShopFloorMap({
                 ['pictures', 'Camera pictures on the floor'],
                 ['coverage', 'Floor each camera sees'],
                 ['areas', 'Shop areas'],
+                ['cameraAreas', "Each camera's own areas"],
               ] as const
             ).map(([key, text]) => (
               <label key={key}>
@@ -768,44 +1118,106 @@ export default function ShopFloorMap({
         </div>
 
         <div className="shop-map-side">
-          <h3>Shop size</h3>
-          <div className="cam-areas-form">
-            <label>
-              Width X (m)
-              <input
-                type="number"
-                min={1}
-                max={100}
-                step={0.1}
-                value={plan.width}
-                onChange={(e) => setPlan({ ...plan, width: Math.max(1, Number(e.target.value) || 1) })}
-              />
-            </label>
-            <label>
-              Depth Y (m)
-              <input
-                type="number"
-                min={1}
-                max={100}
-                step={0.1}
-                value={plan.depth}
-                onChange={(e) => setPlan({ ...plan, depth: Math.max(1, Number(e.target.value) || 1) })}
-              />
-            </label>
+          <h3>Shop &amp; areas</h3>
+          <label className="shop-map-check">
+            <input
+              type="checkbox"
+              checked={editCorners}
+              onChange={(e) => {
+                setEditCorners(e.target.checked)
+                setCorner(null)
+              }}
+            />
+            Edit corners &amp; areas (drag the white squares; double-click an edge to add a corner)
+          </label>
+          {editCorners && picked && corner && (
+            <div className="cam-areas-form">
+              <label>
+                {pickedName} X (m)
+                <input
+                  type="number"
+                  step={0.01}
+                  value={picked.x}
+                  onChange={(e) => {
+                    moveCorners(cornersAt(plan, picked), Number(e.target.value) || 0, picked.y)
+                  }}
+                />
+              </label>
+              <label>
+                Y (m)
+                <input
+                  type="number"
+                  step={0.01}
+                  value={picked.y}
+                  onChange={(e) => {
+                    moveCorners(cornersAt(plan, picked), picked.x, Number(e.target.value) || 0)
+                  }}
+                />
+              </label>
+              <button type="button" className="cam-toggle shop-map-del" onClick={deleteCorner}>
+                Delete corner
+              </button>
+            </div>
+          )}
+          <ul className="shop-map-areas">
+            {plan.regions.map((r, i) => (
+              <li key={r.id}>
+                <span className="cam-areas-chip" style={{ background: REGION_COLORS[r.kind] }} />
+                <input
+                  aria-label="Area name"
+                  value={r.name}
+                  onChange={(e) => {
+                    const name = e.target.value
+                    setPlan((p) => ({ ...p, regions: p.regions.map((x, j) => (j === i ? { ...x, name } : x)) }))
+                    setPlanDirty(true)
+                  }}
+                />
+                <select
+                  aria-label="Area kind"
+                  value={r.kind}
+                  onChange={(e) => {
+                    const kind = e.target.value as RegionKind
+                    setPlan((p) => ({ ...p, regions: p.regions.map((x, j) => (j === i ? { ...x, kind } : x)) }))
+                    setPlanDirty(true)
+                  }}
+                >
+                  {REGION_KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="cam-toggle"
+                  aria-label={`Delete ${r.name}`}
+                  onClick={() => {
+                    setPlan((p) => ({ ...p, regions: p.regions.filter((_, j) => j !== i) }))
+                    setPlanDirty(true)
+                    setCorner(null)
+                  }}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="shop-map-add">
+            {REGION_KINDS.map((k) => (
+              <button key={k} type="button" className="cam-toggle" onClick={() => addArea(k)}>
+                + {k}
+              </button>
+            ))}
           </div>
           {!planColumn && (
-            <p className="cam-count-note">Run supabase/branch_floor_plan.sql once to save the shop size.</p>
+            <p className="cam-count-note">Run supabase/branch_floor_plan.sql once to save the shop plan.</p>
           )}
 
           <h3>Cameras</h3>
           <ul className="shop-map-cams">
             {drafts.map((d, n) => (
               <li key={d.id}>
-                <button
-                  type="button"
-                  className={d.id === sel?.id ? 'active' : ''}
-                  onClick={() => setSelected(d.id)}
-                >
+                <button type="button" className={d.id === sel?.id ? 'active' : ''} onClick={() => setSelected(d.id)}>
                   <span className="cam-areas-chip" style={{ background: COLORS[n % COLORS.length] }} />
                   {d.name}
                   <span className="cam-area-kind">{d.dirty ? 'changed' : d.placed ? 'placed' : 'not placed'}</span>
@@ -857,13 +1269,29 @@ export default function ShopFloorMap({
                 />
               </label>
               <p className="cam-count-note">
-                Height {CAMERA_HEIGHT} m (fixed). Lens and tilt come from &quot;Adjust 3D floor&quot; on each camera.
+                Height {CAMERA_HEIGHT} m (fixed). Lens and tilt also come from &quot;Adjust 3D floor&quot; on each camera.
                 {sel.manual && ' This camera uses a hand-measured floor: saving here switches it to the automatic floor at this place.'}
               </p>
               <span className="shop-map-chip" style={{ borderColor: COLORS[selIndex % COLORS.length] }}>
                 Selected: {sel.name}
               </span>
             </div>
+          )}
+
+          <h3>Which cameras see each area</h3>
+          {overlaps.areas.length ? (
+            <ul className="shop-map-overlaps">
+              {overlaps.areas.map((a) => (
+                <li key={a.region.id}>
+                  <strong style={{ color: REGION_COLORS[a.region.kind] }}>{a.region.name}</strong> ({a.m2.toFixed(1)} m²):{' '}
+                  {a.cameras.length ? a.cameras.join(', ') : 'no camera'}
+                  {a.twice > 0 && <> · seen by 2+ cameras {a.twice.toFixed(1)} m²</>}
+                  {a.none > 0.05 && <> · not seen {a.none.toFixed(1)} m²</>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="cam-count-note">No shop areas yet: add Counter, Purchasing and Outside Shop.</p>
           )}
 
           <h3>Same floor seen by 2 cameras</h3>
@@ -874,14 +1302,94 @@ export default function ShopFloorMap({
                   {o.a} &amp; {o.b}: <strong>{o.m2.toFixed(1)} m²</strong>
                 </li>
               ))}
-              <li>
-                Total floor seen twice or more: <strong>{overlaps.total.toFixed(1)} m²</strong>
-              </li>
             </ul>
           ) : (
             <p className="cam-count-note">No camera views overlap with the cameras where they are now.</p>
           )}
         </div>
+      </div>
+
+      <h3 className="shop-map-pics-title">The shop areas on each camera</h3>
+      <p className="cam-count-note">
+        The same Counter / Purchasing / Outside Shop areas, drawn on the latest picture of every camera. Drag a corner on
+        ANY picture: it moves on the shop floor, so the map and all the other cameras change with it. Check on each picture
+        that the lines sit on the real counter and shop front, then Save once for all cameras.
+      </p>
+      <div className="shop-map-pics">
+        {drafts.map((d, n) => {
+          const cal = calOf(d)
+          const img = images[d.id]
+          const project = (pts: Point[]) => {
+            // each edge in small steps: the round Tapo lens bends straight floor lines
+            const paths: Point[][] = []
+            let cur: Point[] = []
+            pts.forEach((a, i) => {
+              const b = pts[(i + 1) % pts.length]
+              for (let k = 0; k <= 16; k++) {
+                const q = toPicture(cal, a.x + ((b.x - a.x) * k) / 16, a.y + ((b.y - a.y) * k) / 16, 0)
+                if (q && Math.abs(q.x) < 3 && Math.abs(q.y) < 3) cur.push(q)
+                else if (cur.length) {
+                  paths.push(cur)
+                  cur = []
+                }
+              }
+            })
+            if (cur.length) paths.push(cur)
+            return paths
+          }
+          const d2 = (paths: Point[][]) => paths.map((p) => p.map((q, i) => `${i ? 'L' : 'M'}${q.x},${q.y}`).join(' ')).join(' ')
+          const shapes = [
+            { s: -1, pts: plan.outline, color: '#ffffff', name: 'Shop walls' },
+            ...plan.regions.map((r, s) => ({ s, pts: r.floor, color: REGION_COLORS[r.kind], name: r.name })),
+          ]
+          return (
+            <figure className="shop-map-pic" key={d.id}>
+              <figcaption>
+                <span className="cam-areas-chip" style={{ background: COLORS[n % COLORS.length] }} />
+                {d.name}
+                {!d.placed && !d.dirty && <span className="cam-area-kind">not placed</span>}
+              </figcaption>
+              <div
+                className="shop-map-pic-box"
+                style={{ aspectRatio: String(d.aspect) }}
+                onPointerMove={movePictureDrag}
+                onPointerUp={endPictureDrag}
+                onPointerCancel={endPictureDrag}
+              >
+                {img ? <img src={img.src} alt={`Latest picture from ${d.name}`} draggable={false} /> : <span>No picture yet</span>}
+                <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+                  {layers.areas &&
+                    shapes.map((sh) => {
+                      const paths = project(sh.pts)
+                      return (
+                        <g key={sh.s} style={{ stroke: sh.color, fill: sh.color }}>
+                          {paths.length === 1 && sh.s >= 0 && <path d={`${d2(paths)} Z`} className="shop-map-pic-fill" />}
+                          <path d={d2(paths)} className={sh.s < 0 ? 'shop-map-pic-wall' : 'shop-map-pic-edge'} />
+                        </g>
+                      )
+                    })}
+                </svg>
+                {layers.areas &&
+                  shapes.flatMap((sh) =>
+                    sh.pts.map((p, i) => {
+                      const q = toPicture(cal, p.x, p.y, 0)
+                      if (!q || q.x < -0.01 || q.x > 1.01 || q.y < -0.01 || q.y > 1.01) return null
+                      const sel = corner && corner.shape === sh.s && corner.i === i
+                      return (
+                        <span
+                          key={`${sh.s}-${i}`}
+                          className={`shop-map-pic-dot${sel ? ' shop-map-pic-dot--sel' : ''}`}
+                          style={{ left: `${q.x * 100}%`, top: `${q.y * 100}%`, borderColor: sh.color }}
+                          title={`${sh.name} corner (${p.x.toFixed(2)}, ${p.y.toFixed(2)} m)`}
+                          onPointerDown={(e) => startPictureDrag(e, d, p, sh.s, i)}
+                        />
+                      )
+                    }),
+                  )}
+              </div>
+            </figure>
+          )
+        })}
       </div>
 
       {message && <p className={message.startsWith('Could') ? 'cam-error' : 'cam-count-note'}>{message}</p>}

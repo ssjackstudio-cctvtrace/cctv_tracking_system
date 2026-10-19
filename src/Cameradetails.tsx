@@ -18,6 +18,7 @@ import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside,
 import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
 import { REGION_COLORS, floorOrAuto, readFloorAreas, regionFloor, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import ShopFloorMap from './Shopfloormap'
+import type { ShopRegion } from './shopLayouts'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './Camera.css'
 
@@ -860,11 +861,21 @@ export default function CameraDetails({
   // 3D floor + shop areas (updated at once when saved below, before the camera list reloads)
   const [savedAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
   useEffect(() => setFloorAreas(readFloorAreas(camera.floor_areas)), [camera.floor_areas])
-  // The saved floor, or the automatic floor (camera 3.25 m high) until one is saved
+  // Shop areas shared by all cameras (3D shop floor map), also while being edited there
+  const [shopRegions, setShopRegions] = useState<ShopRegion[] | null>(null)
+  // The saved floor, or the automatic floor (camera 3.25 m high) until one is saved.
+  // A camera placed on the shop floor map shows the SHARED shop areas (what the edge box
+  // uses for it); otherwise its own areas.
   const floorAreas = useMemo<FloorAreas>(() => {
     const calibration = floorOrAuto(savedAreas.calibration)
+    if (calibration.placed && shopRegions?.length)
+      return {
+        ...savedAreas,
+        calibration,
+        regions: shopRegions.map((r) => ({ id: r.id, name: r.name, kind: r.kind, image: [], floor: r.floor, z_min: r.z_min, z_max: r.z_max })),
+      }
     return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: regionFloor(calibration, r.image) })) }
-  }, [savedAreas])
+  }, [savedAreas, shopRegions])
   const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
   // Full-body people seen on the live video (feet + top of head), for "Auto-fit tilt from people"
   const peopleSeen = useRef<{ foot: Point; head: Point }[]>([])
@@ -975,6 +986,13 @@ export default function CameraDetails({
         liveReady={liveMsg.state === 'live'}
       />
 
+      {savedAreas.calibration?.placed && !!shopRegions?.length && (
+        <p className="cam-count-note">
+          This camera is placed on the 3D shop floor map, so the edge box uses the shop areas of the map (the same for all
+          cameras; change them on the map below, also on any camera&apos;s picture). The 3D floor below still sets this
+          camera&apos;s tilt and lens; its own areas are not used.
+        </p>
+      )}
       <AreasEditor
         camera={camera}
         grabFrame={() => grabFrameRef.current?.() ?? null}
@@ -986,6 +1004,7 @@ export default function CameraDetails({
       <ShopFloorMap
         camera={camera}
         onSaved={(cameraId, value) => cameraId === camera.camera_id && setFloorAreas(value)}
+        onPlan={setShopRegions}
       />
 
       {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}

@@ -859,3 +859,135 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+.shop-map-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 0.88rem;
+  color: #334155;
+}
+.shop-map-areas {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.shop-map-areas li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shop-map-areas input,
+.shop-map-areas select {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.shop-map-areas input {
+  flex: 1;
+}
+.shop-map-areas .cam-toggle {
+  padding: 3px 8px;
+}
+.shop-map-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.shop-map-add .cam-toggle {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+.shop-map-del {
+  align-self: flex-end;
+}
+.shop-map-pics-title {
+  margin: 18px 0 4px;
+  font-size: 0.95rem;
+}
+.shop-map-pics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.shop-map-pic {
+  margin: 0;
+}
+.shop-map-pic figcaption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+.shop-map-pic figcaption .cam-area-kind {
+  margin-left: auto;
+  font-weight: 400;
+}
+.shop-map-pic-box {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #0f172a;
+  touch-action: none;
+}
+.shop-map-pic-box img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  user-select: none;
+}
+.shop-map-pic-box > span:not(.shop-map-pic-dot) {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+.shop-map-pic-box svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.shop-map-pic-fill {
+  fill-opacity: 0.18;
+  stroke: none;
+}
+.shop-map-pic-edge {
+  fill: none;
+  stroke-width: 2.5px;
+  vector-effect: non-scaling-stroke;
+}
+.shop-map-pic-wall {
+  fill: none !important;
+  stroke-width: 2px;
+  stroke-dasharray: 6 4;
+  vector-effect: non-scaling-stroke;
+}
+.shop-map-pic-dot {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid;
+  border-radius: 50%;
+  background: #fff;
+  cursor: grab;
+  touch-action: none;
+}
+.shop-map-pic-dot--sel {
+  background: #facc15;
+}
