@@ -116,6 +116,90 @@ function calOf(d: Draft): Calibration {
   return autoCalibration(d.aspect, { tilt: d.tilt, hfov: d.hfov, k1: d.k1, placed: true, place: d.place }, CAMERA_HEIGHT)
 }
 
+// ---------- fit a camera from matched corners ----------
+// A corner of the shop plan (metres) and where it is in the camera's picture (0–1)
+type Pair = { floor: Point; pic: Point; name: string }
+
+// Nelder–Mead: the smallest value of f near the start
+function minimize(f: (v: number[]) => number, start: number[], step: number[], iterations = 400) {
+  const n = start.length
+  let pts = [start, ...step.map((s, i) => start.map((v, j) => (i === j ? v + s : v)))]
+  let vals = pts.map(f)
+  for (let it = 0; it < iterations; it++) {
+    const order = vals.map((v, i) => i).sort((a, b) => vals[a] - vals[b])
+    pts = order.map((i) => pts[i])
+    vals = order.map((i) => vals[i])
+    const centre = start.map((_, j) => pts.slice(0, n).reduce((s, p) => s + p[j], 0) / n)
+    const towards = (k: number) => centre.map((c, j) => c + k * (pts[n][j] - c))
+    const refl = towards(-1)
+    const fr = f(refl)
+    if (fr < vals[0]) {
+      const exp = towards(-2)
+      const fe = f(exp)
+      ;[pts[n], vals[n]] = fe < fr ? [exp, fe] : [refl, fr]
+    } else if (fr < vals[n - 1]) {
+      ;[pts[n], vals[n]] = [refl, fr]
+    } else {
+      const con = towards(0.5)
+      const fc = f(con)
+      if (fc < vals[n]) [pts[n], vals[n]] = [con, fc]
+      else
+        for (let i = 1; i <= n; i++) {
+          pts[i] = pts[i].map((v, j) => pts[0][j] + 0.5 * (v - pts[0][j]))
+          vals[i] = f(pts[i])
+        }
+    }
+  }
+  const best = vals.indexOf(Math.min(...vals))
+  return { v: pts[best], f: vals[best] }
+}
+
+// Camera place (X, Y), facing and tilt that put the plan's corners where they
+// are in the picture (height 3.25 m and the Tapo lens are fixed). The camera
+// is kept near where it was put on the plan (it hangs in that corner).
+function fitCamera(d: Draft, pairs: Pair[], aspect: number) {
+  const cost = (v: number[]) => {
+    const [x, y, yaw, tilt] = v
+    if (tilt < 3 || tilt > 88) return 1e9
+    const cal = autoCalibration(
+      aspect,
+      { tilt, hfov: d.hfov, k1: d.k1, placed: true, place: { x, y, yaw: ((yaw % 360) + 360) % 360 } },
+      CAMERA_HEIGHT,
+    )
+    let e = 0
+    for (const p of pairs) {
+      const q = toPicture(cal, p.floor.x, p.floor.y, 0)
+      if (!q) return 1e6
+      e += ((q.x - p.pic.x) * aspect) ** 2 + (q.y - p.pic.y) ** 2
+    }
+    // the camera hangs in its corner: it may move a little from its place on the plan, not more than ~1 m
+    const moved = Math.hypot(x - d.place.x, y - d.place.y)
+    return e / pairs.length + 0.0002 * moved ** 2 + (moved > 1 ? (moved - 1) ** 2 : 0)
+  }
+  let best: { v: number[]; f: number } | null = null
+  const starts: number[][] = [[d.place.x, d.place.y, d.place.yaw, d.tilt]]
+  for (let yaw = 0; yaw < 360; yaw += 45) for (const tilt of [20, 40, 60]) starts.push([d.place.x, d.place.y, yaw, tilt])
+  for (const st of starts) {
+    const r = minimize(cost, st, [0.3, 0.3, 15, 8], 300)
+    if (!best || r.f < best.f) best = r
+  }
+  const r = minimize(cost, best!.v, [0.05, 0.05, 2, 1], 400) // fine-tune
+  const v = r.f < best!.f ? r.v : best!.v
+  // average miss in the picture, as a share of its height
+  const cal = autoCalibration(aspect, { tilt: v[3], hfov: d.hfov, k1: d.k1, placed: true, place: { x: v[0], y: v[1], yaw: ((v[2] % 360) + 360) % 360 } }, CAMERA_HEIGHT)
+  const miss = Math.sqrt(
+    pairs.reduce((s, p) => {
+      const q = toPicture(cal, p.floor.x, p.floor.y, 0)
+      return s + (q ? ((q.x - p.pic.x) * aspect) ** 2 + (q.y - p.pic.y) ** 2 : 1)
+    }, 0) / pairs.length,
+  )
+  return {
+    place: { x: r2(v[0]), y: r2(v[1]), yaw: Math.round((((v[2] % 360) + 360) % 360) * 10) / 10 },
+    tilt: Math.round(v[3] * 2) / 2,
+    miss,
+  }
+}
+
 // ---------- view (orbit camera) ----------
 function viewBasis(v: View) {
   const yaw = (v.yaw * Math.PI) / 180
@@ -294,17 +378,27 @@ function drawFloorImage(ctx: CanvasRenderingContext2D, pr: Projector, img: HTMLC
 }
 
 // A camera's picture laid flat on the floor (the lens curve is taken out first)
-function drawPictureOnFloor(ctx: CanvasRenderingContext2D, pr: Projector, img: HTMLImageElement, d: Draft, alpha: number) {
+// Only the FLOOR is in the right place: anything standing up (walls, shelves,
+// people) is stretched away from the camera like a long shadow.
+// range: floor farther than this from the camera is left out (metres).
+function drawPictureOnFloor(
+  ctx: CanvasRenderingContext2D,
+  pr: Projector,
+  img: HTMLImageElement,
+  d: Draft,
+  alpha: number,
+  range = RANGE,
+) {
   const cal = calOf(d)
-  const nx = 18
-  const ny = 12
+  const nx = 24
+  const ny = 18
   const grid: ({ s: [number, number]; d: [number, number] } | null)[][] = []
   for (let j = 0; j <= ny; j++) {
     const row: ({ s: [number, number]; d: [number, number] } | null)[] = []
     for (let i = 0; i <= nx; i++) {
       const pic: Point = { x: i / nx, y: j / ny }
       const f = floorOf(cal, pic)
-      const ok = f && Math.hypot(f.x - d.place.x, f.y - d.place.y) <= RANGE && toPicture(cal, f.x, f.y, 0)
+      const ok = f && Math.hypot(f.x - d.place.x, f.y - d.place.y) <= range && toPicture(cal, f.x, f.y, 0)
       const scr = ok ? pr.at(f!.x, f!.y, 0) : null
       row.push(scr ? { s: [pic.x * img.naturalWidth, pic.y * img.naturalHeight], d: scr } : null)
     }
@@ -361,6 +455,8 @@ export default function ShopFloorMap({
   const [selected, setSelected] = useState<string>(camera.camera_id)
   const [view, setView] = useState<View>({ mode: '3d', yaw: 25, pitch: 48, dist: 17, target: [5, 4] })
   const [layers, setLayers] = useState({ pictures: true, coverage: true, areas: true, cameraAreas: false })
+  // Camera pictures on the floor: the selected camera only (clear), or all 4 at once
+  const [pictureOf, setPictureOf] = useState<'selected' | 'all'>('selected')
   const [editCorners, setEditCorners] = useState(false)
   const [corner, setCorner] = useState<CornerRef | null>(null) // corner picked (its X / Y can be typed)
   const [images, setImages] = useState<Record<string, HTMLImageElement>>({})
@@ -560,20 +656,29 @@ export default function ShopFloorMap({
 
     // Cameras' pictures on the floor, then the floor each camera sees and the overlaps
     if (layers.pictures) {
-      // only the shop and a little around it (MARGIN), so far-away floor does not cover the map
-      ctx.save()
-      const m = MARGIN
-      const box: P3[] = [[b.x0 - m, b.y0 - m, 0], [b.x1 + m, b.y0 - m, 0], [b.x1 + m, b.y1 + m, 0], [b.x0 - m, b.y1 + m, 0]]
-      if (line(ctx, pr, box, true)) ctx.clip()
-      drafts.forEach((d) => {
-        const img = images[d.id]
-        if (img) drawPictureOnFloor(ctx, pr, img, d, 0.85)
-      })
-      ctx.restore()
+      // Only the shop floor and the walkway in front of it (Outside Shop areas), and no
+      // floor farther away than the far end of the shop: walls and the mall are not floor
+      const outsideAreas = plan.regions.filter((r) => r.kind === 'Outside Shop').map((r) => r.floor.map((p) => [p.x, p.y, 0] as P3))
+      const shown = pictureOf === 'all' ? drafts : drafts.filter((d) => d.id === selected)
+      for (const clip of [walls, ...outsideAreas]) {
+        ctx.save()
+        if (!line(ctx, pr, clip, true)) {
+          ctx.restore()
+          continue
+        }
+        ctx.clip()
+        shown.forEach((d) => {
+          const img = images[d.id]
+          if (!img) return
+          const far = Math.max(...[...plan.outline, ...plan.regions.flatMap((r) => r.floor)].map((p) => Math.hypot(p.x - d.place.x, p.y - d.place.y)))
+          drawPictureOnFloor(ctx, pr, img, d, pictureOf === 'all' ? 0.6 : 0.95, Math.min(RANGE, far + 0.5))
+        })
+        ctx.restore()
+      }
     }
     if (layers.coverage && coverLayers) {
-      coverLayers.each.forEach((img) => drawFloorImage(ctx, pr, img, cov, layers.pictures ? 0.14 : 0.3))
-      drawFloorImage(ctx, pr, coverLayers.overlap, cov, layers.pictures ? 0.32 : 0.45)
+      coverLayers.each.forEach((img) => drawFloorImage(ctx, pr, img, cov, layers.pictures ? 0.06 : 0.3))
+      drawFloorImage(ctx, pr, coverLayers.overlap, cov, layers.pictures ? 0.14 : 0.45)
     }
 
     // Shop areas (Counter / Purchasing / Outside Shop): the same for every camera
@@ -710,7 +815,7 @@ export default function ShopFloorMap({
       ctx.stroke()
       label(ctx, `${d.name}${d.placed || d.dirty ? '' : ' (not placed)'}`, body[0], body[1] - 20, color)
     })
-  }, [pr, size, plan, drafts, images, layers, cov, coverLayers, selected, view.mode, editCorners, corner])
+  }, [pr, size, plan, drafts, images, layers, cov, coverLayers, selected, view.mode, editCorners, corner, pictureOf])
 
   // ---------- mouse ----------
   // drag a camera to move it; with "Edit corners & areas" drag a corner;
@@ -913,6 +1018,65 @@ export default function ShopFloorMap({
     if (picDrag.current) setCorner(picDrag.current.pick)
     picDrag.current = null
   }
+
+  // ---------- "Match corners": work out a camera's real place, facing and tilt ----------
+  // Every corner of the plan (walls and areas), once each
+  const planCorners = useMemo(() => {
+    const out: { p: Point; name: string }[] = []
+    const add = (p: Point, name: string) => {
+      const same = out.find((c) => Math.hypot(c.p.x - p.x, c.p.y - p.y) < 0.02)
+      if (same) same.name += ` / ${name}`
+      else out.push({ p, name })
+    }
+    plan.outline.forEach((p, i) => add(p, `Shop corner ${i + 1}`))
+    plan.regions.forEach((r) => r.floor.forEach((p, i) => add(p, `${r.name} ${i + 1}`)))
+    return out
+  }, [plan])
+  const [match, setMatch] = useState<{ id: string; pairs: Pair[]; pick: number } | null>(null)
+  const startMatch = (d: Draft) => {
+    setMatch({ id: d.id, pairs: [], pick: 0 })
+    setSelected(d.id)
+    setMessage('')
+  }
+  const clickToMatch = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!match) return
+    const c = planCorners[match.pick]
+    if (!c) return
+    const box = e.currentTarget.getBoundingClientRect()
+    const pic = { x: (e.clientX - box.left) / box.width, y: (e.clientY - box.top) / box.height }
+    const pairs = [...match.pairs.filter((p) => p.name !== c.name), { floor: c.p, pic, name: c.name }]
+    // next corner not matched yet
+    let pick = match.pick
+    for (let k = 1; k <= planCorners.length; k++) {
+      const j = (match.pick + k) % planCorners.length
+      if (!pairs.some((p) => p.name === planCorners[j].name)) {
+        pick = j
+        break
+      }
+    }
+    setMatch({ ...match, pairs, pick })
+  }
+  const runFit = (d: Draft) => {
+    if (!match || match.pairs.length < 3) return
+    const img = images[d.id]
+    const aspect = img && img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : d.aspect
+    const fit = fitCamera({ ...d, aspect }, match.pairs, aspect)
+    const pct = fit.miss * 100
+    if (pct > 5) {
+      setMessage(
+        `Could not work out ${d.name}: the clicked corners do not agree (lines would miss them by ${pct.toFixed(1)}% of the picture). ` +
+          'Check that each click is on the FLOOR at the right corner, and that the camera is in the right corner of the plan, then try again.',
+      )
+      return
+    }
+    updateDraft(d.id, (c) => ({ ...c, aspect, place: fit.place, tilt: fit.tilt }))
+    setMessage(
+      `${d.name} worked out from ${match.pairs.length} corners: X ${fit.place.x} m, Y ${fit.place.y} m, facing ${fit.place.yaw}°, tilt ${fit.tilt}° ` +
+        `(lines miss the clicked spots by ${pct.toFixed(1)}% of the picture on average${pct > 2.5 ? ' — adding more corners makes it surer' : ''}). ` +
+        'Check the lines on its picture, then Save.',
+    )
+    setMatch(null)
+  }
   const movePictureDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
     const g = picDrag.current
     if (!g) return
@@ -1114,7 +1278,23 @@ export default function ShopFloorMap({
                 {text}
               </label>
             ))}
+            {layers.pictures && (
+              <label>
+                Pictures of
+                <select aria-label="Camera pictures on the floor of" value={pictureOf} onChange={(e) => setPictureOf(e.target.value as 'selected' | 'all')}>
+                  <option value="selected">the selected camera ({sel?.name ?? '—'})</option>
+                  <option value="all">all cameras at once</option>
+                </select>
+              </label>
+            )}
           </div>
+          {layers.pictures && (
+            <p className="cam-count-note">
+              Only the floor lies right on the map: walls, shelves and people look stretched away from the camera like long
+              shadows. To place a camera, look at its floor tiles, the foot of the counter and the shop front line: turn
+              Facing and Tilt until they sit on the map&apos;s walls and areas.
+            </p>
+          )}
         </div>
 
         <div className="shop-map-side">
@@ -1311,9 +1491,13 @@ export default function ShopFloorMap({
 
       <h3 className="shop-map-pics-title">The shop areas on each camera</h3>
       <p className="cam-count-note">
-        The same Counter / Purchasing / Outside Shop areas, drawn on the latest picture of every camera. Drag a corner on
-        ANY picture: it moves on the shop floor, so the map and all the other cameras change with it. Check on each picture
-        that the lines sit on the real counter and shop front, then Save once for all cameras.
+        The same Counter / Purchasing / Outside Shop areas, drawn on the latest picture of every camera. If a camera&apos;s
+        lines do not sit on its real floor, its place / facing / tilt is not right yet: click{' '}
+        <strong>Match corners</strong>, then for 3–6 corners of the plan (shop corners where the walls meet the floor,
+        corners of the counter) click where each one is on the floor in that picture, and{' '}
+        <strong>Work out camera</strong>. When every camera&apos;s lines fit, drag a corner on ANY picture to fine-tune an
+        area: it moves on the shop floor, so the map and all the other cameras change with it. Then Save once for all
+        cameras.
       </p>
       <div className="shop-map-pics">
         {drafts.map((d, n) => {
@@ -1348,10 +1532,49 @@ export default function ShopFloorMap({
                 <span className="cam-areas-chip" style={{ background: COLORS[n % COLORS.length] }} />
                 {d.name}
                 {!d.placed && !d.dirty && <span className="cam-area-kind">not placed</span>}
+                {match?.id !== d.id && (
+                  <button type="button" className="cam-toggle shop-map-match" disabled={!img} onClick={() => startMatch(d)}>
+                    Match corners
+                  </button>
+                )}
               </figcaption>
+              {match?.id === d.id && (
+                <div className="shop-map-matchbar">
+                  <span>
+                    {match.pairs.length < 3 ? 'Click where this corner is ON THE FLOOR in the picture:' : 'Next corner (optional):'}
+                  </span>
+                  <select
+                    aria-label="Plan corner to click"
+                    value={match.pick}
+                    onChange={(e) => setMatch({ ...match, pick: Number(e.target.value) })}
+                  >
+                    {planCorners.map((c, k) => (
+                      <option key={k} value={k}>
+                        {match.pairs.some((p) => p.name === c.name) ? '✓ ' : ''}
+                        {c.name} ({c.p.x.toFixed(2)}, {c.p.y.toFixed(2)} m)
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="cam-toggle"
+                    disabled={!match.pairs.length}
+                    onClick={() => setMatch({ ...match, pairs: match.pairs.slice(0, -1) })}
+                  >
+                    Undo
+                  </button>
+                  <button type="button" className="cam-toggle" onClick={() => setMatch(null)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="cam-line-save" disabled={match.pairs.length < 3} onClick={() => runFit(d)}>
+                    Work out camera ({match.pairs.length})
+                  </button>
+                </div>
+              )}
               <div
-                className="shop-map-pic-box"
-                style={{ aspectRatio: String(d.aspect) }}
+                className={`shop-map-pic-box${match?.id === d.id ? ' shop-map-pic-box--match' : ''}`}
+                style={{ aspectRatio: String(img && img.naturalHeight ? img.naturalWidth / img.naturalHeight : d.aspect) }}
+                onClick={match?.id === d.id ? clickToMatch : undefined}
                 onPointerMove={movePictureDrag}
                 onPointerUp={endPictureDrag}
                 onPointerCancel={endPictureDrag}
@@ -1369,7 +1592,19 @@ export default function ShopFloorMap({
                       )
                     })}
                 </svg>
+                {match?.id === d.id &&
+                  match.pairs.map((p, k) => (
+                    <span
+                      key={p.name}
+                      className="shop-map-pic-pin"
+                      style={{ left: `${p.pic.x * 100}%`, top: `${p.pic.y * 100}%` }}
+                      title={p.name}
+                    >
+                      {k + 1}
+                    </span>
+                  ))}
                 {layers.areas &&
+                  match?.id !== d.id &&
                   shapes.flatMap((sh) =>
                     sh.pts.map((p, i) => {
                       const q = toPicture(cal, p.x, p.y, 0)
