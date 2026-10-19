@@ -25,7 +25,8 @@ import numpy as np
 from .demographics import Demographics, Estimate
 from .line_counter import CountLine, LineCounter
 from .space3d import Region, Space
-from .visitors import MAX_DISTANCE, Visitor, VisitorRegistry, appearance, distance
+from .reid import Look, Recognizer, comparable, compare
+from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry
 
 log = logging.getLogger("camera")
 
@@ -65,13 +66,17 @@ HEAD, SHOULDERS, HIPS, ANKLES = (0, 1, 2, 3, 4), (5, 6), (11, 12), (15, 16)  # C
 # (fewer new numbers after someone walks behind a shelf)
 TRACKER = os.getenv("TRACKER") or os.path.join(os.path.dirname(__file__), "..", "trackers", "bytetrack_cctv.yaml")
 
-# Look of each person's clothes (to keep one track_id for one person on all cameras)
-LOOK_SAMPLES = 5  # looks averaged per tracked person
+# Look of each person: face + attire + whole body (reid.py), to keep one
+# track_id for one person on all cameras, and never give it to someone else
+LOOK_SAMPLES = 8  # looks averaged per tracked person
 LOOK_EVERY_SECONDS = 0.5
+RECOGNIZE_PER_FRAME = int(os.getenv("RECOGNIZE_PER_FRAME", "1"))  # face + body models run for this many people per frame
+SWITCH_LOOKS = 2  # a linked tracker number that looks like ANOTHER person this many times in a row = tracker mixed people up
 FORGET_TRACK_SECONDS = 30  # tracker id not seen this long → forget it on this camera
-LINK_EVERY_SECONDS = 0.25  # how often an unlinked person is compared with the visitors inside
-LOST_RELINK_SECONDS = 10  # a linked person lost this recently ...
-RELINK_PICTURE_DISTANCE = 0.15  # ... and a new number this close (share of the picture) = same person
+LINK_EVERY_SECONDS = 0.25  # how often an unlinked person is compared with the visitors remembered
+LOST_RELINK_SECONDS = min(10.0, KEEP_SECONDS)  # a linked person lost this recently ...
+RELINK_PICTURE_DISTANCE = 0.15  # ... and a new number this close (share of the picture), with the same look = same person
+RELINK_BLIND_SECONDS = 1.5  # no look yet: only a number that appears right where they were lost, this soon
 # A new person's visit is only made after this long, so a camera whose view
 # overlaps another camera's has time to see that it is someone already inside
 NEW_VISITOR_HOLD_SECONDS = float(os.getenv("NEW_VISITOR_HOLD_SECONDS", "1.0"))
@@ -212,10 +217,12 @@ class CameraWorker(threading.Thread):
         self.preview: np.ndarray | None = None  # for --show
         # Visitors inside the shop, shared by all cameras of this box (one track_id per person)
         self.registry = registry or VisitorRegistry()
-        self._link: dict[int, Visitor] = {}  # tracker id → visitor it is (kept while the person is inside)
-        self._look: dict[int, np.ndarray] = {}  # tracker id → averaged clothes look (full body only)
+        self._link: dict[int, Visitor] = {}  # tracker id → visitor it is (kept while the person is remembered)
+        self._look: dict[int, Look] = {}  # tracker id → averaged face / attire / body look (full body only)
         self._look_n: dict[int, int] = {}
         self._look_at: dict[int, float] = {}
+        self._mismatch: dict[int, int] = {}  # tracker id → looks in a row that do not fit its visitor
+        self._recog: Recognizer | None = None  # made in run() (its models belong to this thread)
         self._seen_at: dict[int, float] = {}  # tracker id → last time in the picture
         self._spot: dict[int, tuple[float, float]] = {}  # tracker id → last feet point in the picture (0-1)
         self._from_outside: set[int] = set()  # tracker ids seen in the Out area (walked in from outside)
@@ -223,8 +230,8 @@ class CameraWorker(threading.Thread):
         # tracker id → (time it went In, confidence, walked in from outside), no visitor yet
         self._pending: dict[int, tuple[float, float, bool]] = {}
         self._regions: dict[int, _RegionState] = {}
-        self._last_forget = 0.0
         self._session = uuid.uuid4().hex[:6]  # tracker ids restart at 1 after a restart
+        self._used_track_ids: set[str] = set()  # track_ids given to visits: never given again
         self.counts = {"In": 0, "Out": 0}
         # Newest people for the live video:
         # [{"track", "b": [x1, y1, x2, y2] (0-1), "area", "visit", "full", "xyz", "region", "kind", "g", "a", "s"}]
@@ -234,6 +241,16 @@ class CameraWorker(threading.Thread):
     def track_name(self, tid: int) -> str:
         """Same text as visit.track_id, e.g. ABT-01-3f9a2c-7."""
         return f"{self.camera['camera_name']}-{self._session}-{tid}"
+
+    def _new_track_id(self, tid: int) -> str:
+        """A track_id never given before: if this tracker number already had a
+        visit (the tracker mixed up two people), the new person gets e.g. ...-7.2"""
+        name, n = self.track_name(tid), 1
+        while name in self._used_track_ids:
+            n += 1
+            name = f"{self.track_name(tid)}.{n}"
+        self._used_track_ids.add(name)
+        return name
 
     # ---------- Full body ----------
     def _person(self, tid: int, box: tuple[float, float, float, float], conf: float,
@@ -301,6 +318,7 @@ class CameraWorker(threading.Thread):
 
         model = YOLO(self.model_path)
         demo = Demographics()  # gender / age models (off if the model files are missing)
+        self._recog = Recognizer()  # face / whole-body recognition models (attire only if missing)
         tracker = TRACKER if os.path.isfile(TRACKER) else "bytetrack.yaml"
         self.grabber.start()
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
@@ -308,7 +326,7 @@ class CameraWorker(threading.Thread):
             log.warning("no count line / In area yet — draw it on the Camera page; counting is paused")
         if not self.space.shared:
             log.info("camera not placed on the shop plan yet (Camera page → Shop areas (3D)): people are "
-                     "matched across cameras by the look of their clothes only")
+                     "matched across cameras by their face, clothes and body only")
 
         last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
         paused = False  # True while the camera picture is closed (black)
@@ -430,14 +448,28 @@ class CameraWorker(threading.Thread):
 
     # ---------- Who is who (one track_id per person on all cameras) ----------
     def _identify(self, frame: np.ndarray, people: list[Person], now: float) -> None:
-        """Every frame: keep each tracked person linked to their visitor, link
-        new tracker numbers to visitors already inside, learn how people look."""
+        """Every frame: keep each tracked person linked to their visitor,
+        recognise new tracker numbers (face, attire, whole body) against the
+        people the box remembers, learn how people look."""
         cam_id = self.camera["camera_id"]
-        for tid in [t for t, v in self._link.items() if v.left]:  # counted Out (maybe on another camera)
-            del self._link[tid]
         present = {p.tid for p in people}
+        for tid in [t for t, v in self._link.items() if v.left]:  # track_id ended (unseen KEEP_SECONDS)
+            del self._link[tid]
+            if tid in present:
+                self._unlinked_inside(tid, now)
         # visitors followed in this picture right now: nobody else in the picture can be them
         busy = {self._link[t].visit_id for t in present if t in self._link}
+
+        # Looks: attire for everyone due; face + whole body for a few people per frame
+        # (people not linked yet first: they need recognising before they get a track_id)
+        due = [p for p in people if p.full and self._look_n.get(p.tid, 0) < LOOK_SAMPLES
+               and now - self._look_at.get(p.tid, 0.0) >= LOOK_EVERY_SECONDS]
+        due.sort(key=lambda p: (p.tid in self._link, self._look_n.get(p.tid, 0)))
+        for i, p in enumerate(due):
+            self._look_at[p.tid] = now
+            look = self._recog.look(frame, p.box, p.height, heavy=i < RECOGNIZE_PER_FRAME) if self._recog \
+                else None
+            self._check_look(p.tid, look, now)  # partly hidden bodies give wrong looks: full body only
 
         for p in people:
             tid = p.tid
@@ -445,16 +477,10 @@ class CameraWorker(threading.Thread):
             self._spot[tid] = p.foot
             if self.counter.area_of(tid) == "out":
                 self._from_outside.add(tid)
-            if p.full and self._look_n.get(tid, 0) < LOOK_SAMPLES and now - self._look_at.get(tid, 0.0) >= LOOK_EVERY_SECONDS:
-                self._look_at[tid] = now
-                self._add_look(tid, appearance(frame, p.box))  # partly hidden bodies give wrong colours: full only
-                if tid in self._link:
-                    with self.registry._lock:
-                        self._link[tid].add_look(self._look.get(tid))
 
             v = self._link.get(tid)
-            if v is not None:  # already linked: the label stays the same until the person goes Out
-                self.registry.seen(v, cam_id, now, self._plan(p), p.height)
+            if v is not None:  # already linked: the label stays the same while the person is followed
+                self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
                 continue
             if now - self._tried_at.get(tid, 0.0) < LINK_EVERY_SECONDS:
                 continue
@@ -464,30 +490,61 @@ class CameraWorker(threading.Thread):
             if v is None and self._may_be_inside(p):
                 # someone who walked in from outside can only be a visitor another camera sees now
                 v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now,
-                                        visible_only=tid in self._from_outside)
-                how = "same person, seen by another camera" if v is not None and v.seen_on.keys() - {cam_id} \
-                    else "same person, seen before"
+                                        visible_only=tid in self._from_outside,
+                                        inside_only=tid not in self._from_outside)
+                how = "recognised, seen by another camera" if v is not None and v.seen_on.keys() - {cam_id} \
+                    else "recognised, seen a moment ago"
             elif v is None:
-                # standing outside: can only be a visitor who went Out (keeps their track_id label)
+                # standing outside: can only be a visitor who just went Out (keeps their track_id label)
                 v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now, outside_only=True)
-                how = "same person, outside the shop"
+                how = "recognised, outside the shop"
             if v is not None:
                 self._attach(tid, v, now, how)
                 busy.add(v.visit_id)
-                self.registry.seen(v, cam_id, now, self._plan(p), p.height)
+                self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
 
-        # Forget tracker numbers gone for a long time (the visitor stays in the registry)
+        # Forget tracker numbers gone for a long time (the visitor ends KEEP_SECONDS after no camera sees them)
         for tid in [t for t, seen in self._seen_at.items() if now - seen > FORGET_TRACK_SECONDS]:
             v = self._link.get(tid)
             if v is not None:
                 self._send_estimate(v, final=True)
             self._from_outside.discard(tid)
             for d in (self._seen_at, self._spot, self._link, self._look, self._look_n, self._look_at,
-                      self._tried_at, self._pending, self._regions, self._estimates, self._last_look):
+                      self._tried_at, self._pending, self._regions, self._estimates, self._last_look,
+                      self._mismatch):
                 d.pop(tid, None)
-        if now - self._last_forget > 10:
-            self._last_forget = now
-            self.registry.forget_old(now)
+
+    def _check_look(self, tid: int, look: Look | None, now: float) -> None:
+        """Add a new look of this tracker number. If it is linked to a visitor
+        but now clearly looks like ANOTHER person (other face / clothes / body)
+        a few times in a row, the tracker mixed two people up: the link is
+        dropped, so the other person never gets this visitor's track_id."""
+        if look is None or look.empty:
+            return
+        v = self._link.get(tid)
+        if v is not None and comparable(look, v.look) and compare(look, v.look) is None:
+            self._mismatch[tid] = self._mismatch.get(tid, 0) + 1
+            if self._mismatch[tid] >= SWITCH_LOOKS:
+                log.info("person %s no longer looks like %s (tracker mixed up two people): new identity",
+                         tid, v.track_id)
+                del self._link[tid]
+                for d in (self._look, self._look_n, self._mismatch, self._estimates, self._last_look):
+                    d.pop(tid, None)
+                self._add_look(tid, look)
+                self._unlinked_inside(tid, now)
+            return
+        self._mismatch.pop(tid, None)
+        self._add_look(tid, look)
+        if v is not None:
+            with self.registry._lock:
+                v.add_look(look)
+
+    def _unlinked_inside(self, tid: int, now: float) -> None:
+        """A person in this camera's In area lost their visitor (track_id ended,
+        or tracker mix-up): recognise them again, or make a new visit for them,
+        like someone who just went In."""
+        if self.counter.line is not None and self.counter.area_of(tid) == "in":
+            self._pending.setdefault(tid, (now, 0.0, False))
 
     def _plan(self, p: Person) -> tuple[float, float] | None:
         """Floor spot on the SHOP plan (shared by all cameras), or None when this
@@ -508,20 +565,28 @@ class CameraWorker(threading.Thread):
 
     def _relink_lost(self, p: Person, present: set[int], busy: set[str], now: float) -> Visitor | None:
         """The tracker lost a linked person for a moment and gave them a new
-        number: the new number near the spot where they were lost is the same
-        visitor (same track_id, label does not change)."""
+        number: the new number near the spot where they were lost, WITH THE
+        SAME LOOK (face / attire / body), is the same visitor (same track_id).
+        Without a look yet, only a number that appears right on that spot,
+        straight away. So a different person walking past the same spot (e.g.
+        the entrance) never gets the lost person's track_id."""
         best, best_d = None, RELINK_PICTURE_DISTANCE
+        sig = self._look.get(p.tid)
         for old, v in self._link.items():
             if old in present or v.left or v.visit_id in busy:
                 continue
-            if now - self._seen_at.get(old, 0.0) > LOST_RELINK_SECONDS or old not in self._spot:
+            lost_for = now - self._seen_at.get(old, 0.0)
+            if lost_for > LOST_RELINK_SECONDS or old not in self._spot:
                 continue
             d = math.dist(self._spot[old], p.foot)
             if d >= best_d:
                 continue
-            sig, ref = self._look.get(p.tid), v.signature
-            if sig is not None and ref is not None and distance(sig, ref) > min(0.95, MAX_DISTANCE * 1.5):
-                continue  # clearly different clothes
+            if comparable(sig, v.look):
+                same = compare(sig, v.look)
+                if same is None or same > MAX_DISTANCE:
+                    continue  # another person
+            elif lost_for > RELINK_BLIND_SECONDS or d >= RELINK_PICTURE_DISTANCE / 2:
+                continue  # nothing to recognise them by yet: too far / too late to be sure
             best, best_d = (old, v), d
         if best is None:
             return None
@@ -530,8 +595,13 @@ class CameraWorker(threading.Thread):
 
     def _attach(self, tid: int, v: Visitor, now: float, how: str) -> None:
         self._link[tid] = v
+        self._mismatch.pop(tid, None)
         if not v.outside:
             self.counter.mark_in(tid, now)  # inside: walking out through this camera's Out area is Out
+        look = self._look.get(tid)
+        if look is not None:
+            with self.registry._lock:
+                v.add_look(look)
         est = self._estimates.pop(tid, None)  # gender / age seen before the link
         if est is not None and est.samples:
             with self.registry._lock:
@@ -539,12 +609,15 @@ class CameraWorker(threading.Thread):
             self._send_estimate(v)
         log.info("person %s is %s (%s)", tid, v.track_id, how)
 
-    def _add_look(self, tid: int, sig: np.ndarray | None) -> None:
-        if sig is None:
+    def _add_look(self, tid: int, look: Look | None) -> None:
+        if look is None or look.empty:
             return
-        n = self._look_n.get(tid, 0)
-        self._look[tid] = sig if n == 0 else (self._look[tid] * n + sig) / (n + 1)
-        self._look_n[tid] = n + 1
+        cur = self._look.get(tid)
+        if cur is None:
+            self._look[tid] = look.copy()
+        else:
+            cur.add(look)
+        self._look_n[tid] = self._look_n.get(tid, 0) + 1
 
     # ---------- In / Out ----------
     def _record(self, tid: int, direction: str, conf: float, when: float, from_out: bool = False) -> None:
@@ -556,55 +629,60 @@ class CameraWorker(threading.Thread):
                 self._went_out(v, conf, tid, when)
             return  # never In as a known visitor: Out is not recorded
         if v is not None:
-            self._camera_in(v, conf, tid, when)  # already inside (linked): this camera's own In event
+            if v.outside and not from_out:
+                return  # went Out on another camera and is still at the door: not back in
+            self._camera_in(v, conf, tid, when)  # already known (linked): this camera's own In event
         else:
             self._pending.setdefault(tid, (when, conf, from_out))  # new person? decided in _make_visitors
 
     def _make_visitors(self, frame: np.ndarray, by_tid: dict[int, Person], now: float) -> None:
         """People who went In without being linked to a visitor: wait a moment
-        (another camera may already know them), then link or make a new visit.
-        Someone who appeared INSIDE (did not walk in from outside) is first given
-        back to a visitor who was hidden behind an obstacle: a new visit is only
-        made when nobody is hidden, so hiding never changes a track_id."""
+        (another camera may already know them), recognise them, then link or
+        make a new visit. Someone who appeared INSIDE (did not walk in from
+        outside) is first given back to a visitor hidden for a few seconds
+        (same look): a new visit is only made when nobody matches."""
         cam_id = self.camera["camera_id"]
         for tid, (when, conf, from_out) in list(self._pending.items()):
             v = self._link.get(tid)
             if v is not None and not v.left:
                 del self._pending[tid]
-                self._camera_in(v, conf, tid, when)
+                if not (v.outside and not from_out):
+                    self._camera_in(v, conf, tid, when)
                 continue
             p = by_tid.get(tid)
             if p is None or not p.full or now - when < NEW_VISITOR_HOLD_SECONDS:
                 continue  # hidden / not full body yet / still waiting
             del self._pending[tid]
-            if tid not in self._look:
-                self._add_look(tid, appearance(frame, p.box))
+            conf = conf or p.conf
+            if tid not in self._look and self._recog is not None:
+                self._add_look(tid, self._recog.look(frame, p.box, p.height, heavy=True))
             sig = self._look.get(tid)
             busy = {self._link[t].visit_id for t in by_tid if t in self._link and not self._link[t].left}
             if not from_out:
-                v = self.registry.match(sig, self._plan(p), exclude=busy, now=now) or \
+                v = self.registry.match(sig, self._plan(p), exclude=busy, now=now, inside_only=True) or \
                     self.registry.reclaim(sig, self._plan(p), busy, now)
                 if v is not None:
-                    self._attach(tid, v, now, "same person, back after being hidden")
-                    self.registry.seen(v, cam_id, now, self._plan(p), p.height)
+                    self._attach(tid, v, now, "recognised, back after being hidden")
+                    self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
                     self._camera_in(v, conf, tid, when)
                     continue
             v, created = self.registry.find_or_create(
                 sig, self._plan(p), busy, lambda: self._new_visitor(tid, sig, p, now), now=now,
                 visible_only=from_out or tid in self._from_outside,
             )
-            self._attach(tid, v, now, "new visitor" if created else "same person, seen by another camera")
-            self.registry.seen(v, cam_id, now, self._plan(p), p.height)
+            self._attach(tid, v, now, "new visitor" if created else "recognised, seen by another camera")
+            self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
             self._camera_in(v, conf, tid, when)
 
-    def _new_visitor(self, tid: int, sig: np.ndarray | None, p: Person, now: float) -> Visitor:
+    def _new_visitor(self, tid: int, sig: Look | None, p: Person, now: float) -> Visitor:
         """First camera to see this person go In: one visit row, with this
-        camera's track_id, kept for the whole visit. Member stays empty."""
+        camera's track_id (never used for anyone else). Member stays empty."""
         cam = self.camera
-        v = Visitor(visit_id=str(uuid.uuid4()), track_id=self.track_name(tid), first_camera=cam["camera_id"])
+        v = Visitor(visit_id=str(uuid.uuid4()), track_id=self._new_track_id(tid), first_camera=cam["camera_id"])
         v.add_look(sig)
         v.floor, v.floor_at, v.height = self._plan(p), now, p.height
         v.seen_on[cam["camera_id"]] = now
+        v.last_conf = p.conf
         row = {"visit_id": v.visit_id, "branch_id": cam["branch_id"], "track_id": v.track_id}
         est = self._estimates.pop(tid, None)
         if est is not None and est.samples:
@@ -616,7 +694,8 @@ class CameraWorker(threading.Thread):
 
     def _camera_in(self, v: Visitor, conf: float, tid: int, when: float) -> None:
         """In event of this camera for this visit (once per camera per visit).
-        A visitor who went Out and walks back in keeps the same visit / track_id."""
+        A visitor who went Out and walks back in within KEEP_SECONDS keeps the
+        same visit / track_id."""
         if v.outside and self.registry.come_back(v):
             log.info("person %s (%s) came back into the shop", tid, v.track_id)
         if not self.registry.first_in(v, self.camera["camera_id"]):
@@ -631,8 +710,8 @@ class CameraWorker(threading.Thread):
         if not self.registry.leave(v, when):
             return  # already outside (Out recorded before): no second Out until they come back in
         self._send_estimate(v, final=True)
-        # The person keeps their track_id label outside (links stay), and is remembered for
-        # OUTSIDE_KEEP_MINUTES after the last camera saw them: coming back in = same track_id
+        # The person keeps their track_id label while a camera sees them outside, and
+        # KEEP_SECONDS after the last camera saw them; then the track_id ends for good
         self._event(v, "Out", conf, tid, "Outside Shop", when, area=area)
 
     # ---------- Shop areas (3D regions) ----------

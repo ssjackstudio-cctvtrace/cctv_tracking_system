@@ -18,9 +18,10 @@ Tapo camera ──RTSP (shop network)──► main.py ──► Supabase (visit
 | `main.py` | Starts everything; reloads camera settings + heartbeat every 60 s |
 | `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → line counter → rows |
 | `edge/visitors.py` | People inside the shop, shared by all cameras: one track_id per person |
+| `edge/reid.py` | Recognises a person by face, attire and whole body (same person = same track_id) |
 | `edge/line_counter.py` | Decides In / Out from the count line's In / Out areas (`camera.count_line`) |
 | `edge/demographics.py` | Estimated gender + age from each person's face |
-| `download_models.py` | Downloads the face, gender and age models into `models/` |
+| `download_models.py` | Downloads the face, gender, age and person recognition models into `models/` |
 | `edge/uploader.py` | Sends rows (retries while the internet is down) and snapshots |
 | `edge/live_server.py` | Live video + people boxes for the website (WebSocket, no extra install) |
 | `edge/supa.py` | Small Supabase client using the secret key |
@@ -168,66 +169,63 @@ Older two-point lines still work (In = the side the green arrow pointed to).
 ## One track ID per person (all cameras)
 
 All 4 cameras send their video over the same Wi-Fi router to this one box,
-so the box sees every camera at once and keeps ONE list of the people inside
-(`edge/edge/visitors.py`):
+so the box sees every camera at once and keeps ONE list of the people it
+remembers (`edge/edge/visitors.py`):
 
+- **Recognise first.** Before a person gets a new track_id, the box compares
+  them with everyone it remembers by **face**, **attire** (colours of the
+  upper and lower clothes), **whole body** (body re-identification model)
+  and **body height** (`edge/edge/reid.py`). A clear difference in any of
+  them (another face, other clothes, a 15 cm different height) means another
+  person, so a look-alike never takes someone else's track_id.
 - The **first camera** that sees a new person go In makes the visit row; its
-  track_id (e.g. `ABT-01-3f9a2c-7`) is the person's track_id until they go Out.
+  track_id (e.g. `ABT-01-3f9a2c-7`) is the person's track_id for the visit.
+  A track_id is **never given to a second person**.
 - Every other camera that sees the same person — at the same moment (views
   that overlap) or later (another part of the shop) — is **linked** to that
-  visitor. It may record its own `cctv_event` rows (In once per camera per
-  visit, areas walked into), always with the **same visit_id / track_id**.
-  It never makes a second visit for someone already inside.
-- The label never changes while the person is inside: if a camera's tracker
-  loses them for a moment (behind a shelf, another shopper) and gives them a
-  new number, the new number is linked back to the same visitor.
-- **Hidden behind an obstacle, for any length of time:** a visitor no camera
-  sees stays on the list as "hidden" until they go Out. When someone then
-  appears INSIDE the shop (not walking in from outside past the count line),
-  they are given back to the hidden visitor who looks most alike, so they keep
-  their track_id. A new visit is only made for someone who really walks in
-  from outside, or when nobody is hidden. Someone walking in from outside is
-  never given a hidden visitor's track_id.
-- **Restart:** when the edge box starts, it reloads today's visitors still
-  inside (an In on its cameras and no Out since), so they keep their track_id.
-- A new person only gets a visit after `NEW_VISITOR_HOLD_SECONDS` (default
-  1 s), so a camera whose view overlaps another camera's has time to see that
-  it is someone already inside. Two cameras asking at the same moment are
-  answered one at a time, so only one visit can be made.
-- **Out** on any camera (or walking into an "Outside Shop" area) is recorded
-  once, and only for someone who came into the shop: a person seen only
-  outside never gets an Out. After Out the person keeps their track_id label
-  while any of the cameras still sees them outside, and for
-  `OUTSIDE_KEEP_MINUTES` (default 10) after the last camera saw them. No
-  second Out is recorded while they stay outside. If they walk back in within
-  that time, it is the same visit and the same track_id (a new In event);
-  after that, a return is a new visit.
+  visitor, always with the **same visit_id / track_id**.
+- **10-second memory.** A person is remembered while any camera sees them,
+  and for `TRACK_KEEP_SECONDS` (default **10**) after the last camera saw
+  them. Hidden for less than that (behind a shelf): same track_id when they
+  appear again. After that the track_id **ends**: if they never went Out,
+  their visit is closed with an Out event (at the moment they were last
+  seen), so every visit has an In and an Out.
+- **Tracker mix-ups.** If a tracker number suddenly looks like another person
+  (two people crossing), the link is dropped and the other person is
+  recognised again or gets a new visit (`...-7.2`): the first person's
+  track_id is not carried over.
+- **Out** on any camera is recorded once. After Out the person keeps their
+  track_id only while a camera still sees them (and 10 s after). Another
+  camera that still sees them inside the door does not count them back In;
+  only walking from the Out area into the In area again does.
+- **Restart:** visits of today left open when the box stopped are closed with
+  an Out event when it starts again.
 
 How the box knows it is the same person:
 
-1. **Floor position (best)** — place every camera on one **shop plan**
-   (Camera page → camera → *Shop areas (3D)* → *Adjust 3D floor* → "Placed on
-   the shop plan": camera X / Y in metres from one corner of the shop, and the
-   direction it faces). Then one person seen by two cameras stands on the same
-   floor spot (within `SAME_PLACE_METRES`, default 0.9 m), and two people in
-   the same clothes standing apart are never mixed up.
-2. **Clothes colour** (upper and lower body), for cameras not placed on the
-   shop plan and for people walking from one camera's view into another's.
-   Tune with `REID_MAX_DISTANCE` (lower = stricter).
+1. **Floor position (best for overlapping cameras)** — place every camera on
+   the **3D shop floor map** (Camera page → camera → *3D shop floor map*):
+   camera X / Y in metres and the direction it faces. Then one person seen by
+   two cameras stands on the same floor spot (within `SAME_PLACE_METRES`,
+   default 0.9 m) and is counted **once**, and two people in the same clothes
+   standing apart are never mixed up. The map shows the floor each camera
+   covers and where 2 cameras overlap.
+2. **Face, attire, whole body, height** — for people walking from one
+   camera's view into another's, and for cameras not placed on the map.
+   Models: `python download_models.py` (face recognition SFace and
+   person re-identification YoutuReID from OpenCV Zoo). Without them, attire
+   and height are used. Tune with `REID_MAX_DISTANCE` (lower = stricter) and
+   the `REID_*` values in `.env`.
+3. Someone already followed as a different person in the same picture is
+   never a match (two people side by side).
 
 **People Still Inside** on the dashboard (today) is what the cameras see right
 now: every visitor seen by any camera in the last 10 seconds, each person once
 (someone in the overlap of 2 cameras is one visitor). The box writes it to
-`edge_device.people_inside` — run `supabase/people_inside.sql` once.
-3. Someone already followed as a different person in the same picture is
-   never a match (two people side by side).
+`edge_device.people_inside` — run `supabase/people_inside.sql` once. For a
+past day (the shop is closed) it is 0.
 
-Only numbers are kept in memory; no picture is saved. Only people inside the
-shop (In area) are compared, so a passer-by outside never takes a visitor's
-track_id. People who leave without any camera seeing them go Out stay on the
-list until midnight (or until `VISITOR_FORGET_MINUTES`, if you set it above 0);
-they are not counted in "People Still Inside", which only counts people a
-camera sees right now.
+Only numbers are kept in memory; no picture is saved.
 
 The tracker keeps a hidden person's number for 60 frames
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
@@ -326,7 +324,7 @@ once, so the counts and records update without refreshing.
 ## Gender and age (estimated, whole body)
 
 Once per machine, with the `.venv` active: `python download_models.py`
-(about 48 MB into `edge/models/`, not in GitHub). Then restart `main.py`.
+(about 190 MB into `edge/models/`, not in GitHub). Then restart `main.py`.
 
 Only full-body people are looked at. Each visitor's estimate is shared by all
 cameras: up to `DEMOGRAPHIC_SAMPLES` (default 8) looks, every 0.5 s, from any

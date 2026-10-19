@@ -256,3 +256,16 @@
 .ds-datefilter-clear { padding: 0.4rem 0.75rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer; }
 .ds-datefilter-clear:hover { background: var(--ds-paper); }
 @media (max-width: 760px) { .ds-datefilter { flex: 1 1 100%; } }
+
+/* Event History: date filter beside the CCTV / Recognition tabs */
+.ev-toolbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.ev-toolbar .tabs { margin-bottom: 0; }
+.ev-datefilter { position: relative; display: flex; align-items: center; gap: 0.5rem; }
+.ev-datefilter-label { font-size: 0.9rem; color: var(--ds-muted); }
+.ev-datefilter-button { display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.5rem 0.85rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+.ev-datefilter-button:hover { background: var(--ds-paper); }
+.ev-datefilter-button:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.ev-datefilter-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+/* the real date input stays under the button, so the calendar opens next to it */
+.ev-datefilter-input { position: absolute; left: 2.6rem; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; padding: 0; }
+@media (max-width: 760px) { .ev-toolbar { align-items: flex-start; } }

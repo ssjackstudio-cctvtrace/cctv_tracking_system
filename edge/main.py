@@ -26,7 +26,7 @@ from edge.config import load_settings, rtsp_url  # noqa: E402
 from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
 from edge.uploader import SnapshotUploader, Writer  # noqa: E402
-from edge.visitors import OUTSIDE_KEEP_MINUTES, VisitorRegistry  # noqa: E402
+from edge.visitors import KEEP_SECONDS, VisitorRegistry  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -69,49 +69,70 @@ def main() -> None:
         snapshots.start()
 
     workers: dict[str, CameraWorker] = {}
-    # People inside the shop, shared by all cameras: one track_id per person
+    # People the cameras see, shared by all cameras: one track_id per person
     visitors = VisitorRegistry()
 
-    def restore_visitors() -> None:
-        """After a restart: today's people still inside (an In on one of this box's
-        cameras and no Out since), and people who went Out less than
-        OUTSIDE_KEEP_MINUTES ago, are put back, so they keep their track_id."""
+    def stamp(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+    def close_stale_visits() -> None:
+        """After a restart: today's visits on this box's cameras that never got
+        an Out (the box stopped while they were inside) are closed with an Out
+        event KEEP_SECONDS after they were last recorded, like a person no
+        camera sees any more. Their track_ids are not used again, so every
+        visit has an In and an Out and "People Still Inside" is right."""
         if supa is None:
             return
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         try:
             rows = supa.select(
-                "cctv_event", "visit_id,direction,event_time,camera_id,camera!inner(edge_device_id),visit!inner(track_id)",
+                "cctv_event", "visit_id,direction,event_time,confidence,camera_id,camera!inner(edge_device_id)",
                 **{"camera.edge_device_id": f"eq.{settings.edge_device_id}",
                    "event_time": f"gte.{midnight.isoformat()}", "order": "event_time.asc", "limit": "20000"},
             )
         except Exception as exc:
-            log.warning("Could not reload today's visitors (they get a new track_id if seen again): %s", exc)
+            log.warning("Could not check today's open visits: %s", exc)
             return
-        open_visits: dict[str, dict] = {}
-        keep_outside = OUTSIDE_KEEP_MINUTES * 60
-        for r in rows:  # oldest first: the newest In / Out decides
-            vid = r["visit_id"]
-            v = open_visits.setdefault(vid, {"visit_id": vid, "track_id": (r.get("visit") or {}).get("track_id") or vid,
-                                             "cameras_in": []})
-            if r["direction"] == "Out":
-                try:  # went Out: remembered for OUTSIDE_KEEP_MINUTES (fraction padded to 6 digits for Python 3.10)
-                    stamp = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"),
-                                   str(r["event_time"]).replace("Z", "+00:00"))
-                    out_at = datetime.fromisoformat(stamp).timestamp()
-                except ValueError:
-                    out_at = 0.0
-                v.update(outside=True, last_seen=out_at, cameras_in=[])
+        last: dict[str, dict] = {}
+        for r in rows:  # oldest first: the newest event of each visit wins
+            last[r["visit_id"]] = r
+        closed = 0
+        for vid, r in last.items():
+            if r["direction"] != "In":
                 continue
-            v["outside"] = False
-            v["cameras_in"].append(r["camera_id"])
-        open_visits = {k: v for k, v in open_visits.items()
-                       if not v.get("outside") or time.time() - v["last_seen"] < keep_outside}
-        n = visitors.restore(list(open_visits.values()))
-        if n:
-            log.info("Restored %d visitor(s) still inside today: they keep their track_id", n)
+            try:  # fraction padded to 6 digits for Python 3.10
+                text = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"),
+                              str(r["event_time"]).replace("Z", "+00:00"))
+                at = datetime.fromisoformat(text).timestamp()
+            except ValueError:
+                continue
+            writer.insert("cctv_event", {
+                "camera_id": r["camera_id"], "visit_id": vid, "direction": "Out",
+                "track_region": "Outside Shop", "confidence": r.get("confidence") or 0,
+                "event_time": stamp(min(at + KEEP_SECONDS, time.time())),
+            })
+            closed += 1
+        if closed:
+            log.info("Closed %d visit(s) left open before the restart (Out added)", closed)
 
-    restore_visitors()
+    close_stale_visits()
+
+    def close_lost() -> None:
+        """A person no camera has seen for KEEP_SECONDS: their track_id ends.
+        If they never went Out on a camera, their visit is closed with an Out
+        event at the moment they were last seen (on the camera that saw them last)."""
+        for v in visitors.expire():
+            cam_id = max(v.seen_on, key=v.seen_on.get) if v.seen_on else v.first_camera
+            last = max(v.seen_on.values()) if v.seen_on else v.last_seen
+            writer.insert("cctv_event", {
+                "camera_id": cam_id, "visit_id": v.visit_id, "direction": "Out",
+                "track_region": "Outside Shop", "confidence": round(v.last_conf * 100, 2),
+                "event_time": stamp(last),
+            })
+            if v.estimate.samples > v.sent_faces:  # newest gender / age
+                writer.update("visit", v.estimate.visit_fields(), camera_id=cam_id, visit_id=f"eq.{v.visit_id}")
+            log.info("%s not seen by any camera for %.0f s: track_id ended, visit closed (Out)",
+                     v.track_id, KEEP_SECONDS)
 
     # Live video for the website (only sends pictures while someone watches)
     live = None
@@ -216,7 +237,7 @@ def main() -> None:
         sys.exit("No cameras found for this EDGE_DEVICE_ID. Check the camera table (Step 4).")
     log.info("Running %d camera(s). Press Ctrl+C to stop.", len(workers))
 
-    next_refresh = next_status = 0.0
+    next_refresh = next_status = next_close = 0.0
     open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
         while True:
@@ -227,6 +248,9 @@ def main() -> None:
                 except Exception as exc:  # internet down: keep counting, try again later
                     log.warning("Refresh / heartbeat failed: %s", exc)
                 next_refresh = time.time() + REFRESH_SECONDS
+            if time.time() >= next_close:
+                close_lost()  # people unseen for KEEP_SECONDS: track_id ended
+                next_close = time.time() + 1
             if time.time() >= next_status:
                 try:
                     report_status()

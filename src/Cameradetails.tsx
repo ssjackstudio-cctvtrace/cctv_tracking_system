@@ -17,6 +17,8 @@ import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livev
 import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside, type CountAreas } from './countZones'
 import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
 import { REGION_COLORS, floorOrAuto, readFloorAreas, regionFloor, type Calibration, type FloorAreas, type RegionKind } from './space3d'
+import ShopFloorMap from './Shopfloormap'
+import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './Camera.css'
 
 // How often the snapshot image and people counts refresh
@@ -244,8 +246,6 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
 // Each person (visit_id) is counted once per direction, in the 30 minutes of
 // their first In / Out row from this camera today, like the cards above.
 const SLOT_MINUTES = 30
-const OPEN_MINUTES = 10 * 60
-const closeMinutes = (day: Date) => (day.getDay() === 5 || day.getDay() === 6 ? 22 * 60 + 30 : 22 * 60)
 
 type TimelineSlot = { start: Date; in: number; out: number }
 
@@ -981,6 +981,11 @@ export default function CameraDetails({
         liveReady={liveMsg.state === 'live'}
         onSaved={setFloorAreas}
         people={peopleSeen}
+      />
+
+      <ShopFloorMap
+        camera={camera}
+        onSaved={(cameraId, value) => cameraId === camera.camera_id && setFloorAreas(value)}
       />
 
       {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}

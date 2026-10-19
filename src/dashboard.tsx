@@ -12,6 +12,7 @@ import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
+import { closedForTheDay } from './shopHours'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
@@ -185,7 +186,9 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 //   People In           = distinct track_ids with an In event
 //   People Out          = distinct track_ids with an Out event
 //   People Still Inside = distinct track_ids whose newest event is In
-//                         (used for other days; today shows the live count of the 4 cameras)
+//                         (only used today while the edge box is not reporting live;
+//                          with the box live, the 4 cameras' live count is shown, and
+//                          after closing time / on past days it is 0: the shop is closed)
 // Male + Female + Unknown = the total.
 export function countPeople(events: PersonEvent[]) {
   const people = new Map<string, { gender: string; wentIn: boolean; wentOut: boolean; last: string }>()
@@ -245,7 +248,7 @@ function latestRecognitions(branch: string, range: Range) {
   return q.order('event_time', { ascending: false }).limit(50)
 }
 
-function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
+function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string) => void }) {
   const [branches, setBranches] = useState<BranchOption[]>([])
   const [branch, setBranch] = useState('') // set to the first branch once the branches are loaded
   // One date (YYYY-MM-DD); starts on today
@@ -349,6 +352,15 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
 
   // People still inside today = what the 4 cameras see now (each person once)
   const isToday = day === todayKey()
+  // Shop closed: a past day, or today after closing time → nobody is still inside.
+  // (Visits that never got an Out — e.g. the person left while no camera saw the
+  // door — must not keep counting as "inside" after the shop closed.)
+  const [clock, setClock] = useState(() => new Date())
+  useEffect(() => {
+    const timer = setInterval(() => setClock(new Date()), 60_000)
+    return () => clearInterval(timer)
+  }, [])
+  const shopClosed = day < todayKey() || (isToday && closedForTheDay(clock))
   useEffect(() => {
     setLiveInside(null)
     if (!branch || !isToday) return
@@ -395,7 +407,9 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
           unknown: liveInside.unknown,
           tone: 'inside',
         }
-      : {
+      : shopClosed
+        ? { label: 'People Still Inside', value: 0, male: 0, female: 0, unknown: 0, tone: 'inside' }
+        : {
           label: 'People Still Inside',
           value: counts.insideCount,
           male: counts.insideMale,
@@ -480,7 +494,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab) => void }) {
               Recognition Event
             </button>
           </div>
-          <button type="button" className="ds-more" onClick={() => onMoreEvents(eventTab)}>
+          <button type="button" className="ds-more" onClick={() => onMoreEvents(eventTab, day)}>
             {eventTab === 'cctv' ? 'Click for more CCTV events' : 'Click for more recognition events'}
           </button>
         </div>
@@ -542,11 +556,13 @@ function EditEdgeDeviceRoute() {
   return <EditEdgeDevicePage edgeDeviceId={edgeDeviceId} onBack={() => navigate('/edge-device')} />
 }
 
-// /eventhistory or /eventhistory?tab=recognition
+// /eventhistory, /eventhistory?tab=recognition, /eventhistory?date=2026-10-18
 function EventsRoute() {
   const [params] = useSearchParams()
   const tab: EventTab = params.get('tab') === 'recognition' ? 'recognition' : 'cctv'
-  return <EventsPage key={tab} initialTab={tab} />
+  const date = params.get('date') ?? ''
+  const initialDay = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined
+  return <EventsPage key={`${tab}|${initialDay ?? ''}`} initialTab={tab} initialDay={initialDay} />
 }
 
 // Current time in the sidebar, ticking every second: DD Month YYYY HH:MM.SS (24 hours)
@@ -718,7 +734,9 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
             path="/dashboard"
             element={
               <Overview
-                onMoreEvents={(tab) => navigate(tab === 'recognition' ? '/eventhistory?tab=recognition' : '/eventhistory')}
+                onMoreEvents={(tab, day) =>
+                  navigate(`/eventhistory?${tab === 'recognition' ? 'tab=recognition&' : ''}date=${day}`)
+                }
               />
             }
           />

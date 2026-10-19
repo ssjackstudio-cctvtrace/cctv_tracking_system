@@ -739,3 +739,123 @@
   outline: 2px solid var(--ds-lens);
   outline-offset: 2px;
 }
+
+/* ---------- 3D shop floor map (all cameras of the branch on one floor) ---------- */
+.shop-map-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: start;
+}
+.shop-map-canvas {
+  min-width: 0;
+}
+.shop-map-canvas canvas {
+  display: block;
+  max-width: 100%;
+  border-radius: 8px;
+  background: #0f172a;
+  cursor: grab;
+  touch-action: none;
+}
+.shop-map-canvas canvas:active {
+  cursor: grabbing;
+}
+.shop-map-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: #475569;
+}
+.shop-map-layers label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shop-map-side h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+.shop-map-side h3:not(:first-child) {
+  margin-top: 14px;
+}
+.shop-map-side .cam-areas-form input[type='number'] {
+  width: 110px;
+}
+.shop-map-form {
+  flex-direction: column;
+  flex-wrap: nowrap;
+}
+.shop-map-form input[type='range'] {
+  width: 100%;
+}
+.shop-map-cams {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.shop-map-cams button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+.shop-map-cams button.active {
+  border-color: #10202b;
+  box-shadow: inset 0 0 0 1px #10202b;
+}
+.shop-map-cams .cam-area-kind {
+  margin-left: auto;
+}
+.shop-map-switch {
+  display: inline-flex;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.shop-map-switch button {
+  padding: 6px 12px;
+  border: none;
+  background: #fff;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.shop-map-switch button.active {
+  background: #10202b;
+  color: #fff;
+}
+.shop-map-chip {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border: 2px solid;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+.shop-map-overlaps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.88rem;
+  color: #334155;
+}
+.shop-map-red {
+  color: #dc2626;
+}
+@media (max-width: 900px) {
+  .shop-map-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
