@@ -184,8 +184,8 @@ remembers (`edge/edge/visitors.py`):
 - Every other camera that sees the same person — at the same moment (views
   that overlap) or later (another part of the shop) — is **linked** to that
   visitor, always with the **same visit_id / track_id**.
-- **10-second memory.** A person is remembered while any camera sees them,
-  and for `TRACK_KEEP_SECONDS` (default **10**) after the last camera saw
+- **5-minute memory.** A person is remembered while any camera sees them,
+  and for `TRACK_KEEP_SECONDS` (default **300 = 5 minutes**) after the last camera saw
   them. Hidden for less than that (behind a shelf): same track_id when they
   appear again. After that the track_id **ends**: if they never went Out,
   their visit is closed with an Out event (at the moment they were last
@@ -221,7 +221,7 @@ How the box knows it is the same person:
    never a match (two people side by side).
 
 **People Still Inside** on the dashboard (today) is what the cameras see right
-now: every visitor seen by any camera in the last 10 seconds, each person once
+now: every visitor seen by any camera in the last 5 minutes (TRACK_KEEP_SECONDS), each person once
 (someone in the overlap of 2 cameras is one visitor). The box writes it to
 `edge_device.people_inside` — run `supabase/people_inside.sql` once. For a
 past day (the shop is closed) it is 0.

@@ -14,7 +14,7 @@ Rules
     that visitor: it may record its own cctv_event rows (In once per camera,
     areas entered), but always with the same visit_id / track_id.
   - A person is remembered while ANY camera sees them, and for KEEP_SECONDS
-    (TRACK_KEEP_SECONDS in .env, default 10) after the last camera saw them.
+    (TRACK_KEEP_SECONDS in .env, default 300 = 5 minutes) after the last camera saw them.
     Then the track_id is ended for good: it is never given to anyone again.
     If the person was still inside (no Out seen), the visit is closed with an
     Out event at the moment they were last seen (main.py), so every visit has
@@ -59,7 +59,7 @@ distance = attire_distance
 __all__ = ["MAX_DISTANCE", "KEEP_SECONDS", "OUTSIDE_KEEP_SECONDS", "Visitor", "VisitorRegistry", "appearance", "distance"]
 
 # Not seen by any camera for this long → the track_id ends (person gone)
-KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "10"))
+KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "300"))  # 5 minutes
 # After Out: the track_id is kept this long after the last camera saw the person (outside the shop)
 OUTSIDE_KEEP_SECONDS = float(os.getenv("OUTSIDE_KEEP_SECONDS", "300"))
 HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this long is "hidden" (may come back)
@@ -187,7 +187,7 @@ class VisitorRegistry:
 
     def _keep(self, v: Visitor) -> float:
         """How long a visitor is remembered after the last camera saw them:
-        5 minutes after going Out (may come back in), 10 s while inside."""
+        5 minutes after going Out (may come back in), TRACK_KEEP_SECONDS (5 minutes) while inside."""
         return self.outside_keep_seconds if v.outside else self.keep_seconds
 
     # ---------- updates ----------
