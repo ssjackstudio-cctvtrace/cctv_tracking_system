@@ -306,6 +306,30 @@ const newId = () => `r${Date.now().toString(36)}${Math.random().toString(36).sli
 
 type Draft = { id: string; name: string; kind: RegionKind; image: Point[]; z_min: string; z_max: string; isNew: boolean }
 
+// A number box that lets you type decimals: the text you type is kept as it is
+// (e.g. "0." or "-") and the number is used as soon as it is a whole number.
+// "," works as the decimal point too.
+function DecimalInput({ value, onValue }: { value: number; onValue: (v: number) => void }) {
+  const [text, setText] = useState(String(value))
+  useEffect(() => {
+    // the value changed from outside (not by typing here): show it
+    setText((t) => (Number(t.replace(',', '.')) === value ? t : String(value)))
+  }, [value])
+  return (
+    <input
+      inputMode="decimal"
+      value={text}
+      onChange={(e) => {
+        const t = e.target.value
+        setText(t)
+        const n = Number(t.replace(',', '.'))
+        if (t.trim() !== '' && Number.isFinite(n)) onValue(n)
+      }}
+      onBlur={() => setText(String(value))}
+    />
+  )
+}
+
 export function AreasEditor({
   camera,
   grabFrame,
@@ -620,27 +644,15 @@ export function AreasEditor({
             <>
               <label>
                 Camera X (m)
-                <input
-                  inputMode="decimal"
-                  value={auto.place.x}
-                  onChange={(e) => setAuto({ ...auto, place: { ...auto.place, x: Number(e.target.value.replace(',', '.')) || 0 } })}
-                />
+                <DecimalInput value={auto.place.x} onValue={(x) => setAuto((a) => a && { ...a, place: { ...a.place, x } })} />
               </label>
               <label>
                 Camera Y (m)
-                <input
-                  inputMode="decimal"
-                  value={auto.place.y}
-                  onChange={(e) => setAuto({ ...auto, place: { ...auto.place, y: Number(e.target.value.replace(',', '.')) || 0 } })}
-                />
+                <DecimalInput value={auto.place.y} onValue={(y) => setAuto((a) => a && { ...a, place: { ...a.place, y } })} />
               </label>
               <label>
                 Facing (°, 0 = +Y)
-                <input
-                  inputMode="decimal"
-                  value={auto.place.yaw}
-                  onChange={(e) => setAuto({ ...auto, place: { ...auto.place, yaw: Number(e.target.value) || 0 } })}
-                />
+                <DecimalInput value={auto.place.yaw} onValue={(yaw) => setAuto((a) => a && { ...a, place: { ...a.place, yaw } })} />
               </label>
             </>
           )}
