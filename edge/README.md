@@ -194,28 +194,29 @@ remembers (`edge/edge/visitors.py`):
   (two people crossing), the link is dropped and the other person is
   recognised again or gets a new visit (`...-7.2`): the first person's
   track_id is not carried over.
-- **Out** on any camera is recorded once. After Out the person keeps their
-  track_id only while a camera still sees them (and 10 s after). Another
-  camera that still sees them inside the door does not count them back In;
-  only walking from the Out area into the In area again does.
+- **Out** on any camera (crossing the count line to the outside) is recorded
+  once. After Out the person is still followed outside, but nothing more is
+  recorded, and their track_id is kept for `OUTSIDE_KEEP_SECONDS` (default
+  **300 = 5 minutes**) after the last camera saw them. Walking back in from
+  the Out area within that time = same visit, same track_id, a new In event.
+  Another camera that still sees them inside the door does not count them
+  back In.
 - **Restart:** visits of today left open when the box stopped are closed with
   an Out event when it starts again.
 
 How the box knows it is the same person:
 
-1. **Floor position (best for overlapping cameras)** — place every camera on
-   the **3D shop floor map** (Camera page → camera → *3D shop floor map*):
-   camera X / Y in metres and the direction it faces. Then one person seen by
-   two cameras stands on the same floor spot (within `SAME_PLACE_METRES`,
-   default 0.9 m) and is counted **once**, and two people in the same clothes
-   standing apart are never mixed up. The map shows the floor each camera
-   covers and where 2 cameras overlap.
-2. **Face, attire, whole body, height** — for people walking from one
-   camera's view into another's, and for cameras not placed on the map.
+1. **Face, attire, whole body, height** — a person seen by 2 cameras at once
+   (overlapping views), or walking from one camera's view into another's, is
+   the visitor whose look matches; the first camera that saw them go In gave
+   the track_id, and every other camera uses that same track_id.
    Models: `python download_models.py` (face recognition SFace and
    person re-identification YoutuReID from OpenCV Zoo). Without them, attire
    and height are used. Tune with `REID_MAX_DISTANCE` (lower = stricter) and
    the `REID_*` values in `.env`.
+2. **Floor position** (optional) — cameras marked "Placed on the shop plan"
+   in Adjust 3D floor share one floor: a person seen by two of them stands on
+   the same floor spot (within `SAME_PLACE_METRES`, default 0.9 m).
 3. Someone already followed as a different person in the same picture is
    never a match (two people side by side).
 
@@ -230,35 +231,16 @@ Only numbers are kept in memory; no picture is saved.
 The tracker keeps a hidden person's number for 60 frames
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
 
-## 3D shop floor map: one plan for all cameras
+## Feet confirmed before an area or In / Out is recorded
 
-Camera page → any camera → **3D shop floor map** (saved in `branch.floor_plan`,
-run `supabase/branch_floor_plan.sql` once). For JackStudio @ Aeon Bukit Tinggi it
-starts from the shop drawing (`src/shopLayouts.ts`): the walls (5.86 m × 4.21 m,
-7.31 m along the top, shop front on the diagonal), the areas **Counter**,
-**Purchasing** and **Outside Shop**, and the 4 cameras in the corners (ABT-01
-top left, ABT-02 top right, ABT-03 bottom right by the entrance, ABT-04 bottom
-left). Check it, drag cameras / corners if needed, then **Save**.
-
-For every camera placed on the map the box then uses the SHOP plan:
-
-- **Area** (Counter / Purchasing / Outside Shop) = the area under the person's
-  feet on the shop plan: the same answer on all 4 cameras.
-- **In / Out** = feet inside / outside the shop outline (no count line needed).
-- **Feet confirmed first.** A box can end above the feet (legs hidden by a
-  table or the counter) without touching the picture border; its bottom is then
-  NOT on the floor, and the floor spot would wrongly land far away, e.g.
-  "Outside Shop". So the box only counts as feet on the floor when the body
-  height it gives is a whole person (`FOOT_MIN_HEIGHT`, and at least
-  `FOOT_HEIGHT_SHARE` of the height this person had when their feet were
-  seen). Otherwise the person keeps the area they were in. If their height is
-  already known, the floor spot under their head is used for the area
-  (`FLOOR_FROM_HEAD`), never for Out.
-- **No double counting in overlaps**: two cameras that see one person give the
-  same floor spot, so it is one visitor and one track_id.
-
-A pose model (`MODEL=yolo11n-pose...`) checks the ankles directly and is the
-most exact; with the plain RKNN person model the height check above is used.
+A box can end above the feet (legs hidden by a table or the counter) without
+touching the picture border; its bottom is then NOT on the floor. So a box only
+counts as feet on the floor when the body height it gives looks like a whole
+person (`FOOT_MIN_HEIGHT`, and at least `FOOT_HEIGHT_SHARE` of the height this
+person had when their feet were seen). Otherwise the person keeps the area they
+were in, and no In / Out is counted from that box. Shop areas are flat
+outlines drawn on each camera's picture (Camera page → Shop areas): a person is
+in an area when their confirmed feet point is inside its outline.
 
 ## Shop areas (3D) and track_region
 

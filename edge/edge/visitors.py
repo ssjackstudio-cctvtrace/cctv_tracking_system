@@ -19,9 +19,12 @@ Rules
     If the person was still inside (no Out seen), the visit is closed with an
     Out event at the moment they were last seen (main.py), so every visit has
     an In and an Out and the dashboard's "People Still Inside" goes back to 0.
-  - Out (on any camera) is recorded once. After Out the person keeps their
-    track_id only while a camera still sees them (and for KEEP_SECONDS); if
-    they walk back in through the entrance in that time it is the same visit.
+  - Out (on any camera, crossing the count line) is recorded once. After Out
+    the person is still followed outside the shop, but nothing more is
+    recorded, and their track_id is kept for OUTSIDE_KEEP_SECONDS
+    (default 300 = 5 minutes) after the last camera saw them. If they walk
+    back in through the entrance in that time, it is the same visit and the
+    same track_id (a new In event). After that the track_id ends for good.
 
 Is this the same person? The registry compares, for every remembered visitor:
   1. Floor position (cameras placed on the shop plan in "3D shop floor map"):
@@ -53,10 +56,12 @@ from .reid import MAX_DISTANCE, Look, appearance, attire_distance, comparable, c
 
 # Older names, kept for other modules
 distance = attire_distance
-__all__ = ["MAX_DISTANCE", "KEEP_SECONDS", "Visitor", "VisitorRegistry", "appearance", "distance"]
+__all__ = ["MAX_DISTANCE", "KEEP_SECONDS", "OUTSIDE_KEEP_SECONDS", "Visitor", "VisitorRegistry", "appearance", "distance"]
 
 # Not seen by any camera for this long → the track_id ends (person gone)
 KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "10"))
+# After Out: the track_id is kept this long after the last camera saw the person (outside the shop)
+OUTSIDE_KEEP_SECONDS = float(os.getenv("OUTSIDE_KEEP_SECONDS", "300"))
 HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this long is "hidden" (may come back)
 LOOSE_DISTANCE = min(0.9, MAX_DISTANCE * 1.5)  # look match for a hidden visitor coming back (within KEEP_SECONDS)
 HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have walked in KEEP_SECONDS (cameras on the shop plan)
@@ -83,7 +88,7 @@ class Visitor:
     region_camera: str | None = None  # camera that set the area
     estimate: Estimate = field(default_factory=Estimate)  # gender / age from all cameras
     sent_faces: int = 0  # samples already written to the visit row
-    outside: bool = False  # counted Out (still remembered while seen, and KEEP_SECONDS after)
+    outside: bool = False  # counted Out (still remembered while seen, and OUTSIDE_KEEP_SECONDS after)
     left: bool = False  # ended: the track_id is finished for good
 
     def add_look(self, look: Look | None) -> None:
@@ -100,9 +105,10 @@ class VisitorRegistry:
     """People the box remembers right now, shared by all camera threads."""
 
     def __init__(self, max_distance: float = MAX_DISTANCE, keep_seconds: float = KEEP_SECONDS,
-                 same_place: float = SAME_PLACE_METRES):
+                 same_place: float = SAME_PLACE_METRES, outside_keep_seconds: float = OUTSIDE_KEEP_SECONDS):
         self.max_distance = max_distance
         self.keep_seconds = keep_seconds
+        self.outside_keep_seconds = outside_keep_seconds
         self.same_place = same_place
         self._inside: dict[str, Visitor] = {}  # visit_id → visitor (inside, or just went Out)
         self._lock = threading.RLock()
@@ -112,7 +118,7 @@ class VisitorRegistry:
     def _score(self, v: Visitor, look: Look | None, floor: tuple[float, float] | None,
                now: float) -> float | None:
         """Lower = more alike. None = cannot be this visitor."""
-        if v.left or now - v.last_any > self.keep_seconds:
+        if v.left or now - v.last_any > self._keep(v):
             return None  # ended (or about to be): its track_id is never given again
         app = None
         if comparable(look, v.look):
@@ -179,6 +185,11 @@ class VisitorRegistry:
             self._inside[v.visit_id] = v
             return v, True
 
+    def _keep(self, v: Visitor) -> float:
+        """How long a visitor is remembered after the last camera saw them:
+        5 minutes after going Out (may come back in), 10 s while inside."""
+        return self.outside_keep_seconds if v.outside else self.keep_seconds
+
     # ---------- updates ----------
     def seen(self, visitor: Visitor, camera_id: str, now: float | None = None,
              floor: tuple[float, float] | None = None, height: float | None = None, conf: float | None = None) -> None:
@@ -222,8 +233,9 @@ class VisitorRegistry:
             return True
 
     def leave(self, visitor: Visitor, now: float | None = None) -> bool:
-        """Counted Out: the person left the shop. Their track_id is kept only
-        while a camera still sees them, and KEEP_SECONDS after. False if they
+        """Counted Out: the person left the shop. They are still followed
+        outside (nothing more is recorded) and keep their track_id while a
+        camera sees them, and OUTSIDE_KEEP_SECONDS after. False if they
         are already outside (Out already recorded, by this or another camera):
         no second Out until they come back in."""
         with self._lock:
@@ -236,7 +248,7 @@ class VisitorRegistry:
             return True
 
     def come_back(self, visitor: Visitor) -> bool:
-        """A visitor who went Out walks back in through the entrance (within KEEP_SECONDS): same visit."""
+        """A visitor who went Out walks back in through the entrance (within OUTSIDE_KEEP_SECONDS): same visit."""
         with self._lock:
             if visitor.left or not visitor.outside:
                 return False
@@ -244,8 +256,9 @@ class VisitorRegistry:
             return True
 
     def expire(self, now: float | None = None) -> list[Visitor]:
-        """End every visitor no camera has seen for KEEP_SECONDS (and everyone
-        at midnight). Their track_id is finished: never matched again.
+        """End every visitor no camera has seen for KEEP_SECONDS (inside) or
+        OUTSIDE_KEEP_SECONDS (went Out), and everyone at midnight. Their
+        track_id is finished: never matched again.
         Returns those who were still INSIDE (no Out seen): the caller closes
         their visit with an Out event."""
         now = time.time() if now is None else now
@@ -254,7 +267,7 @@ class VisitorRegistry:
             day = time.localtime(now).tm_yday
             new_day = day != self._day
             self._day = day
-            for vid in [k for k, v in self._inside.items() if new_day or now - v.last_any > self.keep_seconds]:
+            for vid in [k for k, v in self._inside.items() if new_day or now - v.last_any > self._keep(v)]:
                 v = self._inside.pop(vid)
                 v.left = True
                 if not v.outside:

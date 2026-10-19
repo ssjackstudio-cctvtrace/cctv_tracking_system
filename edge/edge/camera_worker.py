@@ -24,7 +24,7 @@ import numpy as np
 
 from .demographics import Demographics, Estimate
 from .line_counter import CountLine, LineCounter
-from .space3d import Region, ShopPlan, Space
+from .space3d import Region, Space
 from .reid import Look, Recognizer, comparable, compare
 from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry
 
@@ -61,11 +61,8 @@ FULL_BODY_RATIO = float(os.getenv("FULL_BODY_RATIO", "1.2"))  # box height / wid
 # So the body height measured from the box must look like a whole person:
 # at least FOOT_MIN_HEIGHT, and not much shorter than this person's height
 # measured before (on this or another camera). Otherwise the feet are hidden.
-FOOT_MIN_HEIGHT = float(os.getenv("FOOT_MIN_HEIGHT", "1.2"))  # metres
+FOOT_MIN_HEIGHT = float(os.getenv("FOOT_MIN_HEIGHT", "1.0"))  # metres
 FOOT_HEIGHT_SHARE = float(os.getenv("FOOT_HEIGHT_SHARE", "0.85"))  # of the person's known height
-# Feet hidden but height known (seen before with feet): the floor spot under
-# the HEAD is used for the shop area (e.g. standing behind the Counter), not for In / Out
-FLOOR_FROM_HEAD = os.getenv("FLOOR_FROM_HEAD", "on").lower() not in ("off", "0", "false", "no")
 HEIGHT_SAMPLES = 15  # confirmed heights kept per tracked person (median)
 BOTTOM_EDGE = 0.985  # box bottom below this share of the picture = feet cut off
 TOP_EDGE = 0.01  # box top above this share of the picture = head cut off
@@ -183,7 +180,6 @@ class Person:
     feet: list[tuple[float, float]]  # points for the count line (empty unless full body)
     floor: tuple[float, float] | None = None  # floor spot in metres (calibrated camera)
     height: float | None = None  # body height in metres
-    from_head: bool = False  # floor spot from the head + known height (feet hidden): areas only, not In / Out
 
 
 @dataclass
@@ -223,8 +219,6 @@ class CameraWorker(threading.Thread):
         self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
         # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
         self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
-        # The whole shop on one floor plan (3D shop floor map → branch.floor_plan): areas and In / Out
-        self.shop = ShopPlan.from_json(camera.get("shop_plan"))
         self._heights: dict[int, list[float]] = {}  # tracker id → body heights measured with the feet seen
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
@@ -298,21 +292,17 @@ class CameraWorker(threading.Thread):
         if full and calibrated:
             p.floor = self.space.floor_of(foot)
             p.height = self.space.height_of(p.floor, head) if p.floor is not None else None
-            # Feet really on the floor? A box cut by a table is short for this person
-            if p.height is None or p.height < FOOT_MIN_HEIGHT or (known is not None and p.height < known * FOOT_HEIGHT_SHARE):
+            # Feet really on the floor? A box cut by a table is short for this person.
+            # (No believable height, e.g. 3D floor not adjusted yet: the box is trusted as before.)
+            if p.height is not None and (p.height < FOOT_MIN_HEIGHT or (known is not None and p.height < known * FOOT_HEIGHT_SHARE)):
                 p.full, p.floor, p.height = False, None, None
-            else:
+            elif p.height is not None:
                 hs = self._heights.setdefault(tid, [])
                 hs.append(p.height)
                 del hs[:-HEIGHT_SAMPLES]
-        if p.full:
+        if p.full:  # feet confirmed on the floor: they may count for In / Out and areas
             inset = bw * FOOT_INSET
             p.feet = [((x1 + inset) / w, foot_y / h), ((x2 - inset) / w, foot_y / h)]
-        elif FLOOR_FROM_HEAD and calibrated and known is not None and y1 > h * TOP_EDGE:
-            # feet hidden, head seen, height known: stand the person under their head
-            p.floor, p.height, p.from_head = self.space.floor_from_head(head, known), known, True
-            if p.floor is None:
-                p.from_head = False
         return p
 
     def _known_height(self, tid: int) -> float | None:
@@ -324,17 +314,10 @@ class CameraWorker(threading.Thread):
         v = self._link.get(tid)
         return v.height if v is not None and not v.left else None
 
-    def _shop_on(self) -> bool:
-        """The shop plan decides areas and In / Out: this camera is placed on it."""
-        return self.shop is not None and self.space is not None and self.space.shared
-
     # Called by main when the dashboard changes the camera (e.g. a new count line or areas)
     def update_camera(self, camera: dict[str, Any]) -> None:
         if camera.get("floor_areas") != self.camera.get("floor_areas"):
             self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
-            self._regions.clear()
-        if camera.get("shop_plan") != self.camera.get("shop_plan"):
-            self.shop = ShopPlan.from_json(camera.get("shop_plan"))
             self._regions.clear()
         self.camera = camera
         self.counter.set_line(CountLine.from_json(camera.get("count_line")))
@@ -366,9 +349,7 @@ class CameraWorker(threading.Thread):
         tracker = TRACKER if os.path.isfile(TRACKER) else "bytetrack.yaml"
         self.grabber.start()
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
-        if self._shop_on():
-            log.info("placed on the shop floor map: In / Out and areas come from where the feet stand on the shop plan")
-        elif self.counter.line is None:
+        if self.counter.line is None:
             log.warning("no count line / In area yet — draw it on the Camera page; counting is paused")
         if not self.space.shared:
             log.info("camera not placed on the shop plan yet (Camera page → Shop areas (3D)): people are "
@@ -445,10 +426,7 @@ class CameraWorker(threading.Thread):
 
             self._identify(frame, people, now)
 
-            # In / Out: from the shop plan (feet confirmed, not from the head), or from the count line
-            areas = {p.tid: (("in" if self.shop.inside(p.floor) else "out") if p.floor and not p.from_head else None)
-                     for p in people} if self._shop_on() else None
-            for crossing in self.counter.update({p.tid: p.feet for p in people}, now=now, areas=areas):
+            for crossing in self.counter.update({p.tid: p.feet for p in people}, now=now):
                 p = by_tid.get(crossing.track_id)
                 self._record(crossing.track_id, crossing.direction, p.conf if p else 0.0, now, crossing.from_out)
             self._make_visitors(frame, by_tid, now)
@@ -592,7 +570,7 @@ class CameraWorker(threading.Thread):
         """A person in this camera's In area lost their visitor (track_id ended,
         or tracker mix-up): recognise them again, or make a new visit for them,
         like someone who just went In."""
-        if (self.counter.line is not None or self._shop_on()) and self.counter.area_of(tid) == "in":
+        if self.counter.line is not None and self.counter.area_of(tid) == "in":
             self._pending.setdefault(tid, (now, 0.0, False))
 
     def _plan(self, p: Person) -> tuple[float, float] | None:
@@ -604,10 +582,7 @@ class CameraWorker(threading.Thread):
     def _may_be_inside(self, p: Person) -> bool:
         """Only people inside the shop are compared with the visitors inside, so
         a passer-by outside who dresses alike never takes a visitor's track_id."""
-        if self._shop_on():
-            if self.counter.area_of(p.tid) == "out":
-                return False  # feet seen outside the shop
-        elif self.counter.line is not None and not self.counter.line.all_in:
+        if self.counter.line is not None and not self.counter.line.all_in:
             if self.counter.area_of(p.tid) != "in":
                 return False
         st = self._regions.get(p.tid)
@@ -746,7 +721,7 @@ class CameraWorker(threading.Thread):
 
     def _camera_in(self, v: Visitor, conf: float, tid: int, when: float) -> None:
         """In event of this camera for this visit (once per camera per visit).
-        A visitor who went Out and walks back in within KEEP_SECONDS keeps the
+        A visitor who went Out and walks back in within OUTSIDE_KEEP_SECONDS (5 min) keeps the
         same visit / track_id."""
         if v.outside and self.registry.come_back(v):
             log.info("person %s (%s) came back into the shop", tid, v.track_id)
@@ -762,8 +737,9 @@ class CameraWorker(threading.Thread):
         if not self.registry.leave(v, when):
             return  # already outside (Out recorded before): no second Out until they come back in
         self._send_estimate(v, final=True)
-        # The person keeps their track_id label while a camera sees them outside, and
-        # KEEP_SECONDS after the last camera saw them; then the track_id ends for good
+        # The person is still followed outside (nothing more is recorded) and keeps their
+        # track_id while a camera sees them, and OUTSIDE_KEEP_SECONDS (5 min) after the last
+        # camera saw them; walking back in within that time = same visit, same track_id
         self._event(v, "Out", conf, tid, "Outside Shop", when, area=area)
 
     # ---------- Shop areas (3D regions) ----------
@@ -772,26 +748,15 @@ class CameraWorker(threading.Thread):
         person stands in. A visitor walking into an area gets ONE cctv_event
         (whichever camera sees it first): direction "In", track_region = the
         area's kind. Walking into an "Outside Shop" area counts as Out
-        (track_region "Outside Shop").
-        Camera placed on the shop floor map: the area comes from the SHOP plan
-        (same areas for all cameras), only where the feet are confirmed on the
-        floor (or under the head of a person whose height is known). Feet
-        hidden: the person keeps the area they were in (no guessing)."""
-        shop = self._shop_on()
-        if not shop and (self.space is None or not self.space.regions):
+        (track_region "Outside Shop"). Only people whose feet are confirmed on
+        the floor (p.full); feet hidden: they keep the area they were in."""
+        if self.space is None or not self.space.regions:
             return
         cam_id = self.camera["camera_id"]
         for p in people:
-            if shop:
-                if p.floor is None:
-                    continue  # feet hidden, height not known yet: keep the area they were in
-                r = self.shop.region_at(p.floor)
-                if p.from_head and r.kind == "Outside Shop":
-                    continue  # Out only when the feet are seen outside
-            else:
-                if not p.full:
-                    continue  # partly hidden: keep the area they were in
-                r = self.space.region_at(p.foot, p.floor, p.height)
+            if not p.full:
+                continue  # partly hidden: keep the area they were in
+            r = self.space.region_at(p.foot, None, p.height)  # flat: the feet point in the outline drawn on the picture
             key = r.id if r is not None else ""
             st = self._regions.setdefault(p.tid, _RegionState())
             if key == st.current:

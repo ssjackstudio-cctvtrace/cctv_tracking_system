@@ -14,7 +14,6 @@ import {
   fitTilt,
   floorOrAuto,
   readFloorAreas,
-  regionFloor,
   toPicture,
   type AutoFloor,
   type Calibration,
@@ -344,7 +343,7 @@ export function AreasEditor({
   const shown: FloorAreas = useMemo(() => {
     if (mode === 'calibrate') {
       const cal = trial ?? savedCal
-      return { ...saved, calibration: cal, regions: saved.regions.map((r) => ({ ...r, floor: regionFloor(cal, r.image) })) }
+      return { ...saved, calibration: cal, regions: saved.regions.map((r) => ({ ...r, floor: null })) }
     }
     if (mode === 'area' && draft) {
       const zMin = Number(draft.z_min) || 0
@@ -354,18 +353,22 @@ export function AreasEditor({
         name: draft.name || draft.kind,
         kind: draft.kind,
         image: draft.image,
-        floor: regionFloor(savedCal, draft.image),
+        floor: null, // flat: the outline on the picture
         z_min: zMin,
         z_max: zMax,
       }
       const others = saved.regions
         .filter((r) => r.id !== draft.id)
-        .map((r) => ({ ...r, floor: regionFloor(savedCal, r.image) }))
+        .map((r) => ({ ...r, floor: null }))
       return { ...saved, calibration: savedCal, regions: draft.image.length >= 3 ? [...others, region] : others }
     }
-    return { ...saved, calibration: savedCal, regions: saved.regions.map((r) => ({ ...r, floor: regionFloor(savedCal, r.image) })) }
+    return { ...saved, calibration: savedCal, regions: saved.regions.map((r) => ({ ...r, floor: null })) }
   }, [mode, saved, savedCal, trial, draft])
-  const lines = useMemo(() => spaceLines(shown), [shown])
+  // Flat areas on the picture; the floor grid and X / Y / Z axes only while adjusting the 3D floor
+  const lines = useMemo(() => {
+    const l = spaceLines(shown)
+    return mode === 'calibrate' ? l : { ...l, grid: [], axes: [] }
+  }, [shown, mode])
 
   const toPoint = (e: MouseEvent<HTMLDivElement>): Point => {
     const box = e.currentTarget.getBoundingClientRect()
@@ -447,7 +450,8 @@ export function AreasEditor({
     const value: FloorAreas = {
       version: 3,
       calibration,
-      regions: next.regions.map((r) => ({ ...r, floor: regionFloor(calibration, r.image) })),
+      // flat areas: the edge box checks the feet point against the outline on the picture
+      regions: next.regions.map((r) => ({ ...r, floor: null })),
     }
     setSaving(true)
     setMessage('')
@@ -504,7 +508,7 @@ export function AreasEditor({
   if (!background && !liveReady) {
     return (
       <section className="cam-line">
-        <h2>Shop areas (3D)</h2>
+        <h2>Shop areas</h2>
         <p className="cam-count-note">
           Areas can be set once the edge box sends a picture (live video or snapshot) from this camera.
         </p>
@@ -518,16 +522,16 @@ export function AreasEditor({
       ? `Camera ${CAMERA_HEIGHT} m high (fixed). Click "Auto-fit tilt from people" (people must have walked past on the live video), then fine-tune: the 1 m grid should lie flat on the floor and follow the tile lines, also at the sides of the picture (Lens curve). The Tapo lens is round, so straight floor lines look bent near the edges.`
       : mode === 'area'
         ? (draft?.image.length ?? 0) < 3
-          ? 'Click the corners of the area’s outline on the FLOOR, one after another (at least 3).'
-          : 'The area is shown as a 3D box: its floor outline, up to the height you set. Keep clicking to add corners, or Save.'
+          ? 'Click the corners of the area’s outline on the FLOOR in the picture, one after another (at least 3).'
+          : 'The area is a flat outline on the floor of this picture. Keep clicking to add corners, or Save.'
         : cal
-          ? `3D floor: camera ${cal.camera_height.toFixed(2)} m high${cal.tilt !== undefined ? `, tilted ${cal.tilt}°` : ''}${cal.placed ? ', placed on the shop plan' : ''}. Every full-body person gets a floor spot X / Y and a height Z, shown on the live video.`
-          : `Automatic 3D floor (camera ${CAMERA_HEIGHT} m high, usual tilt). Click "Adjust 3D floor" to fit it to this camera.`
+          ? `Draw each area flat on the floor of this picture. A person counts in an area when their feet, seen on the floor, are inside its outline. The 3D floor (camera ${cal.camera_height.toFixed(2)} m high${cal.tilt !== undefined ? `, tilted ${cal.tilt}°` : ''}) is only used to check that the feet are really seen.`
+          : `Draw each area flat on the floor of this picture. A person counts in an area when their feet, seen on the floor, are inside its outline. (Automatic 3D floor: camera ${CAMERA_HEIGHT} m high, usual tilt; only used to check that the feet are really seen.)`
 
   return (
     <section className="cam-line">
       <div className="cam-line-head">
-        <h2>Shop areas (3D)</h2>
+        <h2>Shop areas</h2>
         {mode === 'view' && (
           <div className="cam-line-actions">
             {cal && (
@@ -663,14 +667,6 @@ export function AreasEditor({
               ))}
             </select>
           </label>
-          <label>
-            Height from (m, Z)
-            <input inputMode="decimal" value={draft.z_min} onChange={(e) => setDraft({ ...draft, z_min: e.target.value })} />
-          </label>
-          <label>
-            Height to (m, Z)
-            <input inputMode="decimal" value={draft.z_max} onChange={(e) => setDraft({ ...draft, z_max: e.target.value })} />
-          </label>
         </div>
       )}
 
@@ -741,7 +737,7 @@ export function AreasEditor({
               <strong>{r.name}</strong>
               <span className="cam-area-kind">{r.kind}</span>
               <span className="cam-area-kind">
-                {`3D · Z ${r.z_min}–${r.z_max} m`}
+                Flat area on the picture
               </span>
               <span className="cam-area-actions">
                 <button type="button" className="cam-toggle" onClick={() => startArea(r)}>

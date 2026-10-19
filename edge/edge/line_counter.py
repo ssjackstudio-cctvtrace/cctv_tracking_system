@@ -221,23 +221,16 @@ class LineCounter:
         if t.area == "out":  # already standing in the Out area: count it on the next steady frames
             t.area, t.candidate, t.streak = None, None, 0
 
-    def update(self, feet: dict[int, list[Point]], now: float | None = None,
-               areas: dict[int, str | None] | None = None) -> list[Crossing]:
-        """areas: "in" / "out" / None (feet not confirmed) for each person, worked
-        out from their floor spot on the shop plan (all cameras placed on the
-        3D shop floor map). When given, it replaces the count line."""
+    def update(self, feet: dict[int, list[Point]], now: float | None = None) -> list[Crossing]:
         now = time.monotonic() if now is None else now
         crossings: list[Crossing] = []
-        if self.line is None and areas is None:
+        if self.line is None:
             return crossings
 
         for track_id, pts in feet.items():
             t = self._tracks.setdefault(track_id, _Track(now))
             t.last_seen = now
-            if areas is not None:
-                area = areas.get(track_id)
-            else:
-                area = self.line.area_of(pts) if pts else None
+            area = self.line.area_of(pts) if pts else None
             if area is None:  # feet on the line, or not fully visible: wait
                 t.candidate, t.streak = None, 0
                 continue

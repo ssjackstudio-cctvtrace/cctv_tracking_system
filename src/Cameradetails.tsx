@@ -16,9 +16,7 @@ import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside, type CountAreas } from './countZones'
 import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
-import { REGION_COLORS, floorOrAuto, readFloorAreas, regionFloor, type Calibration, type FloorAreas, type RegionKind } from './space3d'
-import ShopFloorMap from './Shopfloormap'
-import type { ShopRegion } from './shopLayouts'
+import { REGION_COLORS, floorOrAuto, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './Camera.css'
 
@@ -861,21 +859,13 @@ export default function CameraDetails({
   // 3D floor + shop areas (updated at once when saved below, before the camera list reloads)
   const [savedAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
   useEffect(() => setFloorAreas(readFloorAreas(camera.floor_areas)), [camera.floor_areas])
-  // Shop areas shared by all cameras (3D shop floor map), also while being edited there
-  const [shopRegions, setShopRegions] = useState<ShopRegion[] | null>(null)
   // The saved floor, or the automatic floor (camera 3.25 m high) until one is saved.
-  // A camera placed on the shop floor map shows the SHARED shop areas (what the edge box
-  // uses for it); otherwise its own areas.
+  // Shop areas are FLAT: the outline drawn on this camera's picture (no 3D box);
+  // the edge box checks the feet point against it.
   const floorAreas = useMemo<FloorAreas>(() => {
     const calibration = floorOrAuto(savedAreas.calibration)
-    if (calibration.placed && shopRegions?.length)
-      return {
-        ...savedAreas,
-        calibration,
-        regions: shopRegions.map((r) => ({ id: r.id, name: r.name, kind: r.kind, image: [], floor: r.floor, z_min: r.z_min, z_max: r.z_max })),
-      }
-    return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: regionFloor(calibration, r.image) })) }
-  }, [savedAreas, shopRegions])
+    return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: null })) }
+  }, [savedAreas])
   const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
   // Full-body people seen on the live video (feet + top of head), for "Auto-fit tilt from people"
   const peopleSeen = useRef<{ foot: Point; head: Point }[]>([])
@@ -901,7 +891,7 @@ export default function CameraDetails({
       }
       if (peopleSeen.current.length > 400) peopleSeen.current.splice(0, peopleSeen.current.length - 400)
     }
-    drawSpace(ctx, space)
+    drawSpace(ctx, { ...space, grid: [], axes: [] }) // flat areas only: no floor grid / axes on the live video
     if (areas) drawAreas(ctx, areas)
     const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
     for (const box of shown) drawPerson(ctx, box, records.byTrack.get(box.track), floorAreas.calibration)
@@ -986,13 +976,6 @@ export default function CameraDetails({
         liveReady={liveMsg.state === 'live'}
       />
 
-      {savedAreas.calibration?.placed && !!shopRegions?.length && (
-        <p className="cam-count-note">
-          This camera is placed on the 3D shop floor map, so the edge box uses the shop areas of the map (the same for all
-          cameras; change them on the map below, also on any camera&apos;s picture). The 3D floor below still sets this
-          camera&apos;s tilt and lens; its own areas are not used.
-        </p>
-      )}
       <AreasEditor
         camera={camera}
         grabFrame={() => grabFrameRef.current?.() ?? null}
@@ -1001,11 +984,6 @@ export default function CameraDetails({
         people={peopleSeen}
       />
 
-      <ShopFloorMap
-        camera={camera}
-        onSaved={(cameraId, value) => cameraId === camera.camera_id && setFloorAreas(value)}
-        onPlan={setShopRegions}
-      />
 
       {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}
       <p className="cam-count-note">People counted by this camera today</p>
