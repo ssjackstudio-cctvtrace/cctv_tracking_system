@@ -522,9 +522,12 @@ class CameraWorker(threading.Thread):
                 how = "recognised, seen by another camera" if v is not None and v.seen_on.keys() - {cam_id} \
                     else "recognised, seen a moment ago"
             elif v is None:
-                # standing outside: can only be a visitor who just went Out (keeps their track_id label)
-                v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now, outside_only=True)
-                how = "recognised, outside the shop"
+                # standing outside: a visitor who went Out (keeps their track_id label), or one
+                # who was inside a few seconds ago and just walked out with a new tracker number
+                # (then their Out is counted: _attach marks them In on this camera's counter)
+                v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now,
+                                        outside_only=True, just_out=True)
+                how = "recognised, outside the shop" if v is None or v.outside else "recognised, just walked out"
             if v is not None:
                 self._attach(tid, v, now, how)
                 busy.add(v.visit_id)

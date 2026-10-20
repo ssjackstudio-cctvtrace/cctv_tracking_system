@@ -201,6 +201,11 @@ remembers (`edge/edge/visitors.py`):
   the Out area within that time = same visit, same track_id, a new In event.
   Another camera that still sees them inside the door does not count them
   back In.
+- **Walking out behind displays.** The tracker often loses a person behind the
+  suitcases / displays at the shop front and gives them a new number outside.
+  Someone first seen in the Out area whose look clearly matches a visitor seen
+  inside in the last `EXIT_LINK_SECONDS` (default 8) is that visitor: they keep
+  their track_id and their Out is counted.
 - **Restart:** visits of today left open when the box stopped are closed with
   an Out event when it starts again.
 

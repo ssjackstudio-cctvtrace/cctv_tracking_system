@@ -67,6 +67,10 @@ LOOSE_DISTANCE = min(0.9, MAX_DISTANCE * 1.5)  # look match for a hidden visitor
 HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have walked in KEEP_SECONDS (cameras on the shop plan)
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
 POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long after it was seen
+# Someone first seen OUTSIDE may be a visitor who was inside this recently: they just walked out
+# (the tracker often gives a new number while people pass behind the displays at the shop front)
+EXIT_LINK_SECONDS = float(os.getenv("EXIT_LINK_SECONDS", "8"))
+EXIT_LINK_SCORE = 1.8  # ... but only with a clearly matching look (score below this; lower = more alike)
 
 
 @dataclass(eq=False)
@@ -139,37 +143,48 @@ class VisitorRegistry:
         return 1.0 + app / self.max_distance
 
     def _match_locked(self, look, floor, exclude: set[str], now: float, visible_only: bool = False,
-                      outside_only: bool = False, inside_only: bool = False) -> Visitor | None:
+                      outside_only: bool = False, inside_only: bool = False,
+                      just_out: bool = False) -> Visitor | None:
         best, best_s = None, None
         for v in self._inside.values():
             if v.visit_id in exclude:
                 continue
+            leaving = False
             if outside_only and not v.outside:
-                continue  # someone standing outside can only be a visitor who went Out
+                # someone standing outside: a visitor who went Out, or (just_out) one who
+                # was inside a few seconds ago and has just walked out without being counted Out
+                if not (just_out and now - v.last_any <= EXIT_LINK_SECONDS):
+                    continue
+                leaving = True
             if inside_only and v.outside:
                 continue  # someone who appeared inside cannot be a visitor who went Out
             if visible_only and not v.outside and (not v.seen_on or now - max(v.seen_on.values()) >= HIDDEN_SECONDS):
                 continue  # hidden inside: cannot be someone walking in from outside right now
             s = self._score(v, look, floor, now)
+            if s is not None and leaving and s >= EXIT_LINK_SCORE:
+                continue  # just walked out: only with a clearly matching look
             if s is not None and (best_s is None or s < best_s):
                 best, best_s = v, s
         return best
 
     def match(self, look: Look | None, floor: tuple[float, float] | None = None,
               exclude: set[str] | None = None, now: float | None = None,
-              visible_only: bool = False, outside_only: bool = False, inside_only: bool = False) -> Visitor | None:
+              visible_only: bool = False, outside_only: bool = False, inside_only: bool = False,
+              just_out: bool = False) -> Visitor | None:
         """The remembered visitor who is most likely this person, or None.
         exclude = visit_ids already followed as other people in this camera's picture.
         visible_only: only visitors a camera sees right now (for someone who
         just walked in from outside: they cannot be a visitor hidden inside;
         a visitor who went Out may come back in).
         outside_only: only visitors who went Out (for someone standing outside).
+        just_out: with outside_only, also visitors inside seen in the last
+        EXIT_LINK_SECONDS whose look clearly matches (they just walked out).
         inside_only: only visitors who have not gone Out."""
         if (look is None or look.empty) and floor is None:
             return None
         with self._lock:
             return self._match_locked(look, floor, exclude or set(), time.time() if now is None else now,
-                                      visible_only, outside_only, inside_only)
+                                      visible_only, outside_only, inside_only, just_out)
 
     def find_or_create(self, look, floor, exclude: set[str], create: Callable[[], Visitor],
                        now: float | None = None, visible_only: bool = False) -> tuple[Visitor, bool]:
