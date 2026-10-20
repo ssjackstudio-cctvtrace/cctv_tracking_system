@@ -95,7 +95,7 @@ export type Visit = {
   branch_id: string
   member_id: string | null
   track_id: string
-  visit_type: 'Member' | 'Non-Member' | 'Unknown'
+  visit_type: 'Member' | 'Non-Member' | 'Guest'
   est_gender: 'Male' | 'Female' | 'Unknown'
   est_age: number | null
   demographic_score: number | null // 0–100

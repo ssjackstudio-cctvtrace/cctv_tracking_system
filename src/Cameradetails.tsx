@@ -677,7 +677,7 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
     ? [
         box.track,
         // direction from where the person stands now: walkway = Passed By, shop area = In
-        `${v?.visit_type ?? 'Visitor'} · ${box.kind === 'Traffic' ? 'Passed By' : box.kind === 'Purchasing' || box.kind === 'Counter' ? 'In' : rec?.direction ?? '—'}${box.region ? ` · ${box.region}` : ''}`,
+        `${v?.visit_type ?? 'Guest'} · ${box.kind === 'Traffic' ? 'Passed By' : box.kind === 'Purchasing' || box.kind === 'Counter' ? 'In' : rec?.direction ?? '—'}${box.region ? ` · ${box.region}` : ''}`,
         `${gender ?? 'Unknown'} · Age ${fmtAge(age)}`,
         ...(box.xyz && box.full ? [`X ${box.xyz[0].toFixed(1)} · Y ${box.xyz[1].toFixed(1)} · Z ${box.xyz[2].toFixed(2)} m`] : []),
         ...(rec ? [`Match Confidence ${fmt2(rec.confidence)}%`] : []),
