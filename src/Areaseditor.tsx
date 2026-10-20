@@ -529,7 +529,7 @@ export function AreasEditor({
       return
     }
     if (saved.inside_only && draft.kind === 'Traffic') {
-      setMessage('Could not save: this camera is Inside only, so it has no Traffic walkway. Untick "Inside only" first.')
+      setMessage('Could not save: this camera is Inside only, so it has no Traffic walkway.')
       return
     }
     // Parts lying on other areas are cut off, so areas never overlap
@@ -556,20 +556,6 @@ export function AreasEditor({
     )
   }
 
-  // Inside only: the whole picture is inside the shop (a camera that never sees the walkway)
-  const setInsideOnly = (on: boolean) => {
-    if (on && saved.regions.some((r) => r.kind === 'Traffic')) {
-      setMessage('Could not save: delete the Traffic areas first. An Inside-only camera has no Traffic walkway.')
-      return
-    }
-    store(
-      { ...saved, inside_only: on },
-      on
-        ? `${camera.camera_name} is Inside only: everyone it sees is inside the shop (In only, places without an area count as Purchasing).`
-        : `${camera.camera_name} is no longer Inside only: places without an area are Out of Range.`,
-    )
-  }
-
   const deleteArea = (r: Region) => {
     if (!window.confirm(`Delete the area "${r.name}"?`)) return
     store({ ...saved, regions: saved.regions.filter((x) => x.id !== r.id) }, `Area "${r.name}" deleted.`)
@@ -578,7 +564,7 @@ export function AreasEditor({
   if (!background && !liveReady) {
     return (
       <section className="cam-line">
-        <h2>Shop areas (In / Out)</h2>
+        <h2>Shop Areas</h2>
         <p className="cam-count-note">
           Areas can be set once the edge box sends a picture (live video or snapshot) from this camera.
         </p>
@@ -609,13 +595,9 @@ export function AreasEditor({
   return (
     <section className="cam-line">
       <div className="cam-line-head">
-        <h2>Shop areas (In / Out)</h2>
+        <h2>Shop Areas</h2>
         {mode === 'view' && (
           <div className="cam-line-actions">
-            <label className="cam-areas-check">
-              <input type="checkbox" checked={!!saved.inside_only} disabled={saving} onChange={(e) => setInsideOnly(e.target.checked)} />
-              Inside only
-            </label>
             {cal && (
               <button type="button" className="cam-toggle" disabled={saving} onClick={resetCalibration}>
                 Reset 3D floor
@@ -835,7 +817,7 @@ export function AreasEditor({
         <p className="cam-count-note">
           {saved.inside_only
             ? 'Inside only, no areas: everyone this camera sees is In (Purchasing). Add a Counter area if this camera sees the counter.'
-            : 'No areas yet, so this camera is not counting. Add the Purchasing (shop floor / Point of Purchase displays), Counter and Traffic (walkway outside the shop) areas this camera sees, or tick Inside only for a camera that only sees the inside of the shop.'}
+            : 'No areas yet, so this camera is not counting. Add the Purchasing (shop floor / Point of Purchase displays), Counter and Traffic (walkway outside the shop) areas this camera sees.'}
         </p>
       )}
 

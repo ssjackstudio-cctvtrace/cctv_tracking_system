@@ -210,9 +210,27 @@
 .ds-more:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
 
 .ds-panel { margin-top: 1rem; background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; }
-/* Dashboard with 2 cards: People Walk-in, Transactions Dealed */
-.ds-stats.ds-stats--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-@media (max-width: 600px) { .ds-stats.ds-stats--two { grid-template-columns: 1fr; } }
+/* Dashboard with 3 cards: People Passed By, People Walk-in, Transactions Dealed.
+   Wide screen: all 3 in one row. Sidebar collapsed or narrower screen: People Passed By and
+   People Walk-in side by side in one row, Transactions Dealed underneath at full width. */
+.ds-stats.ds-stats--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ds-stats.ds-stats--three > .ds-stat:nth-child(3) { border-top-color: var(--ds-signal); }
+.ds-stat.ds-stat--passed { border: 2px solid #f97316; } /* Passed By = orange, like the Traffic area */
+/* sidebar collapsed */
+.ds--collapsed .ds-stats.ds-stats--three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ds--collapsed .ds-stats.ds-stats--three > .ds-stat:nth-child(3) { grid-column: 1 / -1; }
+/* narrower window */
+@media (max-width: 1100px) {
+  .ds-stats.ds-stats--three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ds-stats.ds-stats--three > .ds-stat:nth-child(3) { grid-column: 1 / -1; }
+}
+@media (max-width: 600px) {
+  .ds-stats.ds-stats--three { gap: 0.6rem; }
+  .ds-stats.ds-stats--three .ds-stat { padding: 0.8rem 0.9rem; }
+  .ds-stats.ds-stats--three .ds-stat-row small,
+  .ds-stats.ds-stats--three .ds-stat strong { font-size: 1.3rem; }
+  .ds-stats.ds-stats--three .ds-stat-sub { padding-left: 0.25rem; font-size: 0.82rem; }
+}
 
 /* Top 5 Longest Stay: podium (2nd, 1st, 3rd), then 4th and 5th as rows */
 .ds-stay-note { margin: -0.4rem 0 1rem; font-size: 0.85rem; color: var(--ds-muted); }

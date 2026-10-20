@@ -91,6 +91,10 @@ type LatestRecognition = {
 }
 
 type Counts = {
+  passedCount: number | null
+  passedMale: number | null
+  passedFemale: number | null
+  passedUnknown: number | null
   inCount: number | null
   inMale: number | null
   inFemale: number | null
@@ -156,16 +160,18 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 
 // People, not events: one person (one track_id) can be seen going In by several
 // cameras and walk into several areas, so each number counts distinct track_ids.
+//   People Passed By = distinct track_ids with a Passed By event (Male + Female + Unknown = the total)
 //   People Walk-in = distinct track_ids with an In event (Male + Female + Unknown = the total)
 // Time in the shop, per track_id: from an In (Purchasing / Counter) until the
 // next Passed By (walked onto the Traffic walkway) or Out; a person who comes
 // back in later adds that stay too. A stay that has not ended yet is left out.
 export function countPeople(events: PersonEvent[]) {
-  const people = new Map<string, { gender: string; wentIn: boolean; since: number | null; seconds: number; ended: boolean }>()
+  const people = new Map<string, { gender: string; wentIn: boolean; passedBy: boolean; since: number | null; seconds: number; ended: boolean }>()
   for (const e of events) {
     // events come oldest first
     const key = e.visit?.track_id ?? e.visit_id
-    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, since: null, seconds: 0, ended: false }
+    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, passedBy: false, since: null, seconds: 0, ended: false }
+    if (e.direction === 'Passed By') p.passedBy = true
     const t = new Date(e.event_time).getTime()
     if (e.direction === 'In') {
       p.wentIn = true
@@ -177,16 +183,19 @@ export function countPeople(events: PersonEvent[]) {
     }
     people.set(key, p)
   }
-  const list = [...people.values()].filter((p) => p.wentIn)
-  const male = list.filter((p) => p.gender === 'Male').length
-  const female = list.filter((p) => p.gender === 'Female').length
-  const walkIn: Tally = { all: list.length, male, female, unknown: list.length - male - female }
+  const tally = (list: { gender: string }[]): Tally => {
+    const male = list.filter((p) => p.gender === 'Male').length
+    const female = list.filter((p) => p.gender === 'Female').length
+    return { all: list.length, male, female, unknown: list.length - male - female }
+  }
+  const walkIn = tally([...people.values()].filter((p) => p.wentIn))
+  const passedBy = tally([...people.values()].filter((p) => p.passedBy))
   const longest: Stay[] = [...people.entries()]
     .filter(([, p]) => p.ended && p.seconds >= 1)
     .map(([trackId, p]) => ({ trackId, gender: p.gender, seconds: Math.round(p.seconds) }))
     .sort((x, y) => y.seconds - x.seconds)
     .slice(0, 5)
-  return { in: walkIn, longest }
+  return { in: walkIn, passedBy, longest }
 }
 
 // 754 s → "12 min 34 sec"
@@ -292,6 +301,10 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
   const [day, setDay] = useState(todayKey)
 
   const [counts, setCounts] = useState<Counts>({
+    passedCount: null,
+    passedMale: null,
+    passedFemale: null,
+    passedUnknown: null,
     inCount: null,
     inMale: null,
     inFemale: null,
@@ -355,6 +368,10 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
       if (failed?.error) setError(failed.error.message)
       const p = peopleRes.people
       setCounts({
+        passedCount: p ? p.passedBy.all : null,
+        passedMale: p ? p.passedBy.male : null,
+        passedFemale: p ? p.passedBy.female : null,
+        passedUnknown: p ? p.passedBy.unknown : null,
         inCount: p ? p.in.all : null,
         inMale: p ? p.in.male : null,
         inFemale: p ? p.in.female : null,
@@ -377,8 +394,16 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     male?: number | null
     female?: number | null
     unknown?: number | null
-    tone?: 'in'
+    tone?: 'in' | 'passed'
   }[] = [
+    {
+      label: 'People Passed By',
+      value: counts.passedCount,
+      male: counts.passedMale,
+      female: counts.passedFemale,
+      unknown: counts.passedUnknown,
+      tone: 'passed',
+    },
     {
       label: 'People Walk-in',
       value: counts.inCount,
@@ -426,7 +451,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
       {filterError && <p className="ds-error">Some filters failed to load: {filterError}</p>}
       {error && <p className="ds-error">Some numbers failed to load: {error}</p>}
 
-      <section className="ds-stats ds-stats--two">
+      <section className="ds-stats ds-stats--three">
         {stats.map((s) => (
           <div className={s.tone ? `ds-stat ds-stat--${s.tone}` : 'ds-stat'} key={s.label}>
             <div className="ds-stat-row">

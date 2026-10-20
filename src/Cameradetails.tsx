@@ -186,14 +186,14 @@ export function CameraScreen({
   )
 }
 
-// People In / Out / Inside for ONE camera, counted from CCTV_EVENT since
-// midnight today: In = direction 'In', Out = direction 'Passed By' (walked
-// onto the Traffic walkway) or 'Out'. People, not rows: one person (visit =
-// one track_id) is counted once, even when this camera recorded them walking
-// into more than one shop area. reloadKey changes when the edge box says a new row was saved,
-// so the numbers change at once.
+// People Passed By / Walk-in for ONE camera (the selected camera), counted
+// from CCTV_EVENT since midnight today: Passed By = direction 'Passed By'
+// (walked onto the Traffic walkway), Walk-in = direction 'In'. People, not
+// rows: one person (visit = one track_id) is counted once, even when this
+// camera recorded them more than once. reloadKey changes when the edge box
+// says a new row was saved, so the numbers change at once.
 function usePeopleCount(cameraId: string, reloadKey = 0) {
-  const [counts, setCounts] = useState({ in: 0, out: 0 })
+  const [counts, setCounts] = useState({ passedBy: 0, in: 0 })
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -218,13 +218,13 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
         }
         return { count: ids.size, error: null }
       }
-      const [inRes, outRes] = await Promise.all([visitsWith(['In']), visitsWith(['Passed By', 'Out'])])
+      const [passedRes, inRes] = await Promise.all([visitsWith(['Passed By']), visitsWith(['In'])])
       if (cancelled) return
-      const err = inRes.error ?? outRes.error
+      const err = passedRes.error ?? inRes.error
       if (err) setError(err.message)
       else {
         setError('')
-        setCounts({ in: inRes.count, out: outRes.count })
+        setCounts({ passedBy: passedRes.count, in: inRes.count })
       }
     }
     load()
@@ -235,16 +235,16 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
     }
   }, [cameraId, reloadKey])
 
-  return { ...counts, inside: Math.max(counts.in - counts.out, 0), error }
+  return { ...counts, error }
 }
 
-// ---------- People Comes In / Comes Out timeline (today, 30-minute steps) ----------
+// ---------- People Passed By / Walk-in timeline (today, 30-minute steps) ----------
 // Opening hours: 10:00 AM – 10:30 PM on Friday and Saturday, 10:00 AM – 10:00 PM other days.
 // Each person (visit_id) is counted once per direction, in the 30 minutes of
-// their first In / leaving (Passed By or Out) row from this camera today, like the cards above.
+// their first Passed By / In row from this camera today, like the cards above.
 const SLOT_MINUTES = 30
 
-type TimelineSlot = { start: Date; in: number; out: number }
+type TimelineSlot = { start: Date; passedBy: number; in: number }
 
 function usePeopleTimeline(cameraId: string, reloadKey = 0) {
   const [slots, setSlots] = useState<TimelineSlot[]>([])
@@ -264,7 +264,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
           .from(TABLES.cctvEvent)
           .select('visit_id, direction, event_time')
           .eq('camera_id', cameraId)
-          .in('direction', ['In', 'Passed By', 'Out'])
+          .in('direction', ['Passed By', 'In'])
           .gte('event_time', open.toISOString())
           .lt('event_time', close.toISOString())
           .order('event_time', { ascending: true })
@@ -280,16 +280,16 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
       const count = (closeMinutes(now) - OPEN_MINUTES) / SLOT_MINUTES
       const next: TimelineSlot[] = Array.from({ length: count }, (_, i) => ({
         start: new Date(open.getTime() + i * SLOT_MINUTES * 60_000),
+        passedBy: 0,
         in: 0,
-        out: 0,
       }))
-      const seen = { In: new Set<string>(), Out: new Set<string>() }
+      const seen = { passedBy: new Set<string>(), in: new Set<string>() }
       for (const r of rows) {
-        const dir = r.direction === 'In' ? 'In' : 'Out' // Passed By / Out = left the shop
+        const dir = r.direction === 'In' ? 'in' : 'passedBy'
         if (seen[dir].has(r.visit_id)) continue
         seen[dir].add(r.visit_id)
         const i = Math.floor((new Date(r.event_time).getTime() - open.getTime()) / (SLOT_MINUTES * 60_000))
-        if (i >= 0 && i < count) next[i][dir === 'In' ? 'in' : 'out'] += 1
+        if (i >= 0 && i < count) next[i][dir] += 1
       }
       setError('')
       // Only up to now: the rest of the day has not happened yet
@@ -321,15 +321,15 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
   const data = slots.map((s) => ({
     minute: s.start.getHours() * 60 + s.start.getMinutes() + SLOT_MINUTES / 2,
     range: `${fmtClock(s.start)} – ${fmtClock(new Date(s.start.getTime() + SLOT_MINUTES * 60_000))}`,
+    passedBy: s.passedBy,
     in: s.in,
-    out: s.out,
   }))
   const ticks = Array.from({ length: Math.floor(closeAt / 60) - OPEN_MINUTES / 60 + 1 }, (_, i) => OPEN_MINUTES + i * 60)
   if (closeAt % 60) ticks.push(closeAt)
 
   return (
     <section className="cam-timeline">
-      <h2>People Comes In / Comes Out today</h2>
+      <h2>People Passed By / Walk-in today</h2>
       <p className="cam-count-note">
         People per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
         {fmtClock(new Date(new Date(today).setHours(0, closeAt, 0, 0)))}
@@ -353,8 +353,8 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
             contentStyle={{ borderRadius: 8, borderColor: '#e2e8f0' }}
           />
           <Legend verticalAlign="top" align="right" height={32} iconType="plainline" />
-          <Line type="monotone" dataKey="in" name="People Comes In" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-          <Line type="monotone" dataKey="out" name="People Comes Out" stroke={OUT_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="passedBy" name="People Passed By" stroke={OUT_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="in" name="People Walk-in" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
     </section>
@@ -745,8 +745,6 @@ export default function CameraDetails({
   const [liveMsg, setLiveMsg] = useState<{ state: LiveState; msg: string }>({ state: 'connecting', msg: '' })
   const grabFrameRef = useRef<(() => string | null) | null>(null)
   const onLiveState = useCallback((state: LiveState, msg: string) => setLiveMsg({ state, msg }), [])
-  // People inside = people standing in this camera's Purchasing / Counter areas right now (from the live video)
-  const [insideNow, setInsideNow] = useState<number | null>(null)
   // Records from this camera: CCTV Event / Recognition Event tabs, one day at a time
   const [recordTab, setRecordTab] = useState<RecordTab>('cctv')
   const [recordDay, setRecordDay] = useState(todayKey)
@@ -754,8 +752,6 @@ export default function CameraDetails({
   // Live view: the shop areas (Purchasing / Counter / Traffic), then each
   // person (3D box + label), and a floor map
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
-    const nIn = frame.boxes.filter((b) => b.area === 'in').length
-    setInsideNow((cur) => (cur === nIn ? cur : nIn))
     if (Date.now() - lastSample.current > 500) {
       lastSample.current = Date.now()
       for (const b of frame.boxes) {
@@ -856,16 +852,12 @@ export default function CameraDetails({
       <p className="cam-count-note">People counted by this camera today</p>
       <div className="cam-counts">
         <div className="cam-count-card">
-          <span className="cam-count-label">People Comes In</span>
+          <span className="cam-count-label">People Passed By</span>
+          <span className="cam-count-value">{people.passedBy}</span>
+        </div>
+        <div className="cam-count-card">
+          <span className="cam-count-label">People Walk-in</span>
           <span className="cam-count-value">{people.in}</span>
-        </div>
-        <div className="cam-count-card">
-          <span className="cam-count-label">People Comes Out</span>
-          <span className="cam-count-value">{people.out}</span>
-        </div>
-        <div className="cam-count-card">
-          <span className="cam-count-label">People Inside (now, this camera)</span>
-          <span className="cam-count-value">{liveMsg.state === 'live' && insideNow !== null ? insideNow : '—'}</span>
         </div>
       </div>
 
