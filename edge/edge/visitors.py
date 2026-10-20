@@ -16,8 +16,11 @@ Rules
     space3d.py), once per visitor whichever camera sees it first:
       In          (track_region Purchasing / Counter): walked into the shop, or
                   into the other kind of area inside the shop
-      Passed By   (track_region Traffic): walked from inside onto the walkway
-                  outside the shop: the stay in the shop ends here
+      Passed By   (track_region Traffic): a new person first seen on the
+                  walkway outside the shop (a passer-by gets a track_id too),
+                  or someone who walked from inside onto the walkway: the
+                  stay in the shop ends here. A passer-by who then walks into
+                  the shop gets In with the SAME track_id.
       Out         (track_region Out of Range): walked from inside to a spot
                   outside every drawn area, or no camera saw them for
                   KEEP_SECONDS (main.py closes the visit)
@@ -46,6 +49,10 @@ Is this the same person? The registry compares, for every remembered visitor:
      this person.
   2. Face, attire, whole body and height (reid.compare). A clear difference
      in any of them = another person.
+     Also for a person lost for a while: with the cameras on the shop plan,
+     someone can only be a remembered visitor if they stand within walking
+     distance (PERSON_SPEED_MPS x the time since that visitor was last seen)
+     of where that visitor was last seen. Which person, at which place.
   3. A visitor already followed on this camera as a different person, in the
      same picture, is never a match (two people side by side).
   4. Overlap handoff (cameras whose views overlap): if the strict look match
@@ -102,6 +109,9 @@ OVERLAP_DISTANCE = float(os.getenv("OVERLAP_DISTANCE", str(LOOSE_DISTANCE)))  # 
 # Areas: another camera that saw the person on the other side (inside / on the walkway) this
 # recently stops this camera from moving them in or out (areas drawn a little differently)
 GUARD_SECONDS = float(os.getenv("AREA_GUARD_SECONDS", "1.5"))
+# Fastest a shopper walks (metres per second): a visitor last seen at one spot of the shop plan
+# cannot be someone standing further away than this x the seconds since (plus SAME_PLACE_METRES)
+PERSON_SPEED_MPS = float(os.getenv("PERSON_SPEED_MPS", "1.5"))
 
 
 @dataclass(eq=False)
@@ -172,9 +182,14 @@ class VisitorRegistry:
                 return None  # same spot but clearly a different look
             # same floor spot: strong evidence (ranks before look-only matches)
             return d / self.same_place * 0.6 + (app / self.max_distance if app is not None else 0.5) * 0.4
+        moved = None
+        if floor is not None and v.floor is not None:  # last seen a while ago: could they have walked here?
+            moved = math.dist(floor, v.floor)
+            if moved > self.same_place + PERSON_SPEED_MPS * max(0.0, now - v.floor_at):
+                return None  # too far from where that visitor was last seen
         if app is None or app >= self.max_distance:
             return None
-        return 1.0 + app / self.max_distance
+        return 1.0 + app / self.max_distance + (min(moved, 10.0) / 50 if moved is not None else 0.0)
 
     def _match_locked(self, look, floor, exclude: set[str], now: float, visible_only: bool = False,
                       outside_only: bool = False, inside_only: bool = False,
@@ -221,7 +236,7 @@ class VisitorRegistry:
                                       visible_only, outside_only, inside_only, just_out)
 
     def _handoff_locked(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
-                        camera_id: str, now: float, when: float | None) -> Visitor | None:
+                        camera_id: str, now: float, when: float | None, outside: bool = False) -> Visitor | None:
         """Overlapping cameras: the visitor ANOTHER camera is following right now
         (seen there in the last OVERLAP_SECONDS), or who went In on another
         camera within OVERLAP_IN_SECONDS of `when` (this camera's In), and whom
@@ -229,10 +244,18 @@ class VisitorRegistry:
         look is clearly different (compare → None) or too far apart
         (> OVERLAP_DISTANCE), or they stand somewhere else on the shop plan.
         Without a look, only a visitor who went In on another camera at the
-        same moment, and only when exactly one does (no guessing)."""
+        same moment, and only when exactly one does (no guessing).
+        outside=True (someone on the Traffic walkway): visitors outside the
+        shop, or ones another camera sees on the walkway right now."""
         best, best_s, blind = None, None, []
         for v in self._inside.values():
-            if v.left or v.outside or v.visit_id in exclude or now - v.last_any > self._keep(v):
+            if v.left or v.visit_id in exclude or now - v.last_any > self._keep(v):
+                continue
+            if outside:
+                if not v.outside and not any(c != camera_id and now - t <= OVERLAP_SECONDS
+                                             for c, t in v.traffic_at.items()):
+                    continue
+            elif v.outside:
                 continue
             others = [t for c, t in v.seen_on.items() if c != camera_id]
             if not others:
@@ -287,6 +310,24 @@ class VisitorRegistry:
             v = self._match_locked(look, floor, exclude, now, visible_only) if known else None
             if v is None and camera_id is not None:
                 v = self._handoff_locked(look, floor, exclude, camera_id, now, when)
+            if v is not None:
+                return v, False
+            v = create()
+            self._inside[v.visit_id] = v
+            return v, True
+
+    def find_or_create_outside(self, look, floor, exclude: set[str], create: Callable[[], Visitor],
+                               camera_id: str, now: float | None = None) -> tuple[Visitor, bool]:
+        """Someone steadily on the Traffic walkway, not known on this camera:
+        a visitor outside the shop (a passer-by seen before, also by another
+        camera right now), or one who just walked out; else a new visitor
+        made by create() — in one step, so two cameras make only ONE visit."""
+        now = time.time() if now is None else now
+        with self._lock:
+            known = (look is not None and not look.empty) or floor is not None
+            v = self._match_locked(look, floor, exclude, now, outside_only=True, just_out=True) if known else None
+            if v is None:
+                v = self._handoff_locked(look, floor, exclude, camera_id, now, None, outside=True)
             if v is not None:
                 return v, False
             v = create()

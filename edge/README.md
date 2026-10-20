@@ -192,6 +192,20 @@ Older two-point lines still work (In = the side the green arrow pointed to).
 
 ## One track ID per person (all cameras)
 
+**Passers-by and walk-ins.** Someone steadily on the Traffic walkway who is not
+known yet gets a track_id and a **Passed By** (Traffic) event; if they then walk
+into a Purchasing / Counter area, the same track_id gets **In**. Walking back onto
+the walkway is Passed By again (the stay in the shop ends).
+
+**Only moving people.** A new detection must move (`MOVE_MIN_SHARE`, default 15% of
+its height) before it is followed; one that has not moved after `STATIC_SECONDS`
+(default 8) is an object (mannequin, bag stand) and is ignored on that camera.
+
+**Which person at which place.** With all cameras placed on the shop plan (Camera
+page → Adjust 3D floor → Placed on the shop plan, with each camera's real X / Y and
+Facing), a person lost at one spot can only be matched to someone standing within
+walking distance (`PERSON_SPEED_MPS` x the seconds since) of that spot.
+
 All 4 cameras send their video over the same Wi-Fi router to this one box,
 so the box sees every camera at once and keeps ONE list of the people it
 remembers (`edge/edge/visitors.py`):

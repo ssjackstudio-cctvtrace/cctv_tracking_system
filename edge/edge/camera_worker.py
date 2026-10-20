@@ -152,6 +152,18 @@ NEW_VISITOR_HOLD_SECONDS = float(os.getenv("NEW_VISITOR_HOLD_SECONDS", "1.0"))
 REGION_STEADY_FRAMES = 3
 REGION_MIN_SECONDS = float(os.getenv("REGION_MIN_SECONDS", "1.0"))
 
+# Only things that MOVE are people. A mannequin, a bag on a stand or a poster can
+# look like a person to the detector, but it never moves. A new tracker number
+# must move (box centre) at least MOVE_MIN_SHARE of its own height before it is
+# treated as a person (followed, recognised, counted). If it has not moved after
+# STATIC_SECONDS it is an object: ignored on this camera from then on (not shown,
+# no track_id, no events). Should it move after all, it becomes a person.
+MOVE_CHECK = os.getenv("MOVE_CHECK", "on").strip().lower() not in ("off", "0", "false", "no")
+MOVE_MIN_SHARE = float(os.getenv("MOVE_MIN_SHARE", "0.15"))  # 0.15 of a 1.7 m person ≈ 25 cm
+STATIC_SECONDS = float(os.getenv("STATIC_SECONDS", "8"))
+MOVE_FRAMES = 2  # the move must be seen this many frames in a row (one odd box is not a move)
+MOVE_SIZE_RANGE = (0.7, 1.4)  # box height vs. first box: outside this the box was cut / covered, not moved
+
 
 def camera_powered_on(source: str | int) -> bool:
     """True when the camera answers on its RTSP port (usually 554), i.e. it is
@@ -388,6 +400,18 @@ class _RegionState:
     since: float = 0.0
 
 
+@dataclass
+class _Motion:
+    """Has this tracker number moved yet? (see MOVE_CHECK)"""
+
+    first: float  # time first seen
+    anchor: tuple[float, float, float]  # box centre x, y and box height (pixels) when first seen
+    seen: float = 0.0
+    moving: bool = False  # moved: a person
+    static: bool = False  # never moved for STATIC_SECONDS: an object, ignored
+    hits: int = 0  # frames in a row that showed a move
+
+
 class CameraWorker(threading.Thread):
     def __init__(
         self,
@@ -436,6 +460,9 @@ class CameraWorker(threading.Thread):
         # tracker id → (time it went In, confidence, walked in from outside), no visitor yet
         self._pending: dict[int, tuple[float, float, bool]] = {}
         self._regions: dict[int, _RegionState] = {}
+        # tracker id → (time it stepped onto the Traffic walkway, confidence), not known yet: Passed By
+        self._passing: dict[int, tuple[float, float]] = {}
+        self._motion: dict[int, _Motion] = {}  # tracker id → has it moved (person) or not (object)
         self._session = uuid.uuid4().hex[:6]  # tracker ids restart at 1 after a restart
         self._used_track_ids: set[str] = set()  # track_ids given to visits: never given again
         self.counts = {"In": 0, "Out": 0}
@@ -616,17 +643,19 @@ class CameraWorker(threading.Thread):
                         tid, (x1, y1, x2, y2), conf,
                         kp_xy[i] if kp_xy is not None else None, kp_conf[i] if kp_conf is not None else None, w, h,
                     ))
+            people, waiting = self._moving(people, now)  # only people who move; objects are dropped
             by_tid = {p.tid: p for p in people}
 
             self._identify(frame, people, now)
             self._walk_regions(frame, people, now)  # In / Passed By / Out from the shop areas
             self._make_visitors(frame, by_tid, now)
+            self._make_passers(frame, by_tid, now)  # people on the walkway: Passed By
 
             if demo.enabled:
                 self._look_at_people(demo, frame, people, now)
 
             # For the website's live video: where each person is in this frame, and who they are
-            self.live_boxes = [self._live_box(p, w, h) for p in people]
+            self.live_boxes = [self._live_box(p, w, h) for p in people + waiting]
             self.live_frame_no = frame_no
 
             if self.offer_snapshot and now - last_snapshot >= self.snapshot_seconds:
@@ -636,9 +665,49 @@ class CameraWorker(threading.Thread):
                 last_snapshot = now
 
             if self.show:
-                self.preview = self._draw(frame.copy(), people)
+                self.preview = self._draw(frame.copy(), people + waiting)
 
         self.grabber.stop_event.set()
+
+    def _moving(self, people: list[Person], now: float) -> tuple[list[Person], list[Person]]:
+        """Split the detections into (people: they have moved, so they are
+        followed and counted, waiting: not moved yet, shown on the live video
+        only with "Show everyone detected"). Objects that never moved for
+        STATIC_SECONDS are left out of both: they are not tracked any more."""
+        if not MOVE_CHECK:
+            return people, []
+        moving: list[Person] = []
+        waiting: list[Person] = []
+        for p in people:
+            x1, y1, x2, y2 = p.box
+            cx, cy, bh = (x1 + x2) / 2, (y1 + y2) / 2, max(y2 - y1, 1.0)
+            m = self._motion.get(p.tid)
+            if m is None:
+                m = self._motion[p.tid] = _Motion(now, (cx, cy, bh))
+            m.seen = now
+            if not m.moving:
+                ax, ay, ah = m.anchor
+                shift = math.hypot(cx - ax, cy - ay) / ah
+                size = bh / ah
+                if shift >= MOVE_MIN_SHARE and MOVE_SIZE_RANGE[0] <= size <= MOVE_SIZE_RANGE[1]:
+                    m.hits += 1
+                else:
+                    m.hits = 0
+                if m.hits >= MOVE_FRAMES:
+                    if m.static:
+                        log.info("detection %s moved after all: a person, tracked again", p.tid)
+                    m.moving, m.static = True, False
+                elif not m.static and now - m.first >= STATIC_SECONDS:
+                    m.static = True
+                    log.info("detection %s has not moved for %.0f s: not a person (object), ignored",
+                             p.tid, STATIC_SECONDS)
+            if m.moving:
+                moving.append(p)
+            elif not m.static:
+                waiting.append(p)
+        for tid in [t for t, m in self._motion.items() if now - m.seen > FORGET_TRACK_SECONDS]:
+            del self._motion[tid]
+        return moving, waiting
 
     def _live_box(self, p: Person, w: int, h: int) -> dict[str, Any]:
         x1, y1, x2, y2 = p.box
@@ -730,7 +799,7 @@ class CameraWorker(threading.Thread):
             self._from_outside.discard(tid)
             for d in (self._seen_at, self._spot, self._link, self._look, self._look_n, self._look_at,
                       self._tried_at, self._pending, self._regions, self._estimates, self._last_look,
-                      self._mismatch):
+                      self._mismatch, self._passing):
                 d.pop(tid, None)
 
     def _check_look(self, tid: int, look: Look | None, now: float) -> None:
@@ -874,6 +943,48 @@ class CameraWorker(threading.Thread):
             self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
             self._camera_in(v, conf, tid, when)
 
+    def _make_passers(self, frame: np.ndarray, by_tid: dict[int, Person], now: float) -> None:
+        """People steadily on the Traffic walkway who are not linked to a
+        visitor yet. First recognised (the same person on another camera, a
+        passer-by seen before, or a visitor who just walked out of the shop);
+        nobody matches: a new visit / track_id with a Passed By event
+        (track_region Traffic). If they then walk into a Purchasing / Counter
+        area, the same track_id gets its In event."""
+        cam_id = self.camera["camera_id"]
+        for tid, (when, conf) in list(self._passing.items()):
+            v = self._link.get(tid)
+            if v is not None and not v.left:
+                del self._passing[tid]  # recognised meanwhile: _act records what is needed
+                continue
+            st = self._regions.get(tid)
+            if st is None or st.kind != TRAFFIC:
+                del self._passing[tid]  # no longer on the walkway (walked in: In from _act)
+                continue
+            p = by_tid.get(tid)
+            if p is None or not p.full or now - when < NEW_VISITOR_HOLD_SECONDS:
+                continue  # hidden / not full body / still waiting (another camera may know them)
+            del self._passing[tid]
+            if tid not in self._look and self._recog is not None:
+                self._add_look(tid, self._recog.look(frame, p.box, p.height, heavy=True))
+            sig = self._look.get(tid)
+            busy = {self._link[t].visit_id for t in by_tid if t in self._link and not self._link[t].left}
+            v, created = self.registry.find_or_create_outside(
+                sig, self._plan(p), busy, lambda: self._new_passer(tid, sig, p, now), camera_id=cam_id, now=now)
+            self._attach(tid, v, now, "new passer-by" if created else "recognised on the walkway")
+            self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
+            self.registry.where(v, cam_id, False, now)
+            if created:
+                self._event(v, "Passed By", conf or p.conf, tid, TRAFFIC, when,
+                            area=st.region.name if st.region is not None else None, count=False)
+
+    def _new_passer(self, tid: int, sig: Look | None, p: Person, now: float) -> Visitor:
+        """A new person first seen on the Traffic walkway: one visit row (track_id),
+        outside the shop until they walk into a Purchasing / Counter area."""
+        v = self._new_visitor(tid, sig, p, now)
+        v.outside = True
+        v.traffic_at[self.camera["camera_id"]] = now
+        return v
+
     def _recognise_leaving(self, tid: int, p: Person | None, frame: np.ndarray | None, conf: float,
                            now: float) -> Visitor | None:
         """A person this camera saw in a shop area walked out (Traffic / Out of
@@ -1014,7 +1125,9 @@ class CameraWorker(threading.Thread):
         linked = v is not None
         if v is None:
             if tid not in self._pending:
-                return  # never inside on this camera: a passer-by, nothing recorded
+                if not out_of_range:  # on the walkway, not known yet: Passed By (_make_passers)
+                    self._passing.setdefault(tid, (st.since or now, p.conf))
+                return
             v = self._recognise_leaving(tid, p, frame, p.conf, now)  # the EXISTING track_id
             if v is None:
                 return
