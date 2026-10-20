@@ -457,7 +457,7 @@ type RecognitionEventRow = {
   member_face_template: { member: { member_no: string; full_name: string } | null } | null
 }
 
-const DAY_LIMIT = 1000 // records shown for one day
+const DAY_LIMIT = 10 // latest records shown for one day
 const pad2 = (n: number) => String(n).padStart(2, '0')
 // YYYY-MM-DD of today, in local time
 const todayKey = () => {
