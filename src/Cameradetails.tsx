@@ -353,7 +353,7 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
             contentStyle={{ borderRadius: 8, borderColor: '#e2e8f0' }}
           />
           <Legend verticalAlign="top" align="right" height={32} iconType="plainline" />
-          <Line type="monotone" dataKey="passedBy" name="People Passed By" stroke={OUT_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="passedBy" name="People Passed By" stroke={PASSED_BY_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
           <Line type="monotone" dataKey="in" name="People Walk-in" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
@@ -634,6 +634,7 @@ function RecordDayFilter({ day, onChange }: { day: string; onChange: (day: strin
 // ---------- Drawing on the live video ----------
 const IN_COLOR = '#16a34a'
 const OUT_COLOR = '#f97316'
+const PASSED_BY_COLOR = '#1d4f91' // line graph: same blue as the "Passed By" direction badge in the tables
 
 // A tracked person: a 3D box on the floor (calibrated camera, full body) or a
 // rectangle, with their label. The label comes from the edge box with every
