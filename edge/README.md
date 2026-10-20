@@ -121,6 +121,16 @@ shop areas (**Shop areas**). The program picks up the new areas within 60 s.
    runtime (`librknnrt.so`); ask the seller for the Ubuntu 22.04 image that
    includes RKNPU2. Without it, `MODEL=yolo11n.pt` still runs on the CPU,
    only slower.
+   **Hardware video decoding.** The RK3588 also has a video decoder chip. With
+   `HW_DECODE=auto` (default) the program uses it through the box's `ffmpeg`
+   when `ffmpeg -hide_banner -decoders | grep rkmpp` lists `h264_rkmpp`, so the
+   CPU no longer unpacks the camera video (needed for stream1 on several
+   cameras). When ffmpeg also has the RGA filter `scale_rkrga`, the picture is
+   shrunk to `DECODE_MAX_WIDTH` (default 1920) on the chip too and handed over
+   as NV12 (about 80% CPU for 4 cameras at 2880x1620, measured on the box).
+   The log shows `hardware decoding h264 1920x1080 with h264_rkmpp + RGA`
+   per camera. If it keeps failing, that camera goes back to the CPU (OpenCV)
+   for 10 minutes and the log says so. `HW_DECODE=off` always uses the CPU.
 5. Try it: `python main.py`, walk past a camera, check Supabase.
 6. Make it start by itself. If the box's login is not `ubuntu` (check with
    `whoami`), first change `User=` and both `/home/ubuntu/...` paths in

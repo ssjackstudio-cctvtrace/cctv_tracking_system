@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -46,6 +47,61 @@ TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age 
 # Camera power: while the camera is off (no answer on its RTSP port) the box
 # only knocks every few seconds; tracking starts by itself once it powers on.
 POWER_CHECK_SECONDS = 5
+
+# Hardware video decoding (RK3588). Unpacking 4 camera streams on the CPU, above
+# all stream1 (high resolution), uses most of the box's CPU and makes tracking
+# lag. With HW_DECODE=auto (default) the box's ffmpeg unpacks each RTSP stream
+# with the chip's video decoder (h264_rkmpp / hevc_rkmpp) and hands over the
+# full-size picture; without that ffmpeg (e.g. on a Windows PC) OpenCV is used
+# as before. HW_DECODE=off: always OpenCV.
+HW_DECODE = os.getenv("HW_DECODE", "auto").strip().lower()
+FFMPEG = os.getenv("FFMPEG", "ffmpeg")
+FFPROBE = os.getenv("FFPROBE", "ffprobe")
+HW_DECODERS = {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"}  # camera codec → hardware decoder
+DECODE_MAX_FPS = float(os.getenv("DECODE_MAX_FPS", "0"))  # > 0: hand over at most this many pictures per second
+# Wider pictures are shrunk to this width. Tapo stream1 is 2880x1620: 1920x1080 keeps faces 3x
+# larger than stream2 for much less work. 0 = full size.
+DECODE_MAX_WIDTH = int(os.getenv("DECODE_MAX_WIDTH", "1920"))
+# With the RK3588's RGA (2D engine, ffmpeg filter scale_rkrga) the picture is also shrunk on the chip
+# and handed over in the decoder's own colour format (NV12); it becomes BGR (OpenCV) only when the
+# program uses it. Measured on the box with 4 cameras at 2880x1620: ~80% CPU instead of ~680%.
+HW_FAILS_BEFORE_CPU = 3  # hardware decoding failed this many times in a row → OpenCV ...
+HW_RETRY_SECONDS = 600  # ... for 10 minutes, then the hardware decoder is tried again
+_hw_decoders: set[str] | None = None
+_hw_rga: bool | None = None
+_hw_lock = threading.Lock()
+
+
+def hardware_decoders() -> set[str]:
+    """Rockchip hardware decoders the box's ffmpeg has (empty set = none / no ffmpeg). Checked once."""
+    global _hw_decoders
+    with _hw_lock:
+        if _hw_decoders is None:
+            _hw_decoders = set()
+            if HW_DECODE not in ("off", "0", "false", "no"):
+                try:
+                    out = subprocess.run([FFMPEG, "-hide_banner", "-decoders"], capture_output=True,
+                                         text=True, timeout=10).stdout
+                    _hw_decoders = {w for line in out.splitlines() for w in line.split() if w.endswith("_rkmpp")}
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                log.info("video decoding: %s", "RK3588 hardware decoder (ffmpeg rkmpp)" if _hw_decoders
+                         else "CPU (OpenCV) — no ffmpeg with rkmpp decoders found")
+        return _hw_decoders
+
+
+def hardware_rga() -> bool:
+    """The box's ffmpeg has the RGA filter scale_rkrga (shrink + colour format on the chip). Checked once."""
+    global _hw_rga
+    with _hw_lock:
+        if _hw_rga is None:
+            try:
+                out = subprocess.run([FFMPEG, "-hide_banner", "-filters"], capture_output=True,
+                                     text=True, timeout=10).stdout
+                _hw_rga = any(line.split()[1:2] == ["scale_rkrga"] for line in out.splitlines())
+            except (OSError, subprocess.SubprocessError):
+                _hw_rga = False
+        return _hw_rga
 
 # Full body: only people whose WHOLE body is visible (head, upper body,
 # lower body and feet) take part in In / Out, areas, 3D and gender / age.
@@ -123,10 +179,23 @@ class FrameGrabber(threading.Thread):
         self.stop_event = threading.Event()
         self.connected = False
         self.powered: bool | None = None  # camera switched on? (None = not checked yet)
+        self._hw_fails = 0  # hardware decoding runs in a row that gave no picture
+        self._hw_off_until = 0.0  # OpenCV (CPU) until then, after hardware decoding kept failing
+        self._ffmpeg: subprocess.Popen | None = None
+        self._nv12: np.ndarray | None = None  # newest picture in NV12 (hardware decoding with RGA)
+        self._bgr_no = -1  # picture number that self._frame was converted from
 
     def latest(self) -> tuple[int, np.ndarray | None]:
         with self._lock:
-            return self._frame_no, self._frame
+            no, frame, nv12, bgr_no = self._frame_no, self._frame, self._nv12, self._bgr_no
+        if nv12 is None or bgr_no == no:
+            return no, frame
+        # NV12 → BGR only for pictures the program uses (most are skipped: it takes the newest)
+        bgr = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+        with self._lock:
+            if self._frame_no == no:
+                self._frame, self._bgr_no = bgr, no
+        return no, bgr
 
     def run(self) -> None:
         is_file = isinstance(self.source, str) and not self.source.lower().startswith("rtsp")
@@ -142,6 +211,24 @@ class FrameGrabber(threading.Thread):
             if self.powered is not True:
                 log.info("camera is ON — starting live tracking")
             self.powered = True
+
+            # RTSP camera + RK3588 decoder: the chip unpacks the video, not the CPU
+            if not is_file and isinstance(self.source, str) and time.time() >= self._hw_off_until \
+                    and hardware_decoders():
+                if self._read_hw():
+                    self._hw_fails = 0
+                    if not self.stop_event.is_set():
+                        log.warning("stream dropped, reconnecting")
+                else:
+                    self._hw_fails += 1
+                    if self._hw_fails >= HW_FAILS_BEFORE_CPU:
+                        self._hw_fails = 0
+                        self._hw_off_until = time.time() + HW_RETRY_SECONDS
+                        log.warning("hardware decoding failed %d times — using the CPU (OpenCV) for this camera "
+                                    "for %d minutes", HW_FAILS_BEFORE_CPU, HW_RETRY_SECONDS // 60)
+                self.connected = False
+                self.stop_event.wait(2)
+                continue
 
             cap = cv2.VideoCapture(self.source)
             if not cap.isOpened():
@@ -166,6 +253,114 @@ class FrameGrabber(threading.Thread):
             cap.release()
             self.connected = False
             time.sleep(2)
+
+    def _probe(self) -> tuple[str, int, int] | None:
+        """Codec, width and height of the camera's video, or None."""
+        cmd = [FFPROBE, "-v", "error", "-analyzeduration", "1000000", "-probesize", "1000000",
+               "-rtsp_transport", "tcp", "-select_streams", "v:0",
+               "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(self.source)]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip().splitlines()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in out:
+            parts = [x.strip() for x in line.split(",")]
+            nums = [int(x) for x in parts if x.isdigit()]
+            codec = next((x for x in parts if x and not x.isdigit()), "")
+            if codec and len(nums) >= 2 and nums[0] > 0 and nums[1] > 0:
+                return codec, nums[0], nums[1]
+        return None
+
+    def _read_hw(self) -> bool:
+        """Unpack the RTSP stream with the RK3588 video decoder (ffmpeg rkmpp) and
+        keep the newest full-size BGR picture, like the OpenCV path. Returns True
+        when pictures arrived (the stream later dropped / stopped), False when
+        hardware decoding did not work at all."""
+        info = self._probe()
+        if info is None:
+            log.warning("hardware decoding: could not read the stream's format")
+            return False
+        codec, w, h = info
+        if 0 < DECODE_MAX_WIDTH < w:  # shrink, keeping the shape (even numbers for the video filters)
+            w, h = DECODE_MAX_WIDTH // 2 * 2, max(2, round(h * DECODE_MAX_WIDTH / w / 2) * 2)
+        decoder = HW_DECODERS.get(codec)
+        if decoder not in hardware_decoders():
+            log.warning("hardware decoding: no rkmpp decoder for %s video", codec)
+            return False
+        rga = hardware_rga()
+        if rga:
+            w = max(16, w // 16 * 16)  # RGA likes widths in steps of 16 (1920, 2880 already are)
+        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin",
+               "-rtsp_transport", "tcp", "-timeout", "10000000",  # no data for 10 s = stream lost
+               "-analyzeduration", "1000000", "-probesize", "1000000",  # start within ~2 s
+               "-fflags", "nobuffer", "-flags", "low_delay"]
+        if rga:  # decoded pictures stay on the chip until RGA has shrunk them
+            cmd += ["-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime"]
+        cmd += ["-c:v", decoder, "-i", str(self.source), "-an", "-sn", "-dn"]
+        if rga:
+            filters = [f"scale_rkrga=w={w}:h={h}:format=nv12", "hwdownload", "format=nv12"]
+        else:  # no RGA: shrink and convert on the CPU (slower)
+            filters = [f"scale={w}:{h}:flags=bilinear"] if info[1:] != (w, h) else []
+        if DECODE_MAX_FPS > 0:
+            filters.append(f"fps={DECODE_MAX_FPS:g}")
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+        cmd += ["-pix_fmt", "nv12" if rga else "bgr24", "-f", "rawvideo", "pipe:1"]
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        except OSError as exc:
+            log.warning("hardware decoding: cannot start ffmpeg: %s", exc)
+            return False
+        self._ffmpeg = proc
+        threading.Thread(target=self._ffmpeg_errors, args=(proc,), name=f"{self.name}-ffmpeg", daemon=True).start()
+        shape = (h * 3 // 2, w) if rga else (h, w, 3)  # NV12: full-size brightness + half-size colour
+        size, got = int(np.prod(shape)), 0
+        try:
+            while not self.stop_event.is_set():
+                frame = np.empty(shape, np.uint8)
+                buf, n = memoryview(frame).cast("B"), 0
+                while n < size:
+                    r = proc.stdout.readinto(buf[n:])  # type: ignore[union-attr]
+                    if not r:
+                        break
+                    n += r
+                if n < size:
+                    break  # ffmpeg stopped: stream dropped / camera gone
+                if not got:
+                    log.info("hardware decoding %s %dx%d with %s%s", codec, w, h, decoder, " + RGA" if rga else "")
+                got += 1
+                self.connected = True
+                with self._lock:
+                    if rga:
+                        self._nv12, self._frame_no = frame, self._frame_no + 1
+                    else:
+                        self._frame, self._frame_no = frame, self._frame_no + 1
+        finally:
+            self._stop_ffmpeg()
+            with self._lock:  # back to plain BGR pictures (OpenCV / next connection)
+                if self._nv12 is not None and self._bgr_no != self._frame_no:
+                    self._frame, self._bgr_no = cv2.cvtColor(self._nv12, cv2.COLOR_YUV2BGR_NV12), self._frame_no
+                self._nv12 = None
+        return got > 0
+
+    def _ffmpeg_errors(self, proc: subprocess.Popen) -> None:
+        """ffmpeg's error messages into the log (the first few per connection)."""
+        shown = 0
+        for line in iter(proc.stderr.readline, b""):  # type: ignore[union-attr]
+            text = line.decode("utf-8", "replace").strip()
+            if text and shown < 5:
+                log.warning("ffmpeg: %s", text.replace(str(self.source), "<camera>"))
+                shown += 1
+
+    def _stop_ffmpeg(self) -> None:
+        proc, self._ffmpeg = self._ffmpeg, None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 @dataclass
@@ -325,6 +520,7 @@ class CameraWorker(threading.Thread):
     def stop(self) -> None:
         self.stop_event.set()
         self.grabber.stop_event.set()
+        self.grabber._stop_ffmpeg()  # hardware decoding: end ffmpeg now (also ends a hung stream)
 
     # "Active": the stream is connected and the camera picture is open.
     # "Inactive": not connected, no new picture lately, or the picture is
