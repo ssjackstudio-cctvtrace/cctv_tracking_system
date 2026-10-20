@@ -190,16 +190,57 @@ export function countPeople(events: PersonEvent[]) {
   }
   const walkIn = tally([...people.values()].filter((p) => p.wentIn))
   const passedBy = tally([...people.values()].filter((p) => p.passedBy))
-  const longest: Stay[] = [...people.entries()]
+  const stays: Stay[] = [...people.entries()]
     .filter(([, p]) => p.ended && p.seconds >= 1)
     .map(([trackId, p]) => ({ trackId, gender: p.gender, seconds: Math.round(p.seconds) }))
     .sort((x, y) => y.seconds - x.seconds)
-    .slice(0, 5)
-  return { in: walkIn, passedBy, longest }
+  const longest = stays.slice(0, 5)
+  // Average time in the shop of everyone with a finished stay on the day (null = no finished stays)
+  const averageStay = stays.length ? Math.round(stays.reduce((sum, s) => sum + s.seconds, 0) / stays.length) : null
+  return { in: walkIn, passedBy, longest, averageStay, stayCount: stays.length }
 }
 
-// 754 s → "12 min 34 sec"
-const fmtStay = (seconds: number) => `${Math.floor(seconds / 60)} min ${pad(seconds % 60)} sec`
+// 4354 s → "1 hr 12 min 34 sec", 754 s → "12 min 34 sec", 45 s → "45 sec"
+const fmtStay = (seconds: number) => {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  if (seconds >= 3600) return `${h} hr ${pad(m)} min ${pad(s)} sec`
+  if (seconds >= 60) return `${m} min ${pad(s)} sec`
+  return `${s} sec`
+}
+
+// Average Daily Time Taken: average stay of everyone who finished a stay on the day
+function AverageStay({
+  branchName,
+  seconds,
+  count,
+  loading,
+}: {
+  branchName: string
+  seconds: number | null
+  count: number | null
+  loading: boolean
+}) {
+  return (
+    <section className="ds-panel ds-avgstay">
+      <h2>Average Daily Time Taken staying in {branchName || '—'}</h2>
+      <p className="ds-stay-note">Average time from walking in until Passed By, over everyone with a finished stay on this day.</p>
+      {loading && seconds === null ? (
+        <p className="ds-empty">Loading…</p>
+      ) : seconds === null ? (
+        <p className="ds-empty">No finished stays on this day yet.</p>
+      ) : (
+        <div className="ds-avgstay-value">
+          <strong>{fmtStay(seconds)}</strong>
+          <span>
+            Based on {count} {count === 1 ? 'person' : 'people'}
+          </span>
+        </div>
+      )}
+    </section>
+  )
+}
 
 // Top 5 Longest Stay: podium for the top 3 (2nd, 1st, 3rd), then 4th and 5th as rows
 function LongestStay({ branchName, stays, loading }: { branchName: string; stays: Stay[] | null; loading: boolean }) {
@@ -312,6 +353,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     dealed: null,
   })
   const [longest, setLongest] = useState<Stay[] | null>(null)
+  const [averageStay, setAverageStay] = useState<{ seconds: number | null; count: number } | null>(null)
   const [events, setEvents] = useState<LatestEvent[]>([])
   const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
   const [eventTab, setEventTab] = useState<EventTab>('cctv')
@@ -379,6 +421,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
         dealed: dealRes.error ? null : dealRes.count,
       })
       setLongest(p ? p.longest : null)
+      setAverageStay(p ? { seconds: p.averageStay, count: p.stayCount } : null)
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
       setRecognitions(recRes.error ? [] : ((recRes.data ?? []) as unknown as LatestRecognition[]))
       setLoading(false)
@@ -478,11 +521,19 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
         ))}
       </section>
 
-      <LongestStay
-        branchName={branches.find((b) => b.branch_id === branch)?.branch_name ?? ''}
-        stays={longest}
-        loading={loading}
-      />
+      <div className="ds-stay-pair">
+        <LongestStay
+          branchName={branches.find((b) => b.branch_id === branch)?.branch_name ?? ''}
+          stays={longest}
+          loading={loading}
+        />
+        <AverageStay
+          branchName={branches.find((b) => b.branch_id === branch)?.branch_name ?? ''}
+          seconds={averageStay?.seconds ?? null}
+          count={averageStay?.count ?? null}
+          loading={loading}
+        />
+      </div>
 
       <section className="ds-panel">
         <h2>Latest events (top 50)</h2>
