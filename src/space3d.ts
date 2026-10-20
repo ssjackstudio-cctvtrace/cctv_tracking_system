@@ -404,15 +404,6 @@ export function readFloorAreas(value: unknown): FloorAreas {
 }
 
 // ---------- areas must not overlap ----------
-function segmentsCross(a: Point, b: Point, c: Point, d: Point) {
-  const side = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-  const d1 = side(c, d, a)
-  const d2 = side(c, d, b)
-  const d3 = side(a, b, c)
-  const d4 = side(a, b, d)
-  return d1 * d2 < 0 && d3 * d4 < 0
-}
-
 function pointInPolygon(poly: Point[], p: Point) {
   let hit = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -422,17 +413,177 @@ function pointInPolygon(poly: Point[], p: Point) {
   return hit
 }
 
-// Do two area outlines (picture 0–1) overlap? Touching edges are allowed.
-export function areasOverlap(a: Point[], b: Point[]) {
-  if (a.length < 3 || b.length < 3) return false
-  for (let i = 0; i < a.length; i++)
-    for (let j = 0; j < b.length; j++)
-      if (segmentsCross(a[i], a[(i + 1) % a.length], b[j], b[(j + 1) % b.length])) return true
-  const mid = (poly: Point[]) => ({
-    x: poly.reduce((s, p) => s + p.x, 0) / poly.length,
-    y: poly.reduce((s, p) => s + p.y, 0) / poly.length,
-  })
-  return pointInPolygon(b, mid(a)) || pointInPolygon(a, mid(b)) // one area inside the other
+// A dot clicked close to a corner or an edge of another area lands exactly on
+// it, so two areas can share a border without overlapping. reach = how close,
+// as a share of the picture width.
+export function snapPoint(p: Point, others: Point[][], aspect: number, reach = 0.015): Point {
+  const d = (a: Point, b: Point) => Math.hypot((a.x - b.x) * aspect, a.y - b.y)
+  const lim = reach * aspect
+  let best: Point | null = null
+  let bestD = lim
+  for (const poly of others)
+    for (const c of poly) {
+      const dc = d(p, c)
+      if (dc < bestD) [best, bestD] = [c, dc]
+    }
+  if (best) return { ...best } // corner first
+  bestD = lim * 0.7
+  for (const poly of others)
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i]
+      const b = poly[(i + 1) % poly.length]
+      const ax = a.x * aspect
+      const bx = b.x * aspect
+      const len2 = (bx - ax) ** 2 + (b.y - a.y) ** 2
+      if (len2 < 1e-12) continue
+      const t = Math.min(1, Math.max(0, ((p.x * aspect - ax) * (bx - ax) + (p.y - a.y) * (b.y - a.y)) / len2))
+      const q = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+      const dq = d(p, q)
+      if (dq < bestD) [best, bestD] = [q, dq]
+    }
+  return best ? { x: Math.round(best.x * 10000) / 10000, y: Math.round(best.y * 10000) / 10000 } : p
+}
+
+// Simplify a closed outline (Douglas–Peucker), tolerance in the same units
+function simplify(pts: [number, number][], tol: number): [number, number][] {
+  if (pts.length < 4) return pts
+  const keep = new Uint8Array(pts.length)
+  keep[0] = keep[pts.length - 1] = 1
+  const stack: [number, number][] = [[0, pts.length - 1]]
+  while (stack.length) {
+    const [i, j] = stack.pop()!
+    const [ax, ay] = pts[i]
+    const [bx, by] = pts[j]
+    const len = Math.hypot(bx - ax, by - ay) || 1
+    let far = -1
+    let farD = tol
+    for (let k = i + 1; k < j; k++) {
+      const dd = Math.abs((bx - ax) * (ay - pts[k][1]) - (ax - pts[k][0]) * (by - ay)) / len
+      if (dd > farD) [far, farD] = [k, dd]
+    }
+    if (far >= 0) {
+      keep[far] = 1
+      stack.push([i, far], [far, j])
+    }
+  }
+  return pts.filter((_, k) => keep[k])
+}
+
+// The drawn area with every part that lies on another area cut off, so areas
+// never overlap. Returns the outline unchanged when it does not overlap, the
+// trimmed outline when it does (the biggest piece left), or null when almost
+// nothing is left (the area is inside other areas).
+// Works on a fine grid over the picture (about 480 × 270 cells).
+export function trimArea(
+  poly: Point[],
+  others: Point[][],
+  aspect: number,
+): { image: Point[]; trimmed: boolean } | null {
+  if (poly.length < 3) return null
+  const W = 480
+  const H = Math.max(120, Math.round(W / aspect))
+  const xs = poly.map((p) => p.x)
+  const ys = poly.map((p) => p.y)
+  const x0 = Math.max(0, Math.floor(Math.min(...xs) * W) - 1)
+  const x1 = Math.min(W - 1, Math.ceil(Math.max(...xs) * W) + 1)
+  const y0 = Math.max(0, Math.floor(Math.min(...ys) * H) - 1)
+  const y1 = Math.min(H - 1, Math.ceil(Math.max(...ys) * H) + 1)
+  const near = others.filter((o) => o.length >= 3)
+  const mask = new Uint8Array(W * H)
+  let cut = 0
+  let total = 0
+  for (let y = y0; y <= y1; y++)
+    for (let x = x0; x <= x1; x++) {
+      const c = { x: (x + 0.5) / W, y: (y + 0.5) / H }
+      if (!pointInPolygon(poly, c)) continue
+      total++
+      if (near.some((o) => pointInPolygon(o, c))) cut++
+      else mask[y * W + x] = 1
+    }
+  if (total === 0) return null
+  if (cut === 0) return { image: poly, trimmed: false }
+
+  // Biggest connected piece left
+  const label = new Int32Array(W * H)
+  let bestLabel = 0
+  let bestSize = 0
+  let next = 0
+  for (let y = y0; y <= y1; y++)
+    for (let x = x0; x <= x1; x++) {
+      const i0 = y * W + x
+      if (!mask[i0] || label[i0]) continue
+      next++
+      let size = 0
+      const queue = [i0]
+      label[i0] = next
+      while (queue.length) {
+        const i = queue.pop()!
+        size++
+        const cx = i % W
+        const cy = (i - cx) / W
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = cx + dx
+          const ny = cy + dy
+          if (nx < x0 || nx > x1 || ny < y0 || ny > y1) continue
+          const j = ny * W + nx
+          if (mask[j] && !label[j]) {
+            label[j] = next
+            queue.push(j)
+          }
+        }
+      }
+      if (size > bestSize) [bestSize, bestLabel] = [size, next]
+    }
+  if (bestSize < 30) return null
+
+  // Outline of that piece (Moore neighbour tracing over the cells)
+  const on = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && label[y * W + x] === bestLabel
+  let sx = -1
+  let sy = -1
+  for (let y = y0; y <= y1 && sx < 0; y++)
+    for (let x = x0; x <= x1; x++)
+      if (on(x, y)) {
+        sx = x
+        sy = y
+        break
+      }
+  const dirs: [number, number][] = [[-1, 0], [-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1]]
+  const path: [number, number][] = [[sx, sy]]
+  let [cx, cy] = [sx, sy]
+  let back = 0 // the cell to the west of the start is empty
+  let first: [number, number] | null = null
+  for (let guard = 0; guard < 400000; guard++) {
+    let found = -1
+    for (let k = 1; k <= 8; k++) {
+      const d = (back + k) % 8
+      if (on(cx + dirs[d][0], cy + dirs[d][1])) {
+        found = d
+        break
+      }
+    }
+    if (found < 0) break // a single cell
+    const [nx, ny] = [cx + dirs[found][0], cy + dirs[found][1]]
+    // the empty cell checked just before, seen from the new cell
+    const [px, py] = [cx + dirs[(found + 7) % 8][0], cy + dirs[(found + 7) % 8][1]]
+    back = dirs.findIndex(([dx, dy]) => nx + dx === px && ny + dy === py)
+    if (back < 0) back = (found + 4) % 8
+    if (cx === sx && cy === sy) {
+      if (first && first[0] === nx && first[1] === ny) break // back at the start, same way round
+      if (!first) first = [nx, ny]
+    }
+    ;[cx, cy] = [nx, ny]
+    path.push([cx, cy])
+  }
+  if (path.length > 1 && path[path.length - 1][0] === sx && path[path.length - 1][1] === sy) path.pop()
+  if (path.length < 3) return null
+  // closed outline: simplify the two halves between the start and the cell farthest from it
+  let far = 0
+  for (let k = 1; k < path.length; k++)
+    if (Math.hypot(path[k][0] - sx, path[k][1] - sy) > Math.hypot(path[far][0] - sx, path[far][1] - sy)) far = k
+  const outline = [...simplify(path.slice(0, far + 1), 0.9).slice(0, -1), ...simplify([...path.slice(far), path[0]], 0.9).slice(0, -1)]
+  if (outline.length < 3) return null
+  const r = (v: number) => Math.round(v * 10000) / 10000
+  return { image: outline.map(([x, y]) => ({ x: r((x + 0.5) / W), y: r((y + 0.5) / H) })), trimmed: true }
 }
 
 // Region outline in metres from its picture outline (needs a calibration)

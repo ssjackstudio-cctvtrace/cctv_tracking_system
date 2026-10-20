@@ -10,12 +10,13 @@ import {
   lensAngles,
   REGION_COLORS,
   REGION_KINDS,
-  areasOverlap,
   autoCalibration,
   fitTilt,
   floorOrAuto,
   readFloorAreas,
+  snapPoint,
   toPicture,
+  trimArea,
   type AutoFloor,
   type Calibration,
   type FloorAreas,
@@ -367,6 +368,18 @@ export function AreasEditor({
   // Floor being changed (sliders)
   const trial = useMemo(() => (mode === 'calibrate' && auto ? autoCalibration(aspect, auto) : null), [mode, auto, aspect])
 
+  // Outlines of the OTHER areas (the one being drawn must not overlap them)
+  const otherOutlines = useMemo(
+    () => saved.regions.filter((r) => !draft || r.id !== draft.id).map((r) => r.image),
+    [saved.regions, draft?.id],
+  )
+  // The area being drawn with the parts lying on other areas cut off (what will be saved)
+  const trimmed = useMemo(
+    () => (draft && draft.image.length >= 3 ? trimArea(draft.image, otherOutlines, aspect) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [draft?.image, otherOutlines, aspect],
+  )
+
   // What the picture shows: saved space, or the one being edited
   const shown: FloorAreas = useMemo(() => {
     if (mode === 'calibrate') {
@@ -380,7 +393,7 @@ export function AreasEditor({
         id: draft.id,
         name: draft.name || draft.kind,
         kind: draft.kind,
-        image: draft.image,
+        image: trimmed?.image ?? draft.image,
         floor: null, // flat: the outline on the picture
         z_min: zMin,
         z_max: zMax,
@@ -391,7 +404,7 @@ export function AreasEditor({
       return { ...saved, calibration: savedCal, regions: draft.image.length >= 3 ? [...others, region] : others }
     }
     return { ...saved, calibration: savedCal, regions: saved.regions.map((r) => ({ ...r, floor: null })) }
-  }, [mode, saved, savedCal, trial, draft])
+  }, [mode, saved, savedCal, trial, draft, trimmed])
   // Flat areas on the picture; the floor grid and X / Y / Z axes only while adjusting the 3D floor
   const lines = useMemo(() => {
     const l = spaceLines(shown)
@@ -469,7 +482,8 @@ export function AreasEditor({
 
   const handleClick = (e: MouseEvent<HTMLDivElement>) => {
     const p = toPoint(e)
-    if (mode === 'area' && draft) setDraft({ ...draft, image: [...draft.image, p] })
+    // a dot near another area's corner / edge lands exactly on it (shared border, no overlap)
+    if (mode === 'area' && draft) setDraft({ ...draft, image: [...draft.image, snapPoint(p, otherOutlines, aspect)] })
   }
 
   // Save camera.floor_areas; each area's floor outline (metres) follows the calibration
@@ -518,16 +532,17 @@ export function AreasEditor({
       setMessage('Could not save: this camera is Inside only, so it has no Traffic walkway. Untick "Inside only" first.')
       return
     }
-    const overlap = saved.regions.find((r) => r.id !== draft.id && areasOverlap(r.image, draft.image))
-    if (overlap) {
-      setMessage(`Could not save: this area overlaps "${overlap.name}". Areas must not overlap — move the dots (Undo dot / Redraw outline).`)
+    // Parts lying on other areas are cut off, so areas never overlap
+    const cut = trimArea(draft.image, otherOutlines, aspect)
+    if (!cut) {
+      setMessage('Could not save: almost all of this area lies on other areas. Draw it on the free part of the floor.')
       return
     }
     const region: Region = {
       id: draft.id,
       name: draft.name.trim() || draft.kind,
       kind: draft.kind,
-      image: draft.image,
+      image: cut.image,
       floor: null,
       z_min: zMin,
       z_max: zMax,
@@ -535,7 +550,10 @@ export function AreasEditor({
     const regions = draft.isNew
       ? [...saved.regions, region]
       : saved.regions.map((r) => (r.id === region.id ? region : r))
-    store({ ...saved, regions }, `Area "${region.name}" saved. The edge box starts using it within a minute.`)
+    store(
+      { ...saved, regions },
+      `Area "${region.name}" saved${cut.trimmed ? ' (the part on other areas was cut off)' : ''}. The edge box starts using it within a minute.`,
+    )
   }
 
   // Inside only: the whole picture is inside the shop (a camera that never sees the walkway)
@@ -574,8 +592,10 @@ export function AreasEditor({
       ? `Camera ${CAMERA_HEIGHT} m high (fixed). Click "Auto-fit tilt from people" (people must have walked past on the live video), then fine-tune: the 1 m grid should lie flat on the floor and follow the tile lines, also at the sides of the picture (Lens curve). The Tapo lens is round, so straight floor lines look bent near the edges.`
       : mode === 'area'
         ? (draft?.image.length ?? 0) < 3
-          ? 'Click the corners of the area’s outline on the FLOOR in the picture, one after another (at least 3).'
-          : 'The area is a flat outline on the floor of this picture. Keep clicking to add corners, or Save.'
+          ? 'Click the corners of the area’s outline on the FLOOR in the picture, one after another (at least 3). A dot near another area’s corner or edge snaps onto it.'
+          : trimmed?.trimmed
+            ? 'The coloured shape is what will be saved: the part lying on other areas is cut off automatically. Keep clicking to add corners, or Save.'
+            : 'The area is a flat outline on the floor of this picture. Keep clicking to add corners, or Save. Any part drawn over another area is cut off automatically.'
         : `${
             saved.inside_only
               ? 'Inside only: everyone this camera sees is inside the shop (In only, never Passed By / Out); places without an area count as Purchasing.'

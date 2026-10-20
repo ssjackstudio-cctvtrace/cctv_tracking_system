@@ -423,6 +423,7 @@
 
 /* Next segment, from the last dot to the mouse */
 .cam-line-next {
+  fill: none;
   stroke: #facc15;
   stroke-width: 2;
   stroke-dasharray: 6 4;
