@@ -432,6 +432,207 @@ const fmt2 = (n: number | null | undefined) => (n === null || n === undefined ? 
 // visit.est_age defaults to 0 until the box has seen the person's face
 const fmtAge = (age: number | null | undefined) => (age ? String(age) : '—')
 
+// ---------- Records from this camera: CCTV Event / Recognition Event, one day ----------
+type RecordTab = 'cctv' | 'recognition'
+
+type RecordVisit = Pick<TrackRecord['visit'], 'track_id' | 'visit_type' | 'est_gender' | 'est_age' | 'demographic_score'>
+
+type CctvEventRow = {
+  cctv_event_id: string
+  direction: string
+  track_region: string | null
+  confidence: number
+  event_time: string
+  camera: { camera_name: string; tapo_model: string | null } | null
+  visit: RecordVisit | null
+}
+
+type RecognitionEventRow = {
+  recognition_event_id: string
+  match_score: number
+  result: string
+  event_time: string
+  camera: { camera_name: string; tapo_model: string | null } | null
+  visit: RecordVisit | null
+  member_face_template: { member: { member_no: string; full_name: string } | null } | null
+}
+
+const DAY_LIMIT = 1000 // records shown for one day
+const pad2 = (n: number) => String(n).padStart(2, '0')
+// YYYY-MM-DD of today, in local time
+const todayKey = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+// "18 October 2026" (day = YYYY-MM-DD)
+const fmtDay = (day: string) => formatLongDate(new Date(`${day}T00:00:00`).toISOString())
+// [start of the day, start of the next day] as ISO strings, in local time
+const dayRange = (day: string): [string, string] => {
+  const start = new Date(`${day}T00:00:00`)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return [start.toISOString(), end.toISOString()]
+}
+
+// One day of this camera's rows from cctv_event or recognition_event, refreshed
+// every few seconds. Shows "Loading..." only when the tab / camera / day changes;
+// reloadKey (a new row saved by the edge box) reloads quietly.
+function useCameraEvents<T>(table: string, select: string, cameraId: string, day: string, reloadKey: number) {
+  const [rows, setRows] = useState<T[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    setLoading(true)
+    setError('')
+  }, [table, cameraId, day])
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const [from, to] = dayRange(day)
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .eq('camera_id', cameraId)
+        .gte('event_time', from)
+        .lt('event_time', to)
+        .order('event_time', { ascending: false })
+        .limit(DAY_LIMIT)
+      if (cancelled) return
+      setLoading(false)
+      if (error) setError(error.message)
+      else {
+        setError('')
+        setRows((data ?? []) as unknown as T[])
+      }
+    }
+    load()
+    const timer = setInterval(load, COUNT_REFRESH_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [table, select, cameraId, day, reloadKey])
+
+  return { rows, loading, error }
+}
+
+// select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
+//        cc.direction, cc.track_region, cc.confidence, cc.event_time
+// from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id
+// where cc.camera_id = <this camera> and cc.event_time on <day>
+function CameraCctvEvents({ cameraId, day, reloadKey }: { cameraId: string; day: string; reloadKey: number }) {
+  const t = useCameraEvents<CctvEventRow>(
+    TABLES.cctvEvent,
+    'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
+    cameraId,
+    day,
+    reloadKey,
+  )
+  return (
+    <DataTable
+      rows={t.rows}
+      loading={t.loading}
+      error={t.error}
+      emptyMessage="No CCTV events from this camera on this day."
+      rowKey={(r) => r.cctv_event_id}
+      columns={[
+        { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+        { header: 'Track ID', render: (r) => r.visit?.track_id ?? '—' },
+        { header: 'Tapo model', render: (r) => r.camera?.tapo_model ?? '—' },
+        { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
+        { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+        { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+        { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
+        { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+        { header: 'Track region', render: (r) => r.track_region ?? '—' },
+        { header: 'Confidence', render: (r) => `${fmt2(r.confidence)}%` },
+        { header: 'Event time', render: (r) => formatLongDateTime(r.event_time) },
+      ]}
+    />
+  )
+}
+
+// select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
+//        m.member_no, m.full_name, re.match_score, re.result, re.event_time
+// from recognition_event re join camera ca on re.camera_id = ca.camera_id join visit v on re.visit_id = v.visit_id
+// join member_face_template mft on re.face_template_id = mft.face_template_id join member m on mft.member_id = m.member_id
+// where re.camera_id = <this camera> and re.event_time on <day>
+function CameraRecognitionEvents({ cameraId, day, reloadKey }: { cameraId: string; day: string; reloadKey: number }) {
+  const t = useCameraEvents<RecognitionEventRow>(
+    TABLES.recognitionEvent,
+    'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), member_face_template!inner(member!inner(member_no, full_name))',
+    cameraId,
+    day,
+    reloadKey,
+  )
+  return (
+    <DataTable
+      rows={t.rows}
+      loading={t.loading}
+      error={t.error}
+      emptyMessage="No recognition events from this camera on this day."
+      rowKey={(r) => r.recognition_event_id}
+      columns={[
+        { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+        { header: 'Track ID', render: (r) => r.visit?.track_id ?? '—' },
+        { header: 'Tapo model', render: (r) => r.camera?.tapo_model ?? '—' },
+        { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
+        { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+        { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+        { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
+        { header: 'Member no.', render: (r) => r.member_face_template?.member?.member_no ?? '—' },
+        { header: 'Full name', render: (r) => r.member_face_template?.member?.full_name ?? '—' },
+        { header: 'Match score', render: (r) => fmt2(r.match_score) },
+        { header: 'Result', render: (r) => <Badge text={r.result} /> },
+        { header: 'Event time', render: (r) => formatLongDateTime(r.event_time) },
+      ]}
+    />
+  )
+}
+
+// Date filter shown as "18 October 2026"; clicking it opens the calendar
+function RecordDayFilter({ day, onChange }: { day: string; onChange: (day: string) => void }) {
+  const input = useRef<HTMLInputElement>(null)
+  const open = () => {
+    const el = input.current
+    if (!el) return
+    try {
+      el.showPicker()
+    } catch {
+      el.focus()
+    }
+  }
+  return (
+    <div className="ev-datefilter">
+      <span className="ev-datefilter-label">Date</span>
+      <button type="button" className="ev-datefilter-button" onClick={open} aria-label={`Date: ${fmtDay(day)}. Change date`}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M3 10h18M8 3v4M16 3v4" />
+        </svg>
+        {fmtDay(day)}
+      </button>
+      <input
+        ref={input}
+        className="ev-datefilter-input"
+        type="date"
+        tabIndex={-1}
+        aria-hidden="true"
+        value={day}
+        required
+        onChange={(e) => onChange(e.target.value || todayKey())}
+      />
+      {day !== todayKey() && (
+        <button type="button" className="ds-datefilter-clear" onClick={() => onChange(todayKey())}>
+          Today
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ---------- Drawing on the live video ----------
 const IN_COLOR = '#16a34a'
 const OUT_COLOR = '#f97316'
@@ -876,6 +1077,9 @@ export default function CameraDetails({
   const onLiveState = useCallback((state: LiveState, msg: string) => setLiveMsg({ state, msg }), [])
   // People inside = people standing in this camera's In area right now (from the live video)
   const [insideNow, setInsideNow] = useState<number | null>(null)
+  // Records from this camera: CCTV Event / Recognition Event tabs, one day at a time
+  const [recordTab, setRecordTab] = useState<RecordTab>('cctv')
+  const [recordDay, setRecordDay] = useState(todayKey)
 
   // 3D view: floor grid + X / Y / Z axes + shop areas as 3D boxes, the count
   // line and In area, then each person (3D box + label), and a floor map
@@ -1006,24 +1210,22 @@ export default function CameraDetails({
 
       <section className="cam-records">
         <h2>Latest records from this camera</h2>
-        <DataTable
-          rows={records.rows.slice(0, 10)}
-          loading={records.loading}
-          error={records.error}
-          emptyMessage="No people counted by this camera yet."
-          rowKey={(r) => r.cctv_event_id}
-          columns={[
-            { header: 'Time', render: (r) => formatLongDateTime(r.event_time) },
-            { header: 'Track ID', render: (r) => r.visit.track_id },
-            { header: 'Visit Type', render: (r) => <Badge text={r.visit.visit_type} /> },
-            { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
-            { header: 'Track Region', render: (r) => r.track_region ?? '—' },
-            { header: 'Gender', render: (r) => r.visit.est_gender },
-            { header: 'Age', render: (r) => fmtAge(r.visit.est_age) },
-            { header: 'Match Confidence', render: (r) => `${fmt2(r.confidence)}%` },
-            { header: 'Demographic Score', render: (r) => fmt2(r.visit.demographic_score) },
-          ]}
-        />
+        <div className="ev-toolbar">
+          <div className="tabs">
+            <button className={recordTab === 'cctv' ? 'active' : ''} onClick={() => setRecordTab('cctv')}>
+              CCTV Event
+            </button>
+            <button className={recordTab === 'recognition' ? 'active' : ''} onClick={() => setRecordTab('recognition')}>
+              Recognition Event
+            </button>
+          </div>
+          <RecordDayFilter day={recordDay} onChange={setRecordDay} />
+        </div>
+        {recordTab === 'cctv' ? (
+          <CameraCctvEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
+        ) : (
+          <CameraRecognitionEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
+        )}
       </section>
     </>
   )
