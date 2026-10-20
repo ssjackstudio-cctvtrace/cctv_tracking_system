@@ -19,8 +19,14 @@ import type { Point } from './types'
 //
 // Picture units: u = x * aspect, v = y (square pixels).
 
-export type RegionKind = 'Counter' | 'Purchasing' | 'Outside Shop'
-export const REGION_KINDS: RegionKind[] = ['Counter', 'Purchasing', 'Outside Shop']
+// Purchasing / Counter = inside the shop (direction In); Traffic = the walkway
+// outside the shop (direction Passed By). Anywhere not inside a drawn area is
+// Out of Range (outside the shop) — except on an inside-only camera, where the
+// whole picture is inside (no area there = Purchasing).
+export type RegionKind = 'Counter' | 'Purchasing' | 'Traffic'
+export const REGION_KINDS: RegionKind[] = ['Purchasing', 'Counter', 'Traffic']
+export type TrackRegion = RegionKind | 'Out of Range' // cctv_event.track_region
+const OLD_KINDS: Record<string, RegionKind> = { 'Outside Shop': 'Traffic' } // saved before Traffic replaced it
 
 export type Region = {
   id: string
@@ -206,7 +212,9 @@ export function fitTilt(samples: { foot: Point; head: Point }[], aspect: number,
   return best
 }
 
-export type FloorAreas = { version: 3; calibration: Calibration | null; regions: Region[] }
+// inside_only: the whole picture is inside the shop (a camera that never sees the
+// walkway, e.g. ABT-03): no Traffic / Out of Range, only In
+export type FloorAreas = { version: 3; calibration: Calibration | null; regions: Region[]; inside_only?: boolean }
 
 type M3 = number[] // 9, row by row
 type M34 = number[] // 12, row by row
@@ -382,6 +390,7 @@ export function readFloorAreas(value: unknown): FloorAreas {
       : null
   const regions = (Array.isArray(v.regions) ? v.regions : [])
     .filter((r) => r && Array.isArray(r.image) && r.image.length >= 3 && r.image.every(isPoint))
+    .map((r) => ({ ...r, kind: (OLD_KINDS[r.kind] ?? r.kind) as RegionKind }))
     .map((r, i) => ({
       id: r.id || `r${i + 1}`,
       name: r.name || r.kind || 'Area',
@@ -391,7 +400,39 @@ export function readFloorAreas(value: unknown): FloorAreas {
       z_min: Number(r.z_min ?? 0) || 0,
       z_max: Number(r.z_max ?? 2.2) || 2.2,
     }))
-  return { version: 3, calibration, regions }
+  return { version: 3, calibration, regions, inside_only: v.inside_only === true }
+}
+
+// ---------- areas must not overlap ----------
+function segmentsCross(a: Point, b: Point, c: Point, d: Point) {
+  const side = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+  const d1 = side(c, d, a)
+  const d2 = side(c, d, b)
+  const d3 = side(a, b, c)
+  const d4 = side(a, b, d)
+  return d1 * d2 < 0 && d3 * d4 < 0
+}
+
+function pointInPolygon(poly: Point[], p: Point) {
+  let hit = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [a, b] = [poly[i], poly[j]]
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) hit = !hit
+  }
+  return hit
+}
+
+// Do two area outlines (picture 0–1) overlap? Touching edges are allowed.
+export function areasOverlap(a: Point[], b: Point[]) {
+  if (a.length < 3 || b.length < 3) return false
+  for (let i = 0; i < a.length; i++)
+    for (let j = 0; j < b.length; j++)
+      if (segmentsCross(a[i], a[(i + 1) % a.length], b[j], b[(j + 1) % b.length])) return true
+  const mid = (poly: Point[]) => ({
+    x: poly.reduce((s, p) => s + p.x, 0) / poly.length,
+    y: poly.reduce((s, p) => s + p.y, 0) / poly.length,
+  })
+  return pointInPolygon(b, mid(a)) || pointInPolygon(a, mid(b)) // one area inside the other
 }
 
 // Region outline in metres from its picture outline (needs a calibration)
@@ -405,5 +446,5 @@ export function regionFloor(cal: Calibration | null, image: Point[]): Point[] | 
 export const REGION_COLORS: Record<RegionKind, string> = {
   Counter: '#e11d48',
   Purchasing: '#2563eb',
-  'Outside Shop': '#f97316',
+  Traffic: '#f97316',
 }

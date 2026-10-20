@@ -1,7 +1,8 @@
 """One thread per camera: read RTSP → detect + track people (full body only)
 → place each person in 3D on the shop floor → link them to ONE visitor shared
-by all cameras → count In / Out and the shop areas they walk into → queue
-visit / cctv_event rows for Supabase.
+by all cameras → record In / Passed By / Out from the shop areas they walk
+into (Purchasing, Counter, Traffic, see space3d.py) → queue visit /
+cctv_event rows for Supabase.
 Also keeps each person's latest box (and 3D position) for the website's live video."""
 
 from __future__ import annotations
@@ -23,8 +24,7 @@ import cv2
 import numpy as np
 
 from .demographics import Demographics, Estimate
-from .line_counter import CountLine, LineCounter
-from .space3d import Region, Space
+from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
 from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry
 
@@ -57,7 +57,7 @@ POWER_CHECK_SECONDS = 5
 FULL_BODY_RATIO = float(os.getenv("FULL_BODY_RATIO", "1.2"))  # box height / width
 # Feet confirmed: the box may END above the feet (legs hidden by a table or a
 # shelf) without touching the picture border. Then its bottom is not on the
-# floor, and the floor spot would be wrongly far away (e.g. "Outside Shop").
+# floor, and the floor spot would be wrongly far away (e.g. on the Traffic walkway).
 # So the body height measured from the box must look like a whole person:
 # at least FOOT_MIN_HEIGHT, and not much shorter than this person's height
 # measured before (on this or another camera). Otherwise the feet are hidden.
@@ -91,7 +91,8 @@ RELINK_BLIND_SECONDS = 1.5  # no look yet: only a number that appears right wher
 NEW_VISITOR_HOLD_SECONDS = float(os.getenv("NEW_VISITOR_HOLD_SECONDS", "1.0"))
 
 # Shop areas (camera.floor_areas → regions): the feet must stay in an area this
-# long before the visitor counts as being there (one cctv_event per area entered)
+# long before the visitor counts as being there. Purchasing / Counter = In,
+# Traffic = Passed By, anywhere else = Out of Range (Out), see _walk_regions
 REGION_STEADY_FRAMES = 3
 REGION_MIN_SECONDS = float(os.getenv("REGION_MIN_SECONDS", "1.0"))
 
@@ -177,7 +178,7 @@ class Person:
     full: bool  # whole body (head to feet) visible
     foot: tuple[float, float]  # where the feet touch the floor (0-1)
     head: tuple[float, float]  # top of the head (0-1)
-    feet: list[tuple[float, float]]  # points for the count line (empty unless full body)
+    feet: list[tuple[float, float]]  # bottom corners of the box at the feet (empty unless full body)
     floor: tuple[float, float] | None = None  # floor spot in metres (calibrated camera)
     height: float | None = None  # body height in metres
 
@@ -186,6 +187,7 @@ class Person:
 class _RegionState:
     current: str | None = None  # region id the person is steadily in on this camera ("" = none)
     region: Region | None = None
+    kind: str | None = None  # track_region of the steady spot: Purchasing / Counter / Traffic / Out of Range
     candidate: str | None = None
     streak: int = 0
     since: float = 0.0
@@ -216,7 +218,6 @@ class CameraWorker(threading.Thread):
         self.update = update  # update(table, values, **filters), for a visit's gender / age
         self._estimates: dict[int, Estimate] = {}  # tracker id → gender / age seen BEFORE it is linked to a visitor
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
-        self.counter = LineCounter(CountLine.from_json(camera.get("count_line")))
         # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
         self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
         self._heights: dict[int, list[float]] = {}  # tracker id → body heights measured with the feet seen
@@ -235,7 +236,7 @@ class CameraWorker(threading.Thread):
         self._recog: Recognizer | None = None  # made in run() (its models belong to this thread)
         self._seen_at: dict[int, float] = {}  # tracker id → last time in the picture
         self._spot: dict[int, tuple[float, float]] = {}  # tracker id → last feet point in the picture (0-1)
-        self._from_outside: set[int] = set()  # tracker ids seen in the Out area (walked in from outside)
+        self._from_outside: set[int] = set()  # tracker ids seen on the Traffic walkway (walked in from outside)
         self._tried_at: dict[int, float] = {}  # tracker id → last time it was compared with the visitors
         # tracker id → (time it went In, confidence, walked in from outside), no visitor yet
         self._pending: dict[int, tuple[float, float, bool]] = {}
@@ -314,16 +315,12 @@ class CameraWorker(threading.Thread):
         v = self._link.get(tid)
         return v.height if v is not None and not v.left else None
 
-    # Called by main when the dashboard changes the camera (e.g. a new count line or areas)
+    # Called by main when the dashboard changes the camera (e.g. new shop areas)
     def update_camera(self, camera: dict[str, Any]) -> None:
         if camera.get("floor_areas") != self.camera.get("floor_areas"):
             self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
             self._regions.clear()
         self.camera = camera
-        self.counter.set_line(CountLine.from_json(camera.get("count_line")))
-        for tid, v in self._link.items():  # a new line forgets who was In: keep linked people able to go Out
-            if not v.left:
-                self.counter.mark_in(tid)
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -349,8 +346,9 @@ class CameraWorker(threading.Thread):
         tracker = TRACKER if os.path.isfile(TRACKER) else "bytetrack.yaml"
         self.grabber.start()
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
-        if self.counter.line is None:
-            log.warning("no count line / In area yet — draw it on the Camera page; counting is paused")
+        if not self.space.counting:
+            log.warning("no shop areas yet — draw Purchasing / Counter / Traffic on the Camera page "
+                        "(or tick Inside only); counting is paused")
         if not self.space.shared:
             log.info("camera not placed on the shop plan yet (Camera page → Shop areas (3D)): people are "
                      "matched across cameras by their face, clothes and body only")
@@ -425,13 +423,8 @@ class CameraWorker(threading.Thread):
             by_tid = {p.tid: p for p in people}
 
             self._identify(frame, people, now)
-
-            for crossing in self.counter.update({p.tid: p.feet for p in people}, now=now):
-                p = by_tid.get(crossing.track_id)
-                self._record(crossing.track_id, crossing.direction, p.conf if p else 0.0, now, crossing.from_out,
-                             person=p, frame=frame)
+            self._walk_regions(frame, people, now)  # In / Passed By / Out from the shop areas
             self._make_visitors(frame, by_tid, now)
-            self._walk_regions(people, now)
 
             if demo.enabled:
                 self._look_at_people(demo, frame, people, now)
@@ -463,7 +456,8 @@ class CameraWorker(threading.Thread):
         return {
             "track": v.track_id if v is not None else self.track_name(p.tid),
             "b": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
-            "area": self.counter.area_of(p.tid),
+            "area": "in" if st is not None and st.kind in INSIDE_KINDS else (
+                "out" if st is not None and st.kind is not None else None),
             "visit": v is not None,  # linked to a visitor (has a visit row / track_id)
             "full": p.full,
             "xyz": [round(p.floor[0], 2), round(p.floor[1], 2), round(p.height or 1.7, 2)] if p.floor else None,
@@ -503,8 +497,6 @@ class CameraWorker(threading.Thread):
             tid = p.tid
             self._seen_at[tid] = now
             self._spot[tid] = p.foot
-            if self.counter.area_of(tid) == "out":
-                self._from_outside.add(tid)
 
             v = self._link.get(tid)
             if v is not None:  # already linked: the label stays the same while the person is followed
@@ -525,7 +517,7 @@ class CameraWorker(threading.Thread):
             elif v is None:
                 # standing outside: a visitor who went Out (keeps their track_id label), or one
                 # who was inside a few seconds ago and just walked out with a new tracker number
-                # (then their Out is counted: _attach marks them In on this camera's counter)
+                # (then their Passed By is recorded by _walk_regions)
                 v = self.registry.match(self._look.get(tid), self._plan(p), exclude=busy, now=now,
                                         outside_only=True, just_out=True)
                 how = "recognised, outside the shop" if v is None or v.outside else "recognised, just walked out"
@@ -571,10 +563,11 @@ class CameraWorker(threading.Thread):
                 v.add_look(look)
 
     def _unlinked_inside(self, tid: int, now: float) -> None:
-        """A person in this camera's In area lost their visitor (track_id ended,
-        or tracker mix-up): recognise them again, or make a new visit for them,
-        like someone who just went In."""
-        if self.counter.line is not None and self.counter.area_of(tid) == "in":
+        """A person in a shop area (Purchasing / Counter) lost their visitor
+        (track_id ended, or tracker mix-up): recognise them again, or make a
+        new visit for them, like someone who just went In."""
+        st = self._regions.get(tid)
+        if st is not None and st.kind in INSIDE_KINDS:
             self._pending.setdefault(tid, (now, 0.0, False))
 
     def _plan(self, p: Person) -> tuple[float, float] | None:
@@ -585,14 +578,10 @@ class CameraWorker(threading.Thread):
 
     def _may_be_inside(self, p: Person) -> bool:
         """Only people inside the shop are compared with the visitors inside, so
-        a passer-by outside who dresses alike never takes a visitor's track_id."""
-        if self.counter.line is not None and not self.counter.line.all_in:
-            if self.counter.area_of(p.tid) != "in":
-                return False
+        a passer-by outside who dresses alike never takes a visitor's track_id.
+        Outside = steadily on the Traffic walkway, or Out of Range."""
         st = self._regions.get(p.tid)
-        if st is not None and st.region is not None and st.region.kind == "Outside Shop":
-            return False
-        return True
+        return st is None or st.kind is None or st.kind in INSIDE_KINDS
 
     def _relink_lost(self, p: Person, present: set[int], busy: set[str], now: float) -> Visitor | None:
         """The tracker lost a linked person for a moment and gave them a new
@@ -627,8 +616,6 @@ class CameraWorker(threading.Thread):
     def _attach(self, tid: int, v: Visitor, now: float, how: str) -> None:
         self._link[tid] = v
         self._mismatch.pop(tid, None)
-        if not v.outside:
-            self.counter.mark_in(tid, now)  # inside: walking out through this camera's Out area is Out
         look = self._look.get(tid)
         if look is not None:
             with self.registry._lock:
@@ -650,31 +637,7 @@ class CameraWorker(threading.Thread):
             cur.add(look)
         self._look_n[tid] = self._look_n.get(tid, 0) + 1
 
-    # ---------- In / Out ----------
-    def _record(self, tid: int, direction: str, conf: float, when: float, from_out: bool = False,
-                person: Person | None = None, frame: np.ndarray | None = None) -> None:
-        v = self._link.get(tid)
-        if v is not None and v.left:
-            v = None
-        if direction == "Out":
-            linked = v is not None
-            if v is None:  # feet crossed to Out, but this number has no track_id yet: find the existing one
-                v = self._recognise_leaving(tid, person, frame, conf, when)
-            if v is not None:
-                self._went_out(v, conf, tid, when)
-                if not linked:  # after the Out (outside: no mark_in, so no second Out on this camera)
-                    self._attach(tid, v, when, "recognised while walking out")
-                    if person is not None:
-                        self.registry.seen(v, self.camera["camera_id"], when, self._plan(person),
-                                           person.height, person.conf)
-            return  # never In as a known visitor: Out is not recorded
-        if v is not None:
-            if v.outside and not from_out:
-                return  # went Out on another camera and is still at the door: not back in
-            self._camera_in(v, conf, tid, when)  # already known (linked): this camera's own In event
-        else:
-            self._pending.setdefault(tid, (when, conf, from_out))  # new person? decided in _make_visitors
-
+    # ---------- In (new people) ----------
     def _make_visitors(self, frame: np.ndarray, by_tid: dict[int, Person], now: float) -> None:
         """People who went In without being linked to a visitor: wait a moment
         (another camera may already know them), recognise them, then link or
@@ -717,14 +680,15 @@ class CameraWorker(threading.Thread):
 
     def _recognise_leaving(self, tid: int, p: Person | None, frame: np.ndarray | None, conf: float,
                            now: float) -> Visitor | None:
-        """Feet crossed the count line into the Out area, but this tracker
-        number is not linked to a visitor yet (the person went In on ANOTHER
-        camera, or this camera gave them a new number, or their visit was still
-        being decided). Find the visitor they are, so the Out is recorded for
-        the EXISTING track_id, never a new one.
-        Nobody matches: a person this camera counted In and who stayed inside
-        at least NEW_VISITOR_HOLD_SECONDS gets their visit now (In, then the
-        caller records Out); a passer-by who only stepped over the line gets
+        """A person this camera saw in a shop area walked out (Traffic / Out of
+        Range), but this tracker number is not linked to a visitor yet (the
+        person went In on ANOTHER camera, or this camera gave them a new
+        number, or their visit was still being decided). Find the visitor they
+        are, so the Passed By / Out is recorded for the EXISTING track_id,
+        never a new one.
+        Nobody matches: a person who stayed inside at least
+        NEW_VISITOR_HOLD_SECONDS gets their visit now (In, then the caller
+        records Passed By / Out); someone who only stepped in and out gets
         nothing."""
         pending = self._pending.pop(tid, None)  # walked out: never make a visit for them later
         if p is None:
@@ -743,7 +707,7 @@ class CameraWorker(threading.Thread):
             return v
         when, in_conf, from_out = pending
         if now - when < NEW_VISITOR_HOLD_SECONDS:
-            return None  # only stepped over the line and back
+            return None  # only stepped in and straight out
         v, created = self.registry.find_or_create(
             sig, self._plan(p), busy, lambda: self._new_visitor(tid, sig, p, now), now=now,
             visible_only=from_out or tid in self._from_outside, camera_id=cam_id, when=when)
@@ -772,81 +736,120 @@ class CameraWorker(threading.Thread):
         return v
 
     def _camera_in(self, v: Visitor, conf: float, tid: int, when: float) -> None:
-        """In event of this camera for this visit (once per camera per visit).
-        A visitor who went Out and walks back in within OUTSIDE_KEEP_SECONDS (5 min) keeps the
-        same visit / track_id."""
-        if v.outside and self.registry.come_back(v):
-            log.info("person %s (%s) came back into the shop", tid, v.track_id)
-        if not self.registry.first_in(v, self.camera["camera_id"], when):
-            return
+        """In event: the visitor walked into the shop (a Purchasing / Counter
+        area), or into the other kind of area inside the shop. Once per
+        change, whichever camera sees it first. A visitor who went Out / Passed
+        By and walks back in within OUTSIDE_KEEP_SECONDS (5 min) keeps the same
+        visit / track_id."""
+        cam_id = self.camera["camera_id"]
         st = self._regions.get(tid)
         r = st.region if st is not None else None
-        inside_area = r is not None and r.kind in ("Counter", "Purchasing")
-        self._event(v, "In", conf, tid, r.kind if inside_area else "Purchasing", when,
-                    area=r.name if inside_area else None)
+        kind = st.kind if st is not None and st.kind in INSIDE_KINDS else "Purchasing"
+        was_out, first = v.outside, v.region_kind is None
+        self.registry.where(v, cam_id, True, when)
+        changed, came_back = self.registry.enter(v, kind, r.name if r is not None else None, cam_id, when)
+        if came_back:
+            log.info("person %s (%s) came back into the shop", tid, v.track_id)
+        self.registry.first_in(v, cam_id, when)  # time this camera saw them go In (overlap handoff)
+        if changed:
+            self._event(v, "In", conf, tid, kind, when, area=r.name if r is not None else None,
+                        count=first or was_out)
 
-    def _went_out(self, v: Visitor, conf: float, tid: int, when: float, area: str | None = None) -> None:
+    def _went_out(self, v: Visitor, conf: float, tid: int, when: float, direction: str = "Passed By",
+                  region: str = TRAFFIC, area: str | None = None) -> None:
+        """Left the shop: "Passed By" on the Traffic walkway (the stay in the
+        shop ends), or "Out" to Out of Range."""
         if not self.registry.leave(v, when):
-            return  # already outside (Out recorded before): no second Out until they come back in
+            return  # already outside (recorded before): nothing more until they come back in
         self._send_estimate(v, final=True)
         # The person is still followed outside (nothing more is recorded) and keeps their
         # track_id while a camera sees them, and OUTSIDE_KEEP_SECONDS (5 min) after the last
         # camera saw them; walking back in within that time = same visit, same track_id
-        self._event(v, "Out", conf, tid, "Outside Shop", when, area=area)
+        self._event(v, direction, conf, tid, region, when, area=area)
 
-    # ---------- Shop areas (3D regions) ----------
-    def _walk_regions(self, people: list[Person], now: float) -> None:
-        """Which area (Counter, Point of Purchase display, ...) each full-body
-        person stands in. A visitor walking into an area gets ONE cctv_event
-        (whichever camera sees it first): direction "In", track_region = the
-        area's kind. Walking into an "Outside Shop" area counts as Out
-        (track_region "Outside Shop"). Only people whose feet are confirmed on
-        the floor (p.full); feet hidden: they keep the area they were in."""
-        if self.space is None or not self.space.regions:
+    # ---------- Shop areas (3D regions) → In / Passed By / Out ----------
+    def _walk_regions(self, frame: np.ndarray, people: list[Person], now: float) -> None:
+        """Where each full-body person stands steadily (REGION_STEADY_FRAMES
+        frames and REGION_MIN_SECONDS): a Purchasing / Counter area (inside
+        the shop), the Traffic walkway, or Out of Range (no area there; on an
+        inside-only camera that is Purchasing). Then:
+          inside              → In (new visitor, came back, or the other kind of area)
+          inside → Traffic    → Passed By, track_region Traffic (the stay ends)
+          inside → Out of Range → Out, track_region Out of Range
+        Only people whose feet are confirmed on the floor (p.full); feet hidden:
+        they keep the spot they were in."""
+        if self.space is None or not self.space.counting:
             return
-        cam_id = self.camera["camera_id"]
         for p in people:
             if not p.full:
                 continue  # partly hidden: keep the area they were in
             r = self.space.region_at(p.foot, None, p.height)  # flat: the feet point in the outline drawn on the picture
+            kind = self.space.kind_at(r)
+            if kind == TRAFFIC:
+                self._from_outside.add(p.tid)  # on the walkway: walked in from outside
             key = r.id if r is not None else ""
             st = self._regions.setdefault(p.tid, _RegionState())
             if key == st.current:
                 st.candidate, st.streak = None, 0
-                continue
-            if key != st.candidate:
-                st.candidate, st.streak, st.since = key, 0, now
-            st.streak += 1
-            if st.streak < REGION_STEADY_FRAMES or now - st.since < REGION_MIN_SECONDS:
-                continue
-            st.current, st.region, st.candidate, st.streak = key, r, None, 0
-            v = self._link.get(p.tid)
-            if v is None or v.left:
-                continue  # not a visitor (yet): shown on the live video only
-            if r is not None and r.kind == "Outside Shop":
-                self._went_out(v, p.conf, p.tid, now, area=r.name)
-                continue
-            if self.registry.set_region(v, r, cam_id) and r is not None:
-                self._event(v, "In", p.conf, p.tid, r.kind, now, area=r.name, count=False)
+            else:
+                if key != st.candidate:
+                    st.candidate, st.streak, st.since = key, 0, now
+                st.streak += 1
+                if st.streak >= REGION_STEADY_FRAMES and now - st.since >= REGION_MIN_SECONDS:
+                    st.current, st.region, st.kind, st.candidate, st.streak = key, r, kind, None, 0
+            if st.current is not None:
+                self._act(frame, p, st, now)
+
+    def _act(self, frame: np.ndarray, p: Person, st: _RegionState, now: float) -> None:
+        """Events for one person steadily in a spot (see _walk_regions)."""
+        cam_id, tid = self.camera["camera_id"], p.tid
+        v = self._link.get(tid)
+        if v is not None and v.left:
+            v = None
+        inside = True if st.kind in INSIDE_KINDS else (False if st.kind == TRAFFIC else None)
+        if inside:
+            if v is None:  # new person? recognised or made a visit in _make_visitors
+                self._pending.setdefault(tid, (now, p.conf, tid in self._from_outside))
+            else:
+                self._camera_in(v, p.conf, tid, now)
+            return
+        # Outside the shop: the Traffic walkway, or Out of Range
+        out_of_range = inside is None
+        linked = v is not None
+        if v is None:
+            if tid not in self._pending:
+                return  # never inside on this camera: a passer-by, nothing recorded
+            v = self._recognise_leaving(tid, p, frame, p.conf, now)  # the EXISTING track_id
+            if v is None:
+                return
+        self.registry.where(v, cam_id, None if out_of_range else False, now)
+        if self.registry.may_leave(v, cam_id, out_of_range, now):
+            self._went_out(v, p.conf, tid, now, "Out" if out_of_range else "Passed By",
+                           OUT_OF_RANGE if out_of_range else TRAFFIC,
+                           area=st.region.name if st.region is not None else None)
+        if not linked:
+            self._attach(tid, v, now, "recognised while walking out")
+            self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
 
     def _event(self, v: Visitor, direction: str, conf: float, tid: int, region: str, when: float | None = None,
                area: str | None = None, count: bool = True) -> None:
-        """direction is only "In" or "Out"; track_region says where the person was:
-        In → "Purchasing" or "Counter", Out → "Outside Shop". (area = the area's
-        name, for the log only.)"""
+        """direction: "In" (track_region Purchasing / Counter), "Passed By"
+        (Traffic) or "Out" (Out of Range). (area = the area's name, for the
+        log only.)"""
         self.insert(
             "cctv_event",
             {
                 "camera_id": self.camera["camera_id"],
                 "visit_id": v.visit_id,
                 "direction": direction,
-                "track_region": region,  # "Outside Shop" | "Purchasing" | "Counter"
+                "track_region": region,  # "Purchasing" | "Counter" | "Traffic" | "Out of Range"
                 "confidence": round(conf * 100, 2),
                 "event_time": datetime.fromtimestamp(when or time.time(), timezone.utc).isoformat(),
             },
         )
-        if count and direction in self.counts:  # entrance In / Out only (not areas walked into)
-            self.counts[direction] += 1
+        key = "In" if direction == "In" else "Out"
+        if count:  # came into the shop / left it (not moving between areas inside)
+            self.counts[key] += 1
         log.info("person %s (%s) %s → %s%s  (inside now %d)", tid, v.track_id, direction,
                  region, f" ({area})" if area else "", self.registry.count())
 
@@ -892,23 +895,14 @@ class CameraWorker(threading.Thread):
 
     def _draw(self, img: np.ndarray, people: list[Person]) -> np.ndarray:
         h, w = img.shape[:2]
-        line = self.counter.line
-        if line:
-            zone = np.array([(int(x * w), int(y * h)) for x, y in line.in_zone], np.int32)
-            tint = img.copy()
-            cv2.fillPoly(tint, [zone], (0, 160, 0))  # In area: green tint
-            img = cv2.addWeighted(tint, 0.18, img, 0.82, 0)
-            pts = np.array([(int(x * w), int(y * h)) for x, y in line.points], np.int32)
-            if len(pts) >= 2:
-                cv2.polylines(img, [pts], False, (0, 220, 255), 2)
-            cx, cy = zone.mean(axis=0).astype(int)
-            cv2.putText(img, "IN", (int(cx), int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 0), 2)
         if self.space is not None:
+            colors = {"Counter": (60, 30, 225), "Purchasing": (235, 100, 40), TRAFFIC: (20, 150, 250)}  # BGR
             for r in self.space.regions:  # shop areas: outline on the floor
                 if len(r.image) >= 3:
                     poly = np.array([(int(x * w), int(y * h)) for x, y in r.image], np.int32)
-                    cv2.polylines(img, [poly], True, (255, 160, 0), 2)
-                    cv2.putText(img, r.name, tuple(poly[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 160, 0), 1)
+                    color = colors.get(r.kind, (255, 160, 0))
+                    cv2.polylines(img, [poly], True, color, 2)
+                    cv2.putText(img, r.name, tuple(poly[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
         for p in people:
             x, y = int(p.foot[0] * w), int(p.foot[1] * h)
             v = self._link.get(p.tid)

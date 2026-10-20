@@ -1,6 +1,6 @@
 // Types that match the Supabase tables (public schema).
 // uuid, timestamptz and inet columns come back from Supabase as strings.
-import type { FloorAreas, RegionKind } from './space3d'
+import type { FloorAreas, TrackRegion } from './space3d'
 
 // ---------- BRANCH ----------
 export type Branch = {
@@ -54,16 +54,9 @@ export type EdgeDeviceEditable = Pick<EdgeDevice, 'branch_id' | 'device_name'>
 // still fit if the stream resolution changes. Keep this shape the same as
 // what the edge box reads.
 export type Point = { x: number; y: number }
-// Count line: many dots joined into one line; in_zone is the area labelled
-// "In" (the line stretched to the picture border splits the picture in two).
-// { all_in: true }: whole screen is In (a camera inside the shop).
-// The older two-point line { start, end } is still read.
-export type CountLine =
-  | { points: Point[]; in_point: Point; in_zone: Point[] }
-  | { all_in: true }
-  | { start: Point; end: Point }
 // camera.floor_areas: the camera's 3D floor calibration + shop areas
-// (Counter, Point of Purchase display, ...). See space3d.ts.
+// (Purchasing / Counter inside the shop, Traffic walkway outside) and
+// inside_only (whole picture inside the shop). See space3d.ts.
 export type CameraFloorAreas = FloorAreas
 
 export type Camera = {
@@ -75,7 +68,6 @@ export type Camera = {
   mac_address: string | null
   ip_address: string | null // inet
   stream_path: 'stream1' | 'stream2' | null
-  count_line: CountLine | null // jsonb
   floor_areas: CameraFloorAreas | null // jsonb
   last_snapshot_url: string | null
   last_seen_at: string | null
@@ -92,7 +84,6 @@ export type CameraEditable = Pick<
   | 'mac_address'
   | 'ip_address'
   | 'stream_path'
-  | 'count_line'
   | 'floor_areas'
 >
 
@@ -115,9 +106,11 @@ export type CctvEvent = {
   cctv_event_id: string
   camera_id: string
   visit_id: string
-  // In = came in, or walked into a shop area (Counter, POP display ...); Out = left the shop
-  direction: 'In' | 'Out'
-  track_region: RegionKind // where the person was: 'Outside Shop' | 'Purchasing' | 'Counter'
+  // In = came into the shop, or moved to the other kind of area (Purchasing / Counter);
+  // Passed By = walked from inside onto the Traffic walkway (the stay ends);
+  // Out = walked from inside out of every area, or not seen any more; Not Detected = column default
+  direction: 'In' | 'Out' | 'Passed By' | 'Not Detected'
+  track_region: TrackRegion // where the person was: 'Purchasing' | 'Counter' | 'Traffic' | 'Out of Range'
   confidence: number // 0–100
   event_time: string
 }

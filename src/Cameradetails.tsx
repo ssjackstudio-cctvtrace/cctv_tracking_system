@@ -4,7 +4,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEvent,
   type MutableRefObject,
   type ReactNode,
 } from 'react'
@@ -14,7 +13,6 @@ import { supabase } from './lib/supabase'
 import { TABLES, isOnline } from './Usetable'
 import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
-import { areasFor, extendedLine, pointInside, readCountLine, splitAreas, inside, type CountAreas } from './countZones'
 import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
 import { REGION_COLORS, floorOrAuto, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
@@ -188,11 +186,11 @@ export function CameraScreen({
   )
 }
 
-// People In / Out / Inside for ONE camera, counted from CCTV_EVENT
-// (direction = 'In' / 'Out') since midnight today. People, not rows: one
-// person (visit = one track_id) is counted once, even when this camera also
-// recorded them walking into a shop area (direction In, track_region =
-// the area's kind). reloadKey changes when the edge box says a new row was saved,
+// People In / Out / Inside for ONE camera, counted from CCTV_EVENT since
+// midnight today: In = direction 'In', Out = direction 'Passed By' (walked
+// onto the Traffic walkway) or 'Out'. People, not rows: one person (visit =
+// one track_id) is counted once, even when this camera recorded them walking
+// into more than one shop area. reloadKey changes when the edge box says a new row was saved,
 // so the numbers change at once.
 function usePeopleCount(cameraId: string, reloadKey = 0) {
   const [counts, setCounts] = useState({ in: 0, out: 0 })
@@ -203,14 +201,14 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
     const load = async () => {
       const startOfToday = new Date()
       startOfToday.setHours(0, 0, 0, 0)
-      const visitsWith = async (direction: 'In' | 'Out') => {
+      const visitsWith = async (directions: string[]) => {
         const ids = new Set<string>()
         for (let from = 0; from < 20000; from += 1000) {
           const { data, error } = await supabase
             .from(TABLES.cctvEvent)
             .select('visit_id')
             .eq('camera_id', cameraId)
-            .eq('direction', direction)
+            .in('direction', directions)
             .gte('event_time', startOfToday.toISOString())
             .range(from, from + 999)
           if (error) return { count: 0, error }
@@ -220,7 +218,7 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
         }
         return { count: ids.size, error: null }
       }
-      const [inRes, outRes] = await Promise.all([visitsWith('In'), visitsWith('Out')])
+      const [inRes, outRes] = await Promise.all([visitsWith(['In']), visitsWith(['Passed By', 'Out'])])
       if (cancelled) return
       const err = inRes.error ?? outRes.error
       if (err) setError(err.message)
@@ -243,7 +241,7 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
 // ---------- People Comes In / Comes Out timeline (today, 30-minute steps) ----------
 // Opening hours: 10:00 AM – 10:30 PM on Friday and Saturday, 10:00 AM – 10:00 PM other days.
 // Each person (visit_id) is counted once per direction, in the 30 minutes of
-// their first In / Out row from this camera today, like the cards above.
+// their first In / leaving (Passed By or Out) row from this camera today, like the cards above.
 const SLOT_MINUTES = 30
 
 type TimelineSlot = { start: Date; in: number; out: number }
@@ -266,7 +264,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
           .from(TABLES.cctvEvent)
           .select('visit_id, direction, event_time')
           .eq('camera_id', cameraId)
-          .in('direction', ['In', 'Out'])
+          .in('direction', ['In', 'Passed By', 'Out'])
           .gte('event_time', open.toISOString())
           .lt('event_time', close.toISOString())
           .order('event_time', { ascending: true })
@@ -287,7 +285,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
       }))
       const seen = { In: new Set<string>(), Out: new Set<string>() }
       for (const r of rows) {
-        const dir = r.direction as 'In' | 'Out'
+        const dir = r.direction === 'In' ? 'In' : 'Out' // Passed By / Out = left the shop
         if (seen[dir].has(r.visit_id)) continue
         seen[dir].add(r.visit_id)
         const i = Math.floor((new Date(r.event_time).getTime() - open.getTime()) / (SLOT_MINUTES * 60_000))
@@ -637,45 +635,6 @@ function RecordDayFilter({ day, onChange }: { day: string; onChange: (day: strin
 const IN_COLOR = '#16a34a'
 const OUT_COLOR = '#f97316'
 
-function drawAreas(ctx: CanvasRenderingContext2D, areas: CountAreas) {
-  const { width: W, height: H } = ctx.canvas
-  const path = (poly: Point[]) => {
-    ctx.beginPath()
-    poly.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)))
-    ctx.closePath()
-  }
-  ctx.save()
-  ctx.globalAlpha = 0.12
-  ctx.fillStyle = IN_COLOR
-  path(areas.inZone)
-  ctx.fill()
-  ctx.globalAlpha = 1
-  ctx.lineWidth = Math.max(2, W / 400)
-  ctx.strokeStyle = '#facc15'
-  if (areas.points.length >= 2) {
-    ctx.beginPath()
-    areas.points.forEach((p, i) => (i ? ctx.lineTo(p.x * W, p.y * H) : ctx.moveTo(p.x * W, p.y * H)))
-    ctx.stroke()
-  }
-  const font = Math.max(12, Math.round(H * 0.035))
-  ctx.font = `700 ${font}px system-ui, sans-serif`
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  for (const [text, poly, color] of [
-    ['IN', areas.inZone, IN_COLOR],
-    ['OUT', areas.outZone, OUT_COLOR],
-  ] as const) {
-    if (poly.length < 3) continue // whole screen is In: no Out area
-    const c = pointInside(poly)
-    const w = ctx.measureText(text).width + font * 0.6
-    ctx.fillStyle = color
-    ctx.fillRect(c.x * W - w / 2, c.y * H - font * 0.65, w, font * 1.3)
-    ctx.fillStyle = '#fff'
-    ctx.fillText(text, c.x * W, c.y * H)
-  }
-  ctx.restore()
-}
-
 // A tracked person: a 3D box on the floor (calibrated camera, full body) or a
 // rectangle, with their label. The label comes from the edge box with every
 // picture (track_id, gender, age, area, X / Y / Z), so it stays on the person
@@ -688,7 +647,7 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
     ? 'rgba(226,232,240,0.9)'
     : box.kind && box.kind in REGION_COLORS
       ? REGION_COLORS[box.kind as RegionKind]
-      : rec?.direction === 'Out'
+      : rec?.direction === 'Out' || rec?.direction === 'Passed By'
         ? OUT_COLOR
         : IN_COLOR
   ctx.save()
@@ -716,7 +675,7 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
   const lines = linked
     ? [
         box.track,
-        `${v?.visit_type ?? 'Visitor'} · ${rec?.direction === 'Out' ? 'Out' : 'In'}${box.region ? ` · ${box.region}` : ''}`,
+        `${v?.visit_type ?? 'Visitor'} · ${rec?.direction === 'Out' || rec?.direction === 'Passed By' ? rec.direction : 'In'}${box.region ? ` · ${box.region}` : ''}`,
         `${gender ?? 'Unknown'} · Age ${fmtAge(age)}`,
         ...(box.xyz && box.full ? [`X ${box.xyz[0].toFixed(1)} · Y ${box.xyz[1].toFixed(1)} · Z ${box.xyz[2].toFixed(2)} m`] : []),
         ...(rec ? [`Match Confidence ${fmt2(rec.confidence)}%`] : []),
@@ -741,294 +700,6 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
   ctx.fillStyle = '#fff'
   lines.forEach((l, i) => ctx.fillText(l, lx + pad, ly + pad + i * lineH))
   ctx.restore()
-}
-
-// ---------- Count line editor ----------
-// Click as many dots as needed (each new dot joins the line), then "Save line",
-// then click the area that is inside the shop to label it In (the other area
-// is Out), then "Save". The line is stretched at both ends to the picture
-// border to split the picture into the two areas. The edge box counts a
-// person In when both their feet are completely inside the In area, after
-// being seen in the Out area. Out is only counted for people already counted In.
-
-type EditMode = 'view' | 'dots' | 'label'
-const round = (v: number) => Math.round(v * 1000) / 1000
-const polyPoints = (poly: Point[]) => poly.map((p) => `${p.x},${p.y}`).join(' ')
-
-function CountLineEditor({
-  camera,
-  grabFrame,
-  liveReady,
-}: {
-  camera: Camera
-  grabFrame: () => string | null // a still picture from the live video
-  liveReady: boolean // live video is playing
-}) {
-  const saved = useMemo(() => readCountLine(camera.count_line), [camera.count_line])
-  const [mode, setMode] = useState<EditMode>('view')
-  const [points, setPoints] = useState<Point[]>([])
-  const [inPoint, setInPoint] = useState<Point | null>(null)
-  const [hover, setHover] = useState<Point | null>(null)
-  const [frozen, setFrozen] = useState<string | null>(null) // picture from the live video, held still while editing
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
-
-  const editing = mode !== 'view'
-  const background = (editing && frozen) || camera.last_snapshot_url || frozen
-
-  const toPoint = (e: MouseEvent<HTMLDivElement>): Point => {
-    const box = e.currentTarget.getBoundingClientRect()
-    return {
-      x: round(Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1)),
-      y: round(Math.min(Math.max((e.clientY - box.top) / box.height, 0), 1)),
-    }
-  }
-
-  const startEditing = () => {
-    const still = grabFrame()
-    if (!still && !camera.last_snapshot_url) {
-      setMessage('Wait until the live video shows a picture, then try again.')
-      return
-    }
-    setFrozen(still)
-    setPoints([])
-    setInPoint(null)
-    setMessage('')
-    setMode('dots')
-  }
-
-  const cancel = () => {
-    setPoints([])
-    setInPoint(null)
-    setHover(null)
-    setMode('view')
-    setMessage('')
-  }
-
-  const handleClick = (e: MouseEvent<HTMLDivElement>) => {
-    const p = toPoint(e) // read the click position now (the event is gone later)
-    if (mode === 'dots') setPoints((pts) => [...pts, p])
-    else if (mode === 'label') setInPoint(p)
-  }
-
-  // What to draw: the saved line, or the line being edited
-  const shown: CountAreas | null =
-    mode === 'view' ? saved : mode === 'label' && inPoint ? { points, inPoint, ...areasFor(points, inPoint) } : null
-  const split = mode === 'label' ? splitAreas(points) : null
-  const hoverArea = split && hover && !inPoint ? (inside(split[0], hover) ? split[0] : split[1]) : null
-  const stretched = mode === 'label' && points.length >= 2 ? extendedLine(points) : null
-
-  // Camera inside the shop: everyone it sees is inside (no line, no Out area)
-  const saveWholeScreen = async () => {
-    setSaving(true)
-    setMessage('')
-    const { error } = await supabase.from(TABLES.camera).update({ count_line: { all_in: true } }).eq('camera_id', camera.camera_id)
-    setSaving(false)
-    if (error) setMessage(`Could not save: ${error.message}`)
-    else {
-      cancel()
-      setMessage('Saved: the whole screen is In. The edge box starts using it within a minute.')
-    }
-  }
-
-  // No line: this camera stops counting (e.g. a camera that does not see the entrance)
-  const remove = async () => {
-    if (!window.confirm(`Remove the count line of ${camera.camera_name}? It will stop counting people.`)) return
-    setSaving(true)
-    const { error } = await supabase.from(TABLES.camera).update({ count_line: null }).eq('camera_id', camera.camera_id)
-    setSaving(false)
-    setMessage(error ? `Could not save: ${error.message}` : 'Count line removed. This camera stops counting within a minute.')
-  }
-
-  const save = async () => {
-    if (!inPoint || points.length < 2) return
-    const { inZone } = areasFor(points, inPoint)
-    const r4 = (p: Point) => ({ x: Math.round(p.x * 10000) / 10000, y: Math.round(p.y * 10000) / 10000 })
-    setSaving(true)
-    setMessage('')
-    const { error } = await supabase
-      .from(TABLES.camera)
-      .update({ count_line: { points, in_point: inPoint, in_zone: inZone.map(r4) } })
-      .eq('camera_id', camera.camera_id)
-    setSaving(false)
-    if (error) setMessage(`Could not save: ${error.message}`)
-    else {
-      setMode('view')
-      setHover(null)
-      setMessage('Saved. The edge box starts using it within a minute.')
-    }
-  }
-
-  if (!background && !liveReady) {
-    return (
-      <section className="cam-line">
-        <h2>Count line</h2>
-        <p className="cam-count-note">
-          The count line can be drawn once the edge box sends a picture (live video or snapshot) from this camera.
-        </p>
-      </section>
-    )
-  }
-
-  const note =
-    mode === 'dots'
-      ? points.length < 2
-        ? 'Click dots across the shop entrance, one after another. Add as many as you need. For a camera inside the shop that does not see the entrance, click "Whole screen is In".'
-        : `${points.length} dots. Keep clicking to add more, or click "Save line" when the line is done.`
-      : mode === 'label'
-        ? inPoint
-          ? 'Green = In (inside the shop), orange = Out. Click the other area or "Swap In / Out" to change, then Save.'
-          : 'Now click the area that is INSIDE the shop. It becomes In; the other area becomes Out.'
-        : saved && saved.outZone.length === 0
-          ? 'Whole screen is In: everyone this camera sees is inside the shop, and keeps the same track ID they got on the other cameras. This camera does not count Out.'
-          : saved
-          ? (background ? '' : 'The line and In / Out areas are shown on the live video above. ') +
-            'A person counts as In when both feet are completely inside the green In area, after being seen in the Out area. Out is only counted for people already counted In.'
-          : 'No count line yet, so this camera is not counting. Click "Edit count line".'
-
-  return (
-    <section className="cam-line">
-      <div className="cam-line-head">
-        <h2>Count line</h2>
-        {mode === 'view' && (
-          <div className="cam-line-actions">
-            {camera.count_line && (
-              <button type="button" className="cam-toggle" disabled={saving} onClick={remove}>
-                Remove line
-              </button>
-            )}
-            <button type="button" className="cam-toggle" onClick={startEditing}>
-              Edit count line
-            </button>
-          </div>
-        )}
-        {mode === 'dots' && (
-          <div className="cam-line-actions">
-            <button
-              type="button"
-              className="cam-toggle"
-              disabled={points.length === 0}
-              onClick={() => setPoints((pts) => pts.slice(0, -1))}
-            >
-              Undo dot
-            </button>
-            <button type="button" className="cam-toggle" disabled={points.length === 0} onClick={() => setPoints([])}>
-              Clear
-            </button>
-            <button type="button" className="cam-toggle" disabled={saving} onClick={saveWholeScreen}>
-              Whole screen is In
-            </button>
-            <button type="button" className="cam-toggle" onClick={cancel}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="cam-line-save"
-              disabled={points.length < 2}
-              onClick={() => {
-                setInPoint(null)
-                setMode('label')
-              }}
-            >
-              Save line
-            </button>
-          </div>
-        )}
-        {mode === 'label' && (
-          <div className="cam-line-actions">
-            <button type="button" className="cam-toggle" onClick={() => setMode('dots')}>
-              Back to dots
-            </button>
-            <button
-              type="button"
-              className="cam-toggle"
-              disabled={!inPoint}
-              onClick={() => inPoint && setInPoint(pointInside(areasFor(points, inPoint).outZone))}
-            >
-              Swap In / Out
-            </button>
-            <button type="button" className="cam-toggle" onClick={cancel}>
-              Cancel
-            </button>
-            <button type="button" className="cam-line-save" disabled={!inPoint || saving} onClick={save}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-        )}
-      </div>
-
-      <p className="cam-count-note">{note}</p>
-
-      {background && (
-      <div
-        className={`cam-line-canvas${editing ? ' cam-line-canvas--editing' : ''}`}
-        onClick={handleClick}
-        onMouseMove={(e) => editing && setHover(toPoint(e))}
-        onMouseLeave={() => setHover(null)}
-      >
-        <img src={background} alt={`Picture from ${camera.camera_name}`} draggable={false} />
-        <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
-          {hoverArea && <polygon points={polyPoints(hoverArea)} className="cam-zone-hover" />}
-          {shown && (
-            <>
-              <polygon points={polyPoints(shown.inZone)} className="cam-zone-in" />
-              {shown.outZone.length >= 3 && <polygon points={polyPoints(shown.outZone)} className="cam-zone-out" />}
-            </>
-          )}
-          {stretched && (
-            <>
-              <line
-                x1={stretched[0].x}
-                y1={stretched[0].y}
-                x2={points[0].x}
-                y2={points[0].y}
-                className="cam-line-stretch"
-              />
-              <line
-                x1={points[points.length - 1].x}
-                y1={points[points.length - 1].y}
-                x2={stretched[stretched.length - 1].x}
-                y2={stretched[stretched.length - 1].y}
-                className="cam-line-stretch"
-              />
-            </>
-          )}
-          {(mode === 'view' ? (saved?.points ?? []) : points).length >= 2 && (
-            <polyline points={polyPoints(mode === 'view' ? saved!.points : points)} className="cam-line-path" />
-          )}
-          {mode === 'dots' && hover && points.length > 0 && (
-            <line
-              x1={points[points.length - 1].x}
-              y1={points[points.length - 1].y}
-              x2={hover.x}
-              y2={hover.y}
-              className="cam-line-next"
-            />
-          )}
-        </svg>
-        {editing &&
-          points.map((p, i) => (
-            <span key={i} className="cam-line-dot" style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }} />
-          ))}
-        {shown &&
-          ([
-            ['IN', shown.inZone, 'cam-line-in'],
-            ['OUT', shown.outZone, 'cam-line-out'],
-          ] as const).map(([text, poly, cls]) => {
-            if (poly.length < 3) return null
-            const c = pointInside(poly)
-            return (
-              <span key={text} className={cls} style={{ left: `${c.x * 100}%`, top: `${c.y * 100}%` }}>
-                {text}
-              </span>
-            )
-          })}
-      </div>
-      )}
-
-      {message && <p className={message.startsWith('Could') ? 'cam-error' : 'cam-count-note'}>{message}</p>}
-    </section>
-  )
 }
 
 export default function CameraDetails({
@@ -1056,7 +727,6 @@ export default function CameraDetails({
   const { info, error: infoError } = useCameraInfo(camera.camera_id)
   const cam = info ?? { ...camera, edge_device: null } // until the query answers
   const edge = info?.edge_device ?? null
-  const areas = useMemo(() => readCountLine(camera.count_line), [camera.count_line])
   // 3D floor + shop areas (updated at once when saved below, before the camera list reloads)
   const [savedAreas, setFloorAreas] = useState<FloorAreas>(() => readFloorAreas(camera.floor_areas))
   useEffect(() => setFloorAreas(readFloorAreas(camera.floor_areas)), [camera.floor_areas])
@@ -1075,14 +745,14 @@ export default function CameraDetails({
   const [liveMsg, setLiveMsg] = useState<{ state: LiveState; msg: string }>({ state: 'connecting', msg: '' })
   const grabFrameRef = useRef<(() => string | null) | null>(null)
   const onLiveState = useCallback((state: LiveState, msg: string) => setLiveMsg({ state, msg }), [])
-  // People inside = people standing in this camera's In area right now (from the live video)
+  // People inside = people standing in this camera's Purchasing / Counter areas right now (from the live video)
   const [insideNow, setInsideNow] = useState<number | null>(null)
   // Records from this camera: CCTV Event / Recognition Event tabs, one day at a time
   const [recordTab, setRecordTab] = useState<RecordTab>('cctv')
   const [recordDay, setRecordDay] = useState(todayKey)
 
-  // 3D view: floor grid + X / Y / Z axes + shop areas as 3D boxes, the count
-  // line and In area, then each person (3D box + label), and a floor map
+  // Live view: the shop areas (Purchasing / Counter / Traffic), then each
+  // person (3D box + label), and a floor map
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
     const nIn = frame.boxes.filter((b) => b.area === 'in').length
     setInsideNow((cur) => (cur === nIn ? cur : nIn))
@@ -1096,7 +766,6 @@ export default function CameraDetails({
       if (peopleSeen.current.length > 400) peopleSeen.current.splice(0, peopleSeen.current.length - 400)
     }
     drawSpace(ctx, { ...space, grid: [], axes: [] }) // flat areas only: no floor grid / axes on the live video
-    if (areas) drawAreas(ctx, areas)
     const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
     for (const box of shown) drawPerson(ctx, box, records.byTrack.get(box.track), floorAreas.calibration)
     drawFloorMap(ctx, floorAreas, shown, (b) =>
@@ -1173,12 +842,6 @@ export default function CameraDetails({
           {infoError && <p className="cam-error">Could not load camera details: {infoError}</p>}
         </div>
       </div>
-
-      <CountLineEditor
-        camera={camera}
-        grabFrame={() => grabFrameRef.current?.() ?? null}
-        liveReady={liveMsg.state === 'live'}
-      />
 
       <AreasEditor
         camera={camera}

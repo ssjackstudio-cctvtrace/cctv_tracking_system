@@ -24,11 +24,15 @@ Saved by the website (Camera details page → "Shop areas (3D)") in camera.floor
         {"id": "r1", "name": "Counter", "kind": "Counter",
          "image": [{"x": .., "y": ..}, ...],                # outline on the floor, in the picture (0-1)
          "floor": [{"x": .., "y": ..}, ...] | null,          # the same outline in metres (when calibrated)
-         "z_min": 0.0, "z_max": 2.2}]}                      # height range of the area (metres)
+         "z_min": 0.0, "z_max": 2.2}],                      # height range of the area (metres)
+     "inside_only": false}                                  # true: the whole picture is inside the shop
 
 kind is one of "Counter", "Purchasing" (any display / Point of Purchase area,
-the name is free text) or "Outside Shop". It is what the box writes to
-cctv_event.track_region.
+the name is free text) or "Traffic" (the walkway outside the shop). It is what
+the box writes to cctv_event.track_region. Anywhere not inside a drawn area is
+"Out of Range" (outside the shop), except on an "inside_only" camera (e.g. a
+camera that only sees the inside of the shop, like ABT-03): there it is
+"Purchasing", and the camera has no Traffic / Out of Range.
 
 When the cameras are placed on one shop plan ("placed": true, position X / Y
 and facing direction set on the Camera page), they share the SAME floor
@@ -51,7 +55,11 @@ import numpy as np
 
 Point = tuple[float, float]
 
-REGION_KINDS = ("Outside Shop", "Purchasing", "Counter")
+REGION_KINDS = ("Traffic", "Purchasing", "Counter")
+INSIDE_KINDS = ("Purchasing", "Counter")  # areas inside the shop (direction In)
+TRAFFIC = "Traffic"  # walkway outside the shop (direction Passed By)
+OUT_OF_RANGE = "Out of Range"  # not in any drawn area
+OLD_KINDS = {"Outside Shop": TRAFFIC}  # areas saved before Traffic replaced Outside Shop
 MIN_HEIGHT, MAX_HEIGHT = 0.6, 2.3  # metres: a measured body height outside this is not trusted
 
 # Automatic floor (same values as the website, src/space3d.ts)
@@ -100,7 +108,7 @@ def inside(poly: list[Point], p: Point) -> bool:
 class Region:
     id: str
     name: str
-    kind: str  # "Counter" | "Purchasing" | "Outside Shop"
+    kind: str  # "Counter" | "Purchasing" | "Traffic"
     image: tuple[Point, ...]  # picture outline (0-1)
     floor: tuple[Point, ...] | None  # floor outline (metres)
     z_min: float = 0.0
@@ -116,16 +124,29 @@ class Space:
     k1: float = 0.0  # lens curve
     focal: float = 0.0  # focal length in picture units (needed for the lens curve)
     shared: bool = False  # floor coordinates shared with the other cameras (placed on one shop plan)
+    inside_only: bool = False  # the whole picture is inside the shop (no Traffic / Out of Range)
 
     @property
     def calibrated(self) -> bool:
         return self.img_to_floor is not None and self.projection is not None
 
     @staticmethod
-    def automatic(aspect: float = 16 / 9, regions: tuple[Region, ...] = ()) -> "Space":
+    def automatic(aspect: float = 16 / 9, regions: tuple[Region, ...] = (), inside_only: bool = False) -> "Space":
         """The floor before the Camera page saved one: fixed height, usual tilt and lens."""
         h_inv, P, f = auto_matrices(aspect, CAMERA_HEIGHT, AUTO_TILT, AUTO_HFOV)
-        return Space(aspect, h_inv, P, regions, AUTO_K1, f, False)
+        return Space(aspect, h_inv, P, regions, AUTO_K1, f, False, inside_only)
+
+    def kind_at(self, region: "Region | None") -> str:
+        """track_region of a spot: the area's kind, or (no area there) Out of
+        Range — Purchasing on an inside-only camera."""
+        if region is not None:
+            return region.kind
+        return "Purchasing" if self.inside_only else OUT_OF_RANGE
+
+    @property
+    def counting(self) -> bool:
+        """In / Passed By / Out can be worked out: areas drawn, or inside-only camera."""
+        return self.inside_only or bool(self.regions)
 
     # ---------- lens curve (division model, same as the website) ----------
     def _straighten(self, p: Point) -> Point:
@@ -177,7 +198,8 @@ class Space:
             try:
                 image = tuple(pt(p) for p in r.get("image") or [])
                 floor = tuple(pt(p) for p in r["floor"]) if r.get("floor") and len(r["floor"]) >= 3 else None
-                kind = r.get("kind") if r.get("kind") in REGION_KINDS else "Purchasing"
+                kind = OLD_KINDS.get(r.get("kind"), r.get("kind"))
+                kind = kind if kind in REGION_KINDS else "Purchasing"
                 if len(image) < 3 and floor is None:
                     continue
                 regions.append(Region(
@@ -187,9 +209,10 @@ class Space:
                 ))
             except (TypeError, KeyError, ValueError):
                 continue
+        inside_only = value.get("inside_only") is True
         if h_inv is None:  # areas saved but no floor yet: automatic floor
-            return Space.automatic(aspect, tuple(regions))
-        return Space(aspect, h_inv, proj, tuple(regions), k1, focal, bool(cal.get("placed")))
+            return Space.automatic(aspect, tuple(regions), inside_only)
+        return Space(aspect, h_inv, proj, tuple(regions), k1, focal, bool(cal.get("placed")), inside_only)
 
     # ---------- picture ↔ floor ----------
     def floor_of(self, p: Point) -> Point | None:

@@ -4,7 +4,8 @@ Normal run (on the edge box, or your PC on the shop network):
     python main.py
 
 Test on your Windows PC with no camera / no Supabase writes:
-    python main.py --offline --source test.mp4 --line 0.1,0.6,0.9,0.6 --show
+    python main.py --offline --source test.mp4 --zones areas.json --show
+    (areas.json = a camera.floor_areas value; --inside-only without it: the whole picture is inside)
 """
 
 from __future__ import annotations
@@ -31,10 +32,11 @@ from edge.visitors import KEEP_SECONDS, VisitorRegistry  # noqa: E402
 log = logging.getLogger("main")
 
 # camera has no branch_id: the branch comes from the camera's edge box (edge_device.branch_id)
-# floor_areas = 3D floor calibration + shop areas (Counter / Point of Purchase ...), see edge/space3d.py
+# floor_areas = 3D floor + shop areas (Purchasing / Counter / Traffic) + inside_only, see edge/space3d.py
 CAMERA_COLUMNS = (
-    "camera_id,camera_name,active_status,ip_address,stream_path,count_line,floor_areas,edge_device(branch_id)"
+    "camera_id,camera_name,active_status,ip_address,stream_path,floor_areas,edge_device(branch_id)"
 )
+OUT_OF_RANGE = "Out of Range"  # cctv_event.track_region of a visit closed by the box (person not seen any more)
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
 STATUS_SECONDS = 5  # check each camera's active_status (sent only when it changes)
 
@@ -42,12 +44,13 @@ STATUS_SECONDS = 5  # check each camera's active_status (sent only when it chang
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CCTV edge box: count people and send events to Supabase")
     p.add_argument("--offline", action="store_true",
-                   help="do not contact Supabase (use with --source and --line to test on your PC)")
+                   help="do not contact Supabase (use with --source and --zones to test on your PC)")
     p.add_argument("--source", help="video file or webcam number instead of the camera's RTSP stream")
     p.add_argument("--camera", help="only run this camera_name (default: all active cameras of this edge box)")
-    p.add_argument("--line", help="count line for --offline: x1,y1,x2,y2 in 0-1, e.g. 0.1,0.6,0.9,0.6")
+    p.add_argument("--inside-only", action="store_true",
+                   help="for --offline without --zones: the whole picture is inside the shop")
     p.add_argument("--zones", help="for --offline: JSON file with a camera.floor_areas value (3D floor + areas)")
-    p.add_argument("--show", action="store_true", help="open a window with boxes, line and counts")
+    p.add_argument("--show", action="store_true", help="open a window with boxes, areas and counts")
     return p.parse_args()
 
 
@@ -77,10 +80,10 @@ def main() -> None:
 
     def close_stale_visits() -> None:
         """After a restart: today's visits on this box's cameras that never got
-        an Out (the box stopped while they were inside) are closed with an Out
-        event KEEP_SECONDS after they were last recorded, like a person no
-        camera sees any more. Their track_ids are not used again, so every
-        visit has an In and an Out and "People Still Inside" is right."""
+        a Passed By / Out (the box stopped while they were inside) are closed
+        with an Out event (Out of Range) KEEP_SECONDS after they were last
+        recorded, like a person no camera sees any more. Their track_ids are
+        not used again, so every visit has an In and an end."""
         if supa is None:
             return
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -108,7 +111,7 @@ def main() -> None:
                 continue
             writer.insert("cctv_event", {
                 "camera_id": r["camera_id"], "visit_id": vid, "direction": "Out",
-                "track_region": "Outside Shop", "confidence": r.get("confidence") or 0,
+                "track_region": OUT_OF_RANGE, "confidence": r.get("confidence") or 0,
                 "event_time": stamp(min(at + KEEP_SECONDS, time.time())),
             })
             closed += 1
@@ -119,14 +122,15 @@ def main() -> None:
 
     def close_lost() -> None:
         """A person no camera has seen for KEEP_SECONDS: their track_id ends.
-        If they never went Out on a camera, their visit is closed with an Out
-        event at the moment they were last seen (on the camera that saw them last)."""
+        If they never left on a camera (Passed By / Out), their visit is closed with
+        an Out event (Out of Range) at the moment they were last seen (on the camera
+        that saw them last)."""
         for v in visitors.expire():
             cam_id = max(v.seen_on, key=v.seen_on.get) if v.seen_on else v.first_camera
             last = max(v.seen_on.values()) if v.seen_on else v.last_seen
             writer.insert("cctv_event", {
                 "camera_id": cam_id, "visit_id": v.visit_id, "direction": "Out",
-                "track_region": "Outside Shop", "confidence": round(v.last_conf * 100, 2),
+                "track_region": OUT_OF_RANGE, "confidence": round(v.last_conf * 100, 2),
                 "event_time": stamp(last),
             })
             if v.estimate.samples > v.sent_faces:  # newest gender / age
@@ -144,12 +148,12 @@ def main() -> None:
 
     def load_cameras() -> list[dict]:
         if supa is None:
-            x1, y1, x2, y2 = (float(v) for v in (args.line or "0.1,0.6,0.9,0.6").split(","))
+            areas = json.load(open(args.zones, encoding="utf-8")) if args.zones else \
+                {"version": 3, "calibration": None, "regions": [], "inside_only": bool(args.inside_only)}
             return [{
                 "camera_id": "offline", "camera_name": args.camera or "test", "branch_id": "offline",
                 "active_status": "Active", "ip_address": "", "stream_path": "stream2",
-                "count_line": {"start": {"x": x1, "y": y1}, "end": {"x": x2, "y": y2}},
-                "floor_areas": json.load(open(args.zones, encoding="utf-8")) if args.zones else None,
+                "floor_areas": areas,
             }]
         # Every camera of this box, Active or Inactive: the box itself decides
         # active_status from whether the camera picture is live and open.
@@ -172,7 +176,7 @@ def main() -> None:
                 log.info("%s: IP address / stream changed, reconnecting", workers[cam_id].name)
                 workers.pop(cam_id).stop()
             if cam_id in workers:
-                workers[cam_id].update_camera(cam)  # e.g. count line redrawn on the dashboard
+                workers[cam_id].update_camera(cam)  # e.g. shop areas redrawn on the Camera page
             else:
                 w = CameraWorker(
                     cam, source_for(cam), settings.model, settings.confidence, settings.image_size,

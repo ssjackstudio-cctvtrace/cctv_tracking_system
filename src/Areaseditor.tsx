@@ -10,6 +10,7 @@ import {
   lensAngles,
   REGION_COLORS,
   REGION_KINDS,
+  areasOverlap,
   autoCalibration,
   fitTilt,
   floorOrAuto,
@@ -291,11 +292,14 @@ export function drawFloorMap(ctx: CanvasRenderingContext2D, fa: FloorAreas, boxe
 //     sliders fine-tune it until the 1 m grid lies flat on the floor tiles.
 //     Optional: the camera's position and facing on ONE shop plan, so all 4
 //     cameras share one floor and a person seen by 2 cameras is one person.
-//  2. "Add area": click the area's outline on the floor (e.g. the counter,
-//     a Point of Purchase display), give it a name and a kind, and a height
-//     range. It becomes a 3D box: X / Y on the floor, Z up.
-// The edge box then knows, for each person, X / Y on the floor, Z (height)
-// and the area they stand in, and records cctv_event.track_region.
+//  2. "Add area": click dots around the area's outline on the floor and give
+//     it a name and a kind: Purchasing / Counter (inside the shop) or Traffic
+//     (the walkway outside). Areas must not overlap. Anywhere not inside an
+//     area is Out of Range (outside the shop), unless the camera is "Inside
+//     only" (it only sees the inside of the shop, e.g. ABT-03).
+// The edge box then knows the area each person stands in and records
+// cctv_event: In (Purchasing / Counter), Passed By (Traffic, after being
+// inside: the stay ends) or Out (Out of Range, after being inside).
 
 type Mode = 'view' | 'calibrate' | 'area'
 const round = (v: number) => Math.round(v * 1000) / 1000
@@ -476,6 +480,7 @@ export function AreasEditor({
       calibration,
       // flat areas: the edge box checks the feet point against the outline on the picture
       regions: next.regions.map((r) => ({ ...r, floor: null })),
+      inside_only: next.inside_only === true,
     }
     setSaving(true)
     setMessage('')
@@ -509,6 +514,15 @@ export function AreasEditor({
       setMessage('Could not save: the height "to" must be more than the height "from".')
       return
     }
+    if (saved.inside_only && draft.kind === 'Traffic') {
+      setMessage('Could not save: this camera is Inside only, so it has no Traffic walkway. Untick "Inside only" first.')
+      return
+    }
+    const overlap = saved.regions.find((r) => r.id !== draft.id && areasOverlap(r.image, draft.image))
+    if (overlap) {
+      setMessage(`Could not save: this area overlaps "${overlap.name}". Areas must not overlap — move the dots (Undo dot / Redraw outline).`)
+      return
+    }
     const region: Region = {
       id: draft.id,
       name: draft.name.trim() || draft.kind,
@@ -524,6 +538,20 @@ export function AreasEditor({
     store({ ...saved, regions }, `Area "${region.name}" saved. The edge box starts using it within a minute.`)
   }
 
+  // Inside only: the whole picture is inside the shop (a camera that never sees the walkway)
+  const setInsideOnly = (on: boolean) => {
+    if (on && saved.regions.some((r) => r.kind === 'Traffic')) {
+      setMessage('Could not save: delete the Traffic areas first. An Inside-only camera has no Traffic walkway.')
+      return
+    }
+    store(
+      { ...saved, inside_only: on },
+      on
+        ? `${camera.camera_name} is Inside only: everyone it sees is inside the shop (In only, places without an area count as Purchasing).`
+        : `${camera.camera_name} is no longer Inside only: places without an area are Out of Range.`,
+    )
+  }
+
   const deleteArea = (r: Region) => {
     if (!window.confirm(`Delete the area "${r.name}"?`)) return
     store({ ...saved, regions: saved.regions.filter((x) => x.id !== r.id) }, `Area "${r.name}" deleted.`)
@@ -532,7 +560,7 @@ export function AreasEditor({
   if (!background && !liveReady) {
     return (
       <section className="cam-line">
-        <h2>Shop areas</h2>
+        <h2>Shop areas (In / Out)</h2>
         <p className="cam-count-note">
           Areas can be set once the edge box sends a picture (live video or snapshot) from this camera.
         </p>
@@ -548,16 +576,26 @@ export function AreasEditor({
         ? (draft?.image.length ?? 0) < 3
           ? 'Click the corners of the area’s outline on the FLOOR in the picture, one after another (at least 3).'
           : 'The area is a flat outline on the floor of this picture. Keep clicking to add corners, or Save.'
-        : cal
-          ? `Draw each area flat on the floor of this picture. A person counts in an area when their feet, seen on the floor, are inside its outline. The 3D floor (camera ${cal.camera_height.toFixed(2)} m high${cal.tilt !== undefined ? `, tilted ${cal.tilt}°` : ''}) is only used to check that the feet are really seen.`
-          : `Draw each area flat on the floor of this picture. A person counts in an area when their feet, seen on the floor, are inside its outline. (Automatic 3D floor: camera ${CAMERA_HEIGHT} m high, usual tilt; only used to check that the feet are really seen.)`
+        : `${
+            saved.inside_only
+              ? 'Inside only: everyone this camera sees is inside the shop (In only, never Passed By / Out); places without an area count as Purchasing.'
+              : 'Purchasing and Counter areas are inside the shop (In). Traffic is the walkway outside the shop: a visitor walking from inside onto it is Passed By, and their stay ends. Everywhere else (grey) is Out of Range: walking there from inside is Out.'
+          } Draw each area flat on the floor of this picture, with dots around it; areas must not overlap. A person is in an area when their feet, seen on the floor, are inside its outline. ${
+            cal
+              ? `The 3D floor (camera ${cal.camera_height.toFixed(2)} m high${cal.tilt !== undefined ? `, tilted ${cal.tilt}°` : ''}) is only used to check that the feet are really seen.`
+              : `(Automatic 3D floor: camera ${CAMERA_HEIGHT} m high, usual tilt; only used to check that the feet are really seen.)`
+          }`
 
   return (
     <section className="cam-line">
       <div className="cam-line-head">
-        <h2>Shop areas</h2>
+        <h2>Shop areas (In / Out)</h2>
         {mode === 'view' && (
           <div className="cam-line-actions">
+            <label className="cam-areas-check">
+              <input type="checkbox" checked={!!saved.inside_only} disabled={saving} onChange={(e) => setInsideOnly(e.target.checked)} />
+              Inside only
+            </label>
             {cal && (
               <button type="button" className="cam-toggle" disabled={saving} onClick={resetCalibration}>
                 Reset 3D floor
@@ -672,9 +710,13 @@ export function AreasEditor({
           <label>
             Kind (saved as track region)
             <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as RegionKind })}>
-              {REGION_KINDS.map((k) => (
+              {REGION_KINDS.filter((k) => !(saved.inside_only && k === 'Traffic')).map((k) => (
                 <option key={k} value={k}>
-                  {k === 'Purchasing' ? 'Purchasing (Point of Purchase display / shop floor)' : k}
+                  {k === 'Purchasing'
+                    ? 'Purchasing (Point of Purchase display / shop floor) — In'
+                    : k === 'Counter'
+                      ? 'Counter — In'
+                      : 'Traffic (walkway outside the shop) — Passed By'}
                 </option>
               ))}
             </select>
@@ -699,6 +741,14 @@ export function AreasEditor({
             }}
           />
           <svg viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+            {mode !== 'calibrate' && !saved.inside_only && shown.regions.length > 0 && (
+              // Out of Range: everything outside the drawn areas
+              <path
+                d={`M0,0 L1,0 L1,1 L0,1 Z ${shown.regions.map((r) => `${pathD([r.image])} Z`).join(' ')}`}
+                fillRule="evenodd"
+                className="cam-areas-oor"
+              />
+            )}
             {lines.grid.length > 0 && <path d={pathD(lines.grid)} className="cam-areas-grid" />}
             {lines.axes.map((a) => (
               <path key={a.name} d={pathD(a.line)} className="cam-areas-axis" style={{ stroke: a.color }} />
@@ -748,9 +798,7 @@ export function AreasEditor({
               <span className="cam-areas-chip" style={{ background: REGION_COLORS[r.kind] }} />
               <strong>{r.name}</strong>
               <span className="cam-area-kind">{r.kind}</span>
-              <span className="cam-area-kind">
-                Flat area on the picture
-              </span>
+              <span className="cam-area-kind">{r.kind === 'Traffic' ? 'Passed By (outside the shop)' : 'In (inside the shop)'}</span>
               <span className="cam-area-actions">
                 <button type="button" className="cam-toggle" onClick={() => startArea(r)}>
                   Edit
@@ -765,8 +813,9 @@ export function AreasEditor({
       )}
       {mode === 'view' && saved.regions.length === 0 && (
         <p className="cam-count-note">
-          No areas yet. Add the Counter and each Point of Purchase display area this camera sees. When a visitor walks
-          into an area, the box records one CCTV event with its track region (Counter / Purchasing / Outside Shop).
+          {saved.inside_only
+            ? 'Inside only, no areas: everyone this camera sees is In (Purchasing). Add a Counter area if this camera sees the counter.'
+            : 'No areas yet, so this camera is not counting. Add the Purchasing (shop floor / Point of Purchase displays), Counter and Traffic (walkway outside the shop) areas this camera sees, or tick Inside only for a camera that only sees the inside of the shop.'}
         </p>
       )}
 

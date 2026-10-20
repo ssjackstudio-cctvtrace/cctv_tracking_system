@@ -11,20 +11,32 @@ Rules
     visit.
   - Every other camera that sees the same person (at the same time, because
     the views overlap, or later, in another part of the shop) is LINKED to
-    that visitor: it may record its own cctv_event rows (In once per camera,
-    areas entered), but always with the same visit_id / track_id.
+    that visitor: its cctv_event rows always use the same visit_id / track_id.
+  - cctv_event rows come from the shop areas each camera has drawn (see
+    space3d.py), once per visitor whichever camera sees it first:
+      In          (track_region Purchasing / Counter): walked into the shop, or
+                  into the other kind of area inside the shop
+      Passed By   (track_region Traffic): walked from inside onto the walkway
+                  outside the shop: the stay in the shop ends here
+      Out         (track_region Out of Range): walked from inside to a spot
+                  outside every drawn area, or no camera saw them for
+                  KEEP_SECONDS (main.py closes the visit)
+    Two cameras whose views overlap may see one person in different areas at
+    the same moment (the areas were drawn a little differently): a camera only
+    moves the person in or out when no OTHER camera has just seen them on the
+    other side (GUARD_SECONDS), so the events never flip back and forth.
   - A person is remembered while ANY camera sees them, and for KEEP_SECONDS
     (TRACK_KEEP_SECONDS in .env, default 300 = 5 minutes) after the last camera saw them.
     Then the track_id is ended for good: it is never given to anyone again.
     If the person was still inside (no Out seen), the visit is closed with an
     Out event at the moment they were last seen (main.py), so every visit has
-    an In and an Out and the dashboard's "People Still Inside" goes back to 0.
-  - Out (on any camera, crossing the count line) is recorded once. After Out
-    the person is still followed outside the shop, but nothing more is
-    recorded, and their track_id is kept for OUTSIDE_KEEP_SECONDS
-    (default 300 = 5 minutes) after the last camera saw them. If they walk
-    back in through the entrance in that time, it is the same visit and the
-    same track_id (a new In event). After that the track_id ends for good.
+    an In and an Out.
+  - Passed By / Out is recorded once. After it the person is still followed
+    outside the shop, but nothing more is recorded, and their track_id is
+    kept for OUTSIDE_KEEP_SECONDS (default 300 = 5 minutes) after the last
+    camera saw them. If they walk back into the shop in that time, it is the
+    same visit and the same track_id (a new In event). After that the
+    track_id ends for good.
 
 Is this the same person? The registry compares, for every remembered visitor:
   1. Floor position (cameras placed on the shop plan in "3D shop floor map"):
@@ -43,8 +55,8 @@ Is this the same person? The registry compares, for every remembered visitor:
      enough for the strict match, and a missed match = a duplicate visit.
 Two cameras that see a new person at the same moment ask the registry one at
 a time (find_or_create), so only one visit row can be made.
-An unlinked tracker number that crosses the count line to Out is recognised
-the same way (recognise), so its Out goes to the EXISTING track_id.
+An unlinked tracker number that walks out of the shop is recognised the same
+way (recognise), so its Passed By / Out goes to the EXISTING track_id.
 
 Only numbers are kept in memory; no picture is saved or sent.
 """
@@ -87,6 +99,9 @@ EXIT_LINK_SCORE = 1.8  # ... but only with a clearly matching look (score below 
 OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "2.0"))  # "seen by another camera right now"
 OVERLAP_IN_SECONDS = float(os.getenv("OVERLAP_IN_SECONDS", "4.0"))  # In on 2 cameras this close = same entry
 OVERLAP_DISTANCE = float(os.getenv("OVERLAP_DISTANCE", str(LOOSE_DISTANCE)))  # look match allowed for a handoff
+# Areas: another camera that saw the person on the other side (inside / on the walkway) this
+# recently stops this camera from moving them in or out (areas drawn a little differently)
+GUARD_SECONDS = float(os.getenv("AREA_GUARD_SECONDS", "1.5"))
 
 
 @dataclass(eq=False)
@@ -107,6 +122,8 @@ class Visitor:
     region_name: str | None = None
     region_kind: str | None = None
     region_camera: str | None = None  # camera that set the area
+    inside_at: dict[str, float] = field(default_factory=dict)  # camera_id → last time seen in a Purchasing / Counter area
+    traffic_at: dict[str, float] = field(default_factory=dict)  # camera_id → last time seen on the Traffic walkway
     estimate: Estimate = field(default_factory=Estimate)  # gender / age from all cameras
     sent_faces: int = 0  # samples already written to the visit row
     outside: bool = False  # counted Out (still remembered while seen, and OUTSIDE_KEEP_SECONDS after)
@@ -304,6 +321,59 @@ class VisitorRegistry:
             visitor.in_at[camera_id] = time.time() if when is None else when
             return True
 
+    def where(self, visitor: Visitor, camera_id: str, inside: bool | None, now: float) -> None:
+        """This camera sees the person steadily inside the shop (True), on the
+        Traffic walkway (False), or elsewhere (None)."""
+        with self._lock:
+            if inside is True:
+                visitor.inside_at[camera_id] = now
+            elif inside is False:
+                visitor.traffic_at[camera_id] = now
+
+    def enter(self, visitor: Visitor, kind: str, name: str | None, camera_id: str,
+              now: float | None = None) -> tuple[bool, bool]:
+        """The person is steadily in a Purchasing / Counter area on this camera.
+        Returns (record an In event, came back into the shop). An In is
+        recorded when the person comes into the shop, and when they move to
+        the OTHER kind of area (Purchasing ↔ Counter), once whichever camera
+        sees it first."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if visitor.left:
+                return False, False
+            if visitor.outside:
+                if any(c != camera_id and now - t <= GUARD_SECONDS for c, t in visitor.traffic_at.items()):
+                    return False, False  # another camera still sees them on the walkway
+                visitor.outside = False
+                came_back = True
+            else:
+                came_back = False
+                other = visitor.region_camera
+                busy = other not in (None, camera_id) and now - visitor.inside_at.get(other, 0.0) <= GUARD_SECONDS
+                if visitor.region_kind == kind:
+                    if not busy:  # this camera follows them in the shop now
+                        visitor.region_camera, visitor.region_name = camera_id, name
+                    return False, False
+                if busy:
+                    return False, False  # the camera that placed them sees them in its own area right now
+            visitor.region = kind
+            visitor.region_kind, visitor.region_name, visitor.region_camera = kind, name, camera_id
+            return True, came_back
+
+    def may_leave(self, visitor: Visitor, camera_id: str, out_of_range: bool, now: float | None = None) -> bool:
+        """May this camera record the person leaving the shop (Passed By on the
+        walkway, or Out of Range)? Not while ANOTHER camera has just seen them
+        inside a shop area. Out of Range (no area drawn there) also needs THIS
+        camera to have seen them inside the shop: a spot outside every area of
+        this camera may simply be a part of the shop it has no area for."""
+        now = time.time() if now is None else now
+        with self._lock:
+            if visitor.left or visitor.outside:
+                return False
+            if any(c != camera_id and now - t <= GUARD_SECONDS for c, t in visitor.inside_at.items()):
+                return False
+            return not out_of_range or camera_id in visitor.inside_at
+
     def set_region(self, visitor: Visitor, region, camera_id: str) -> bool:
         """The person is steadily in this area (or in none). True when the area
         changed, i.e. a cctv_event should be recorded (once, whichever camera saw it)."""
@@ -336,6 +406,7 @@ class VisitorRegistry:
             visitor.outside = True
             visitor.last_seen = time.time() if now is None else now
             visitor.cameras_in.clear()  # each camera records In again if they come back
+            visitor.inside_at.clear()
             visitor.region = visitor.region_name = visitor.region_kind = visitor.region_camera = None
             return True
 

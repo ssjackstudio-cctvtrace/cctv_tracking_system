@@ -2,7 +2,8 @@
 
 Runs next to the Tapo cameras (on your Windows PC while developing, then on
 the G6-RK3588-F13 box). It reads each camera's RTSP stream, finds people
-with YOLO, tracks them, counts who crosses the count line, and writes
+with YOLO, tracks them, follows which shop area they stand in (Purchasing,
+Counter, Traffic walkway), and writes
 `visit` + `cctv_event` rows to Supabase. It also uploads a live picture
 every few seconds for the Camera page and reports that the box and cameras
 are online.
@@ -16,10 +17,10 @@ Tapo camera ──RTSP (shop network)──► main.py ──► Supabase (visit
 | File | What it does |
 |---|---|
 | `main.py` | Starts everything; reloads camera settings + heartbeat every 60 s |
-| `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → line counter → rows |
+| `edge/camera_worker.py` | One thread per camera: RTSP → YOLO + ByteTrack → shop areas → In / Passed By / Out rows |
 | `edge/visitors.py` | People inside the shop, shared by all cameras: one track_id per person |
 | `edge/reid.py` | Recognises a person by face, attire and whole body (same person = same track_id) |
-| `edge/line_counter.py` | Decides In / Out from the count line's In / Out areas (`camera.count_line`) |
+| `edge/space3d.py` | 3D floor and the shop areas of each camera (`camera.floor_areas`) |
 | `edge/demographics.py` | Estimated gender + age from each person's face |
 | `download_models.py` | Downloads the face, gender, age and person recognition models into `models/` |
 | `edge/uploader.py` | Sends rows (retries while the internet is down) and snapshots |
@@ -67,13 +68,13 @@ pip install -r requirements.txt       # first time takes a few minutes (download
 someone walking through a doorway, copy it here as `test.mp4`, then:
 
 ```powershell
-python main.py --offline --source test.mp4 --line 0.1,0.6,0.9,0.6 --show
+python main.py --offline --source test.mp4 --inside-only --show
 ```
 
-A window shows each person's dot, the yellow count line, a green **IN**
-arrow, and the In / Out totals. Nothing is sent to Supabase; the rows it
-*would* send are printed. Press `q` to close. Change `--line` until the line
-sits across the doorway (0,0 = top-left, 1,1 = bottom-right).
+A window shows each person's dot and the In / Out totals (`--inside-only`:
+the whole picture counts as inside the shop). Nothing is sent to Supabase;
+the rows it *would* send are printed. Press `q` to close. To test areas, save
+a `camera.floor_areas` value as `areas.json` and use `--zones areas.json`.
 
 **2. Test with a real camera and Supabase** (PC on the shop Wi-Fi):
 
@@ -82,10 +83,9 @@ python main.py --camera PJ-Entrance --show
 ```
 
 Then walk in and out. New rows should appear in `visit` and `cctv_event`,
-and the dashboard's People In / Out go up. After the first snapshot
+and the dashboard's People Walk-in goes up. After the first snapshot
 (about 5 s) the Camera page shows the live picture, where you can draw the
-real count line (**Edit count line**). The program picks up the new line
-within 60 s.
+shop areas (**Shop areas**). The program picks up the new areas within 60 s.
 
 ## B. Run on the G6-RK3588-F13 edge box
 
@@ -140,19 +140,33 @@ within 60 s.
 
 ## How In / Out is decided
 
-On the camera details page, **Edit count line**: click as many dots as you
-need across the shop entrance, **Save line**, then click the area that is
-inside the shop. That area is **In** (green), the other is **Out** (orange);
-the line is stretched to the picture border at both ends to split the
-picture. **Save**.
+On the camera details page, **Shop areas**: click dots around each area on
+the floor of the picture and give it a kind:
 
-- **In**: a person whose feet (both bottom corners of their box) are
-  **completely** inside the In area for a few frames. This includes people
-  already inside when the box starts.
-- **Out**: only for a person already In, whose feet are then completely back
-  in the Out area. People never In are not counted Out.
-- **Whole screen is In** (button in the editor): for a camera inside the shop
-  that does not see the entrance. Everyone it sees is In; it never counts Out.
+- **Purchasing** (any display / Point of Purchase area) and **Counter**:
+  inside the shop.
+- **Traffic**: the walkway outside the shop.
+- Anywhere not inside a drawn area is **Out of Range** (outside the shop).
+- **Inside only** (tick box): for a camera that only sees the inside of the
+  shop (ABT-03). The whole picture is inside: places without an area count as
+  Purchasing, and the camera never records Passed By / Out.
+
+Areas must not overlap. A person counts as standing in an area when their
+feet stay in it for `REGION_MIN_SECONDS` (default 1 s):
+
+- **In** (track_region Purchasing / Counter): walking into the shop, and
+  moving to the other kind of area (Purchasing ↔ Counter). Once per change,
+  whichever camera sees it first. This includes people already inside when
+  the box starts.
+- **Passed By** (track_region Traffic): a visitor walking from inside onto the
+  Traffic walkway. Their stay in the shop ends here. People who were never
+  inside are not recorded.
+- **Out** (track_region Out of Range): a visitor walking from inside to a spot
+  outside every area of that camera (only the camera that saw them inside can
+  say so), or not seen by any camera for `TRACK_KEEP_SECONDS`.
+- Two cameras whose views overlap: a camera does not move a person in or out
+  while another camera has just seen them on the other side
+  (`AREA_GUARD_SECONDS`, default 1.5), so events never flip back and forth.
 - **Full body**: only people whose whole body is in the picture (head,
   upper body, lower body and feet) are counted, placed in 3D and looked at
   for gender / age. With a pose model (`MODEL=yolo11n-pose.pt` on the PC) the
@@ -194,18 +208,16 @@ remembers (`edge/edge/visitors.py`):
   (two people crossing), the link is dropped and the other person is
   recognised again or gets a new visit (`...-7.2`): the first person's
   track_id is not carried over.
-- **Out** on any camera (crossing the count line to the outside) is recorded
-  once. After Out the person is still followed outside, but nothing more is
-  recorded, and their track_id is kept for `OUTSIDE_KEEP_SECONDS` (default
-  **300 = 5 minutes**) after the last camera saw them. Walking back in from
-  the Out area within that time = same visit, same track_id, a new In event.
-  Another camera that still sees them inside the door does not count them
-  back In.
+- **Passed By / Out** on any camera is recorded once. After it the person is
+  still followed outside, but nothing more is recorded, and their track_id is
+  kept for `OUTSIDE_KEEP_SECONDS` (default **300 = 5 minutes**) after the
+  last camera saw them. Walking back into a shop area within that time = same
+  visit, same track_id, a new In event.
 - **Walking out behind displays.** The tracker often loses a person behind the
   suitcases / displays at the shop front and gives them a new number outside.
-  Someone first seen in the Out area whose look clearly matches a visitor seen
-  inside in the last `EXIT_LINK_SECONDS` (default 8) is that visitor: they keep
-  their track_id and their Out is counted.
+  Someone first seen on the Traffic walkway whose look clearly matches a visitor
+  seen inside in the last `EXIT_LINK_SECONDS` (default 8) is that visitor: they
+  keep their track_id and their Passed By is recorded.
 - **Restart:** visits of today left open when the box stopped are closed with
   an Out event when it starts again.
 
@@ -232,16 +244,15 @@ How the box knows it is the same person:
    (`OVERLAP_IN_SECONDS`, default 4) is taken, unless the look is clearly
    different (looser limit `OVERLAP_DISTANCE`, default 0.675). The 2nd camera
    then writes its cctv_event rows with the first camera's visit_id / track_id.
-5. **Out on a camera that has no track_id for the person yet** — e.g. they
-   went In on camera 1 and walk out through camera 2's count line before
-   camera 2 linked them. The feet crossing into the Out area now recognises
-   them (rules 1–4) and records the Out for their **existing** track_id; the
-   track_id is then remembered outside for `OUTSIDE_KEEP_SECONDS`. Someone
-   who only stepped over the line and back (less than
-   `NEW_VISITOR_HOLD_SECONDS`) gets nothing recorded.
+5. **Leaving on a camera that has no track_id for the person yet** — e.g. they
+   went In on camera 1 and walk onto camera 2's Traffic walkway before camera
+   2 linked them. Walking out now recognises them (rules 1–4) and records the
+   Passed By for their **existing** track_id; the track_id is then remembered
+   outside for `OUTSIDE_KEEP_SECONDS`. Someone who only stepped in and
+   straight out (less than `NEW_VISITOR_HOLD_SECONDS`) gets nothing recorded.
 
-**People Still Inside** on the dashboard (today) is what the cameras see right
-now: every visitor seen by any camera in the last 5 minutes (TRACK_KEEP_SECONDS), each person once
+**People inside right now** (`edge_device.people_inside`, no longer shown on
+the dashboard) is what the cameras see right now: every visitor seen by any camera in the last 5 minutes (TRACK_KEEP_SECONDS), each person once
 (someone in the overlap of 2 cameras is one visitor). The box writes it to
 `edge_device.people_inside` — run `supabase/people_inside.sql` once. For a
 past day (the shop is closed) it is 0.
@@ -279,40 +290,40 @@ Camera page → camera → **Shop areas (3D)** (saved in `camera.floor_areas`):
    floor and follows the tile lines, also at the sides (Lens curve). Save.
    No measuring in the shop is needed.
 2. **+ Add area**: click the corners of the area on the floor (counter, each
-   Point of Purchase display, the corridor outside...), give it any name and a
-   kind, and a height range (Z). It is a 3D box on the floor; edit or delete
-   it any time.
+   Point of Purchase display, the Traffic walkway outside...), give it any
+   name and a kind, and a height range (Z). Areas must not overlap. Edit or
+   delete it any time.
 
 The box then knows, for every full-body person, their floor spot X / Y, their
 height Z and the area they are in (shown live on the camera details page, with
-a top-view floor map). `cctv_event.direction` is only **In** or **Out**; every
-row also gets `track_region` (where the person was):
+a top-view floor map). Every `cctv_event` row has a `direction` and a
+`track_region` (where the person was):
 
 | Event | direction | track_region |
 |---|---|---|
-| Walks In past the count line (or first seen on a "whole screen is In" camera) | In | Purchasing, or Counter when standing in a Counter area |
-| Walks into a **Counter** area | In | Counter |
-| Walks into a **Purchasing** area (POP display...) | In | Purchasing |
-| Walks Out (count line, or into an **Outside Shop** area) | Out | Outside Shop |
+| Walks into the shop (a Purchasing / Counter area, or seen on an Inside-only camera) | In | Purchasing, or Counter |
+| Moves to the other kind of area inside (Purchasing ↔ Counter) | In | Counter / Purchasing |
+| Walks from inside onto the **Traffic** walkway | Passed By | Traffic |
+| Walks from inside to a spot outside every area | Out | Out of Range |
+| Not seen by any camera for `TRACK_KEEP_SECONDS` (or box restarted) | Out | Out of Range |
+
+(`Not Detected` and `Out of Range` are the column defaults; the box never
+writes `Not Detected`.)
 
 The area's own name (e.g. "POP Display – Shoes") is only shown on the live
 video, not saved.
 
-People are counted once per visit, so the extra In rows for areas never make
-"People In" bigger.
+People are counted once per visit (track_id), so the extra In rows for areas
+never make "People Walk-in" bigger. Time in the shop (dashboard "Top 5
+Longest Stay") = from each In until the next Passed By (or Out), added up
+when a visitor comes back.
 
-A visitor walking into an area gets ONE event, whichever camera sees it
-first. `REGION_MIN_SECONDS` (default 1 s) is how long they must stand in the
-area before it counts. Run `supabase/cctv_event_track_region.sql` once first
-(it also makes sure `camera.floor_areas` exists, removes `cctv_event.zone_name`
-and limits `direction` to In / Out).
+Run `supabase/cctv_event_traffic.sql` once first (it removes
+`camera.count_line`, renames Outside Shop areas to Traffic, and sets the
+direction / track_region values).
 
 Test on the PC with a saved area file:
-`python main.py --offline --source test.mp4 --line 0.1,0.6,0.9,0.6 --zones zone.json --show`
-
-The dashboard counts **people** (visits), not events: People In = visits with
-an In, People Out = visits with an Out, People Still Inside = visits whose
-newest event is In.
+`python main.py --offline --source test.mp4 --zones areas.json --show`
 
 To delete all tracking records and start again, see
 `supabase/reset_tracking.sql` (stop the box first).

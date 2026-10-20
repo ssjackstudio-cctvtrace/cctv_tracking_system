@@ -12,7 +12,6 @@ import MemberPage from './Memberpage'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
-import { closedForTheDay } from './shopHours'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
@@ -96,39 +95,13 @@ type Counts = {
   inMale: number | null
   inFemale: number | null
   inUnknown: number | null
-  outCount: number | null
-  outMale: number | null
-  outFemale: number | null
-  outUnknown: number | null
-  insideCount: number | null
-  insideMale: number | null
-  insideFemale: number | null
-  insideUnknown: number | null
   dealed: number | null
 }
 
-// People inside right now, as the edge box's 4 cameras see them (edge_device.people_inside).
-// One person = one track_id, so someone seen by 2 cameras at once is counted once.
 type Tally = { all: number; male: number; female: number; unknown: number }
-const LIVE_INSIDE_FRESH_MS = 2 * 60_000 // older than this: the box is off, the number is not live
-const LIVE_INSIDE_REFRESH_MS = 10_000
 
-async function loadLiveInside(branch: string): Promise<Tally | null> {
-  const { data, error } = await supabase.from(TABLES.edgeDevice).select('people_inside').eq('branch_id', branch)
-  if (error) return null // supabase/people_inside.sql not run yet
-  const sum: Tally = { all: 0, male: 0, female: 0, unknown: 0 }
-  let fresh = false
-  for (const row of (data ?? []) as { people_inside: (Tally & { at?: string }) | null }[]) {
-    const p = row.people_inside
-    if (!p?.at || Date.now() - new Date(p.at).getTime() > LIVE_INSIDE_FRESH_MS) continue
-    fresh = true
-    sum.all += p.all ?? 0
-    sum.male += p.male ?? 0
-    sum.female += p.female ?? 0
-    sum.unknown += p.unknown ?? 0
-  }
-  return fresh ? sum : null
-}
+// One finished stay in the shop (Top 5 Longest Stay)
+type Stay = { trackId: string; gender: string; seconds: number }
 
 const pad = (n: number) => String(n).padStart(2, '0')
 // Local calendar day of a timestamp, e.g. 2026-09-30
@@ -183,30 +156,94 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 
 // People, not events: one person (one track_id) can be seen going In by several
 // cameras and walk into several areas, so each number counts distinct track_ids.
-//   People In           = distinct track_ids with an In event
-//   People Out          = distinct track_ids with an Out event
-//   People Still Inside = distinct track_ids whose newest event is In
-//                         (only used today while the edge box is not reporting live;
-//                          with the box live, the 4 cameras' live count is shown, and
-//                          after closing time / on past days it is 0: the shop is closed)
-// Male + Female + Unknown = the total.
+//   People Walk-in = distinct track_ids with an In event (Male + Female + Unknown = the total)
+// Time in the shop, per track_id: from an In (Purchasing / Counter) until the
+// next Passed By (walked onto the Traffic walkway) or Out; a person who comes
+// back in later adds that stay too. A stay that has not ended yet is left out.
 export function countPeople(events: PersonEvent[]) {
-  const people = new Map<string, { gender: string; wentIn: boolean; wentOut: boolean; last: string }>()
+  const people = new Map<string, { gender: string; wentIn: boolean; since: number | null; seconds: number; ended: boolean }>()
   for (const e of events) {
+    // events come oldest first
     const key = e.visit?.track_id ?? e.visit_id
-    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, wentOut: false, last: '' }
-    if (e.direction === 'In') p.wentIn = true
-    if (e.direction === 'Out') p.wentOut = true
-    if (e.direction === 'In' || e.direction === 'Out') p.last = e.direction // events come oldest first
+    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, since: null, seconds: 0, ended: false }
+    const t = new Date(e.event_time).getTime()
+    if (e.direction === 'In') {
+      p.wentIn = true
+      if (p.since === null) p.since = t // came into the shop (another In while inside = moved to another area)
+    } else if ((e.direction === 'Passed By' || e.direction === 'Out') && p.since !== null) {
+      p.seconds += Math.max(0, (t - p.since) / 1000)
+      p.since = null
+      p.ended = true
+    }
     people.set(key, p)
   }
-  const tally = (keep: (p: { wentIn: boolean; wentOut: boolean; last: string }) => boolean): Tally => {
-    const list = [...people.values()].filter(keep)
-    const male = list.filter((p) => p.gender === 'Male').length
-    const female = list.filter((p) => p.gender === 'Female').length
-    return { all: list.length, male, female, unknown: list.length - male - female }
-  }
-  return { in: tally((p) => p.wentIn), out: tally((p) => p.wentOut), inside: tally((p) => p.last === 'In') }
+  const list = [...people.values()].filter((p) => p.wentIn)
+  const male = list.filter((p) => p.gender === 'Male').length
+  const female = list.filter((p) => p.gender === 'Female').length
+  const walkIn: Tally = { all: list.length, male, female, unknown: list.length - male - female }
+  const longest: Stay[] = [...people.entries()]
+    .filter(([, p]) => p.ended && p.seconds >= 1)
+    .map(([trackId, p]) => ({ trackId, gender: p.gender, seconds: Math.round(p.seconds) }))
+    .sort((x, y) => y.seconds - x.seconds)
+    .slice(0, 5)
+  return { in: walkIn, longest }
+}
+
+// 754 s → "12 min 34 sec"
+const fmtStay = (seconds: number) => `${Math.floor(seconds / 60)} min ${pad(seconds % 60)} sec`
+
+// Top 5 Longest Stay: podium for the top 3 (2nd, 1st, 3rd), then 4th and 5th as rows
+function LongestStay({ branchName, stays, loading }: { branchName: string; stays: Stay[] | null; loading: boolean }) {
+  const podium = stays ? [stays[1], stays[0], stays[2]] : []
+  const places = [2, 1, 3]
+  return (
+    <section className="ds-panel ds-stay">
+      <h2>Top 5 Longest Stay in {branchName || '—'}</h2>
+      <p className="ds-stay-note">Time from walking in (Purchasing / Counter) until Passed By on the Traffic walkway.</p>
+      {loading && !stays ? (
+        <p className="ds-empty">Loading…</p>
+      ) : !stays || stays.length === 0 ? (
+        <p className="ds-empty">No finished stays on this day yet.</p>
+      ) : (
+        <>
+          <div className="ds-podium">
+            {podium.map((s, i) =>
+              s ? (
+                <div className={`ds-podium-card ds-podium-card--${places[i]}`} key={s.trackId}>
+                  <span className="ds-podium-rank">{places[i]}</span>
+                  <dl>
+                    <dt>Track_Id</dt>
+                    <dd className="ds-podium-track">{s.trackId}</dd>
+                    <dt>Gender</dt>
+                    <dd>{s.gender}</dd>
+                    <dt>Time Taken</dt>
+                    <dd className="ds-podium-time">{fmtStay(s.seconds)}</dd>
+                  </dl>
+                </div>
+              ) : (
+                <div className={`ds-podium-card ds-podium-card--${places[i]} ds-podium-card--empty`} key={`empty-${places[i]}`}>
+                  <span className="ds-podium-rank">{places[i]}</span>
+                  <p>—</p>
+                </div>
+              ),
+            )}
+          </div>
+          {stays.length > 3 && (
+            <ol className="ds-stay-rows" start={4}>
+              {stays.slice(3).map((s, i) => (
+                <li key={s.trackId}>
+                  <span className="ds-stay-rank">{i + 4}</span>
+                  <span className="ds-stay-track">{s.trackId}</span>
+                  <span>{s.gender}</span>
+                  <span className="ds-stay-time">{fmtStay(s.seconds)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </>
+      )}
+    </section>
+  )
 }
 
 // Number of transactions with status 'Dealed' (branch = branch of the matched event's camera's edge box)
@@ -259,18 +296,9 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     inMale: null,
     inFemale: null,
     inUnknown: null,
-    outCount: null,
-    outMale: null,
-    outFemale: null,
-    outUnknown: null,
-    insideCount: null,
-    insideMale: null,
-    insideFemale: null,
-    insideUnknown: null,
     dealed: null,
   })
-  // Today: people inside right now, from the 4 cameras (refreshed every 10 s)
-  const [liveInside, setLiveInside] = useState<Tally | null>(null)
+  const [longest, setLongest] = useState<Stay[] | null>(null)
   const [events, setEvents] = useState<LatestEvent[]>([])
   const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
   const [eventTab, setEventTab] = useState<EventTab>('cctv')
@@ -331,16 +359,9 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
         inMale: p ? p.in.male : null,
         inFemale: p ? p.in.female : null,
         inUnknown: p ? p.in.unknown : null,
-        outCount: p ? p.out.all : null,
-        outMale: p ? p.out.male : null,
-        outFemale: p ? p.out.female : null,
-        outUnknown: p ? p.out.unknown : null,
-        insideCount: p ? p.inside.all : null,
-        insideMale: p ? p.inside.male : null,
-        insideFemale: p ? p.inside.female : null,
-        insideUnknown: p ? p.inside.unknown : null,
         dealed: dealRes.error ? null : dealRes.count,
       })
+      setLongest(p ? p.longest : null)
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
       setRecognitions(recRes.error ? [] : ((recRes.data ?? []) as unknown as LatestRecognition[]))
       setLoading(false)
@@ -350,73 +371,22 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     }
   }, [branch, day])
 
-  // People still inside today = what the 4 cameras see now (each person once)
-  const isToday = day === todayKey()
-  // Shop closed: a past day, or today after closing time → nobody is still inside.
-  // (Visits that never got an Out — e.g. the person left while no camera saw the
-  // door — must not keep counting as "inside" after the shop closed.)
-  const [clock, setClock] = useState(() => new Date())
-  useEffect(() => {
-    const timer = setInterval(() => setClock(new Date()), 60_000)
-    return () => clearInterval(timer)
-  }, [])
-  const shopClosed = day < todayKey() || (isToday && closedForTheDay(clock))
-  useEffect(() => {
-    setLiveInside(null)
-    if (!branch || !isToday) return
-    let cancelled = false
-    const load = () => loadLiveInside(branch).then((t) => !cancelled && setLiveInside(t))
-    load()
-    const timer = setInterval(load, LIVE_INSIDE_REFRESH_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [branch, isToday])
-
   const stats: {
     label: string
     value: number | null
     male?: number | null
     female?: number | null
     unknown?: number | null
-    tone?: 'in' | 'out' | 'inside'
+    tone?: 'in'
   }[] = [
     {
-      label: 'People In',
+      label: 'People Walk-in',
       value: counts.inCount,
       male: counts.inMale,
       female: counts.inFemale,
       unknown: counts.inUnknown,
       tone: 'in',
     },
-    {
-      label: 'People Out',
-      value: counts.outCount,
-      male: counts.outMale,
-      female: counts.outFemale,
-      unknown: counts.outUnknown,
-      tone: 'out',
-    },
-    liveInside
-      ? {
-          label: 'People Still Inside (now, 4 cameras)',
-          value: liveInside.all,
-          male: liveInside.male,
-          female: liveInside.female,
-          unknown: liveInside.unknown,
-          tone: 'inside',
-        }
-      : shopClosed
-        ? { label: 'People Still Inside', value: 0, male: 0, female: 0, unknown: 0, tone: 'inside' }
-        : {
-          label: 'People Still Inside',
-          value: counts.insideCount,
-          male: counts.insideMale,
-          female: counts.insideFemale,
-          unknown: counts.insideUnknown,
-          tone: 'inside',
-        },
     { label: 'Transactions Dealed', value: counts.dealed },
   ]
 
@@ -456,7 +426,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
       {filterError && <p className="ds-error">Some filters failed to load: {filterError}</p>}
       {error && <p className="ds-error">Some numbers failed to load: {error}</p>}
 
-      <section className="ds-stats">
+      <section className="ds-stats ds-stats--two">
         {stats.map((s) => (
           <div className={s.tone ? `ds-stat ds-stat--${s.tone}` : 'ds-stat'} key={s.label}>
             <div className="ds-stat-row">
@@ -482,6 +452,12 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
           </div>
         ))}
       </section>
+
+      <LongestStay
+        branchName={branches.find((b) => b.branch_id === branch)?.branch_name ?? ''}
+        stays={longest}
+        loading={loading}
+      />
 
       <section className="ds-panel">
         <h2>Latest events (top 50)</h2>

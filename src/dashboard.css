@@ -210,6 +210,65 @@
 .ds-more:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
 
 .ds-panel { margin-top: 1rem; background: var(--ds-card); border-radius: 6px; padding: 1rem 1.25rem; }
+/* Dashboard with 2 cards: People Walk-in, Transactions Dealed */
+.ds-stats.ds-stats--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 600px) { .ds-stats.ds-stats--two { grid-template-columns: 1fr; } }
+
+/* Top 5 Longest Stay: podium (2nd, 1st, 3rd), then 4th and 5th as rows */
+.ds-stay-note { margin: -0.4rem 0 1rem; font-size: 0.85rem; color: var(--ds-muted); }
+.ds-podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; align-items: end; }
+.ds-podium-card {
+  position: relative;
+  border-radius: 8px;
+  padding: 1.6rem 1rem 1rem;
+  background: var(--ds-paper);
+  border-top: 4px solid #b8c4c9;
+  min-width: 0;
+}
+.ds-podium-card--1 { min-height: 13rem; border-top-color: var(--ds-lens); background: #fff6e8; }
+.ds-podium-card--2 { min-height: 11.5rem; border-top-color: #9aa9b0; }
+.ds-podium-card--3 { min-height: 10rem; border-top-color: #c98a4b; }
+.ds-podium-card--empty { display: flex; align-items: center; justify-content: center; color: var(--ds-muted); }
+.ds-podium-rank {
+  position: absolute;
+  top: -0.9rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #fff;
+  background: #9aa9b0;
+}
+.ds-podium-card--1 .ds-podium-rank { background: var(--ds-lens); }
+.ds-podium-card--3 .ds-podium-rank { background: #c98a4b; }
+.ds-podium-card dl { margin: 0; display: grid; gap: 0.15rem; }
+.ds-podium-card dt { font-size: 0.75rem; color: var(--ds-muted); margin-top: 0.4rem; }
+.ds-podium-card dd { margin: 0; font-weight: 600; color: var(--ds-text); overflow-wrap: anywhere; }
+.ds-podium-track { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+.ds-podium-time { font-size: 1.15rem; }
+.ds-podium-card--1 .ds-podium-time { font-size: 1.35rem; }
+.ds-stay-rows { list-style: none; margin: 1rem 0 0; padding: 0; }
+.ds-stay-rows li {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 2fr) minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.6rem 0.25rem;
+  border-top: 1px solid #e3e9e7;
+}
+.ds-stay-rank { font-weight: 700; color: var(--ds-muted); text-align: center; }
+.ds-stay-track { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
+.ds-stay-time { font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  .ds-podium { grid-template-columns: 1fr; }
+  .ds-podium-card { min-height: 0 !important; }
+  .ds-podium-card--1 { order: -1; }
+}
+
 .ds-panel h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
 .ds-empty { padding: 2rem 0; text-align: center; color: var(--ds-muted); }
 

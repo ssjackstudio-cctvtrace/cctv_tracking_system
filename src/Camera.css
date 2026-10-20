@@ -492,6 +492,20 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* Out of Range: the picture outside every drawn area */
+.cam-areas-oor {
+  fill: rgba(71, 85, 105, 0.35);
+  stroke: none;
+}
+
+.cam-line-actions .cam-areas-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
 .cam-areas-floor {
   fill-opacity: 0.22;
   stroke-width: 2;
