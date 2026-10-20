@@ -428,7 +428,8 @@ class CameraWorker(threading.Thread):
 
             for crossing in self.counter.update({p.tid: p.feet for p in people}, now=now):
                 p = by_tid.get(crossing.track_id)
-                self._record(crossing.track_id, crossing.direction, p.conf if p else 0.0, now, crossing.from_out)
+                self._record(crossing.track_id, crossing.direction, p.conf if p else 0.0, now, crossing.from_out,
+                             person=p, frame=frame)
             self._make_visitors(frame, by_tid, now)
             self._walk_regions(people, now)
 
@@ -650,13 +651,22 @@ class CameraWorker(threading.Thread):
         self._look_n[tid] = self._look_n.get(tid, 0) + 1
 
     # ---------- In / Out ----------
-    def _record(self, tid: int, direction: str, conf: float, when: float, from_out: bool = False) -> None:
+    def _record(self, tid: int, direction: str, conf: float, when: float, from_out: bool = False,
+                person: Person | None = None, frame: np.ndarray | None = None) -> None:
         v = self._link.get(tid)
         if v is not None and v.left:
             v = None
         if direction == "Out":
+            linked = v is not None
+            if v is None:  # feet crossed to Out, but this number has no track_id yet: find the existing one
+                v = self._recognise_leaving(tid, person, frame, conf, when)
             if v is not None:
                 self._went_out(v, conf, tid, when)
+                if not linked:  # after the Out (outside: no mark_in, so no second Out on this camera)
+                    self._attach(tid, v, when, "recognised while walking out")
+                    if person is not None:
+                        self.registry.seen(v, self.camera["camera_id"], when, self._plan(person),
+                                           person.height, person.conf)
             return  # never In as a known visitor: Out is not recorded
         if v is not None:
             if v.outside and not from_out:
@@ -699,10 +709,49 @@ class CameraWorker(threading.Thread):
             v, created = self.registry.find_or_create(
                 sig, self._plan(p), busy, lambda: self._new_visitor(tid, sig, p, now), now=now,
                 visible_only=from_out or tid in self._from_outside,
+                camera_id=cam_id, when=when,  # overlapping cameras: hand off to the visitor another camera sees
             )
             self._attach(tid, v, now, "new visitor" if created else "recognised, seen by another camera")
             self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
             self._camera_in(v, conf, tid, when)
+
+    def _recognise_leaving(self, tid: int, p: Person | None, frame: np.ndarray | None, conf: float,
+                           now: float) -> Visitor | None:
+        """Feet crossed the count line into the Out area, but this tracker
+        number is not linked to a visitor yet (the person went In on ANOTHER
+        camera, or this camera gave them a new number, or their visit was still
+        being decided). Find the visitor they are, so the Out is recorded for
+        the EXISTING track_id, never a new one.
+        Nobody matches: a person this camera counted In and who stayed inside
+        at least NEW_VISITOR_HOLD_SECONDS gets their visit now (In, then the
+        caller records Out); a passer-by who only stepped over the line gets
+        nothing."""
+        pending = self._pending.pop(tid, None)  # walked out: never make a visit for them later
+        if p is None:
+            return None
+        cam_id = self.camera["camera_id"]
+        if tid not in self._look and self._recog is not None and frame is not None:
+            self._add_look(tid, self._recog.look(frame, p.box, p.height, heavy=True))
+        sig = self._look.get(tid)
+        # visitors followed as OTHER people in this picture right now cannot be this person
+        busy = {lv.visit_id for t, lv in self._link.items()
+                if t != tid and not lv.left and self._seen_at.get(t) == now}
+        v = self.registry.recognise(sig, self._plan(p), busy, cam_id, now,
+                                    when=pending[0] if pending else None) or \
+            self.registry.reclaim(sig, self._plan(p), busy, now)
+        if v is not None or pending is None:
+            return v
+        when, in_conf, from_out = pending
+        if now - when < NEW_VISITOR_HOLD_SECONDS:
+            return None  # only stepped over the line and back
+        v, created = self.registry.find_or_create(
+            sig, self._plan(p), busy, lambda: self._new_visitor(tid, sig, p, now), now=now,
+            visible_only=from_out or tid in self._from_outside, camera_id=cam_id, when=when)
+        if not created and v.outside:
+            return v  # went Out already on another camera: _went_out records nothing more
+        self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
+        self._camera_in(v, in_conf or conf, tid, when)
+        return v
 
     def _new_visitor(self, tid: int, sig: Look | None, p: Person, now: float) -> Visitor:
         """First camera to see this person go In: one visit row, with this
@@ -728,7 +777,7 @@ class CameraWorker(threading.Thread):
         same visit / track_id."""
         if v.outside and self.registry.come_back(v):
             log.info("person %s (%s) came back into the shop", tid, v.track_id)
-        if not self.registry.first_in(v, self.camera["camera_id"]):
+        if not self.registry.first_in(v, self.camera["camera_id"], when):
             return
         st = self._regions.get(tid)
         r = st.region if st is not None else None

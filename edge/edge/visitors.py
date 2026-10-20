@@ -36,8 +36,15 @@ Is this the same person? The registry compares, for every remembered visitor:
      in any of them = another person.
   3. A visitor already followed on this camera as a different person, in the
      same picture, is never a match (two people side by side).
+  4. Overlap handoff (cameras whose views overlap): if the strict look match
+     fails, a visitor ANOTHER camera sees right now, or who went In on another
+     camera at the same moment, is still this person unless the look is
+     clearly different. Two camera angles of one person rarely look alike
+     enough for the strict match, and a missed match = a duplicate visit.
 Two cameras that see a new person at the same moment ask the registry one at
 a time (find_or_create), so only one visit row can be made.
+An unlinked tracker number that crosses the count line to Out is recognised
+the same way (recognise), so its Out goes to the EXISTING track_id.
 
 Only numbers are kept in memory; no picture is saved or sent.
 """
@@ -71,6 +78,15 @@ POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long af
 # (the tracker often gives a new number while people pass behind the displays at the shop front)
 EXIT_LINK_SECONDS = float(os.getenv("EXIT_LINK_SECONDS", "8"))
 EXIT_LINK_SCORE = 1.8  # ... but only with a clearly matching look (score below this; lower = more alike)
+# Overlapping cameras (4 cameras in one shop): one person seen by 2 cameras at the
+# same moment looks different from each side (other angle, other light), so the
+# strict look match can miss and the 2nd camera would make a DUPLICATE visit with
+# a new track_id. Handoff: a visitor ANOTHER camera sees right now (or who went In
+# on another camera a moment ago), and whom this camera is not following yet, is
+# the same person unless the look is clearly different (looser match).
+OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "2.0"))  # "seen by another camera right now"
+OVERLAP_IN_SECONDS = float(os.getenv("OVERLAP_IN_SECONDS", "4.0"))  # In on 2 cameras this close = same entry
+OVERLAP_DISTANCE = float(os.getenv("OVERLAP_DISTANCE", str(LOOSE_DISTANCE)))  # look match allowed for a handoff
 
 
 @dataclass(eq=False)
@@ -80,6 +96,7 @@ class Visitor:
     first_camera: str = ""
     look: Look = field(default_factory=Look)  # face + attire + whole body, from all cameras
     cameras_in: set[str] = field(default_factory=set)  # cameras that already recorded In for this visit
+    in_at: dict[str, float] = field(default_factory=dict)  # camera_id → time that camera recorded In (handoff)
     seen_on: dict[str, float] = field(default_factory=dict)  # camera_id → last time seen there
     last_seen: float = field(default_factory=time.time)
     last_conf: float = 0.0  # detection confidence when last seen (for the closing Out event)
@@ -186,14 +203,73 @@ class VisitorRegistry:
             return self._match_locked(look, floor, exclude or set(), time.time() if now is None else now,
                                       visible_only, outside_only, inside_only, just_out)
 
+    def _handoff_locked(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
+                        camera_id: str, now: float, when: float | None) -> Visitor | None:
+        """Overlapping cameras: the visitor ANOTHER camera is following right now
+        (seen there in the last OVERLAP_SECONDS), or who went In on another
+        camera within OVERLAP_IN_SECONDS of `when` (this camera's In), and whom
+        this camera is not following as someone else. Same person unless the
+        look is clearly different (compare → None) or too far apart
+        (> OVERLAP_DISTANCE), or they stand somewhere else on the shop plan.
+        Without a look, only a visitor who went In on another camera at the
+        same moment, and only when exactly one does (no guessing)."""
+        best, best_s, blind = None, None, []
+        for v in self._inside.values():
+            if v.left or v.outside or v.visit_id in exclude or now - v.last_any > self._keep(v):
+                continue
+            others = [t for c, t in v.seen_on.items() if c != camera_id]
+            if not others:
+                continue  # only this camera knows them: the normal rules decide
+            mine = v.seen_on.get(camera_id)
+            if mine is not None and now - mine <= OVERLAP_SECONDS:
+                continue  # this camera is following them right now as another tracker number
+            seen_now = now - max(others) <= OVERLAP_SECONDS
+            went_in = when is not None and any(
+                c != camera_id and abs(t - when) <= OVERLAP_IN_SECONDS for c, t in v.in_at.items())
+            if not (seen_now or went_in):
+                continue
+            if floor is not None and v.floor is not None and now - v.floor_at <= POSITION_FRESH_SECONDS \
+                    and math.dist(floor, v.floor) > self.same_place:
+                continue  # standing somewhere else on the shop plan
+            if not comparable(look, v.look):
+                if went_in:
+                    blind.append(v)
+                continue
+            app = compare(look, v.look)
+            if app is None or app > OVERLAP_DISTANCE:
+                continue  # clearly another person
+            s = app - (0.05 if went_in else 0.0)  # went In at the same moment: a little more likely
+            if best_s is None or s < best_s:
+                best, best_s = v, s
+        if best is None and len(blind) == 1:
+            best = blind[0]
+        return best
+
+    def recognise(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
+                  camera_id: str, now: float | None = None, when: float | None = None) -> Visitor | None:
+        """Which visitor INSIDE is this person, without making a new visit:
+        the strict match first, then the overlapping-camera handoff. Used when
+        an unlinked tracker number crosses the count line to Out, so the Out
+        is recorded for the person's EXISTING track_id."""
+        now = time.time() if now is None else now
+        with self._lock:
+            known = (look is not None and not look.empty) or floor is not None
+            v = self._match_locked(look, floor, exclude, now, inside_only=True) if known else None
+            return v or self._handoff_locked(look, floor, exclude, camera_id, now, when)
+
     def find_or_create(self, look, floor, exclude: set[str], create: Callable[[], Visitor],
-                       now: float | None = None, visible_only: bool = False) -> tuple[Visitor, bool]:
+                       now: float | None = None, visible_only: bool = False,
+                       camera_id: str | None = None, when: float | None = None) -> tuple[Visitor, bool]:
         """Same as match, and if nobody matches, create the visitor — in one step,
-        so two cameras seeing the same new person at once make only ONE visit."""
+        so two cameras seeing the same new person at once make only ONE visit.
+        camera_id given: before creating, also try the overlapping-camera handoff
+        (when = time this camera saw the person go In)."""
         now = time.time() if now is None else now
         with self._lock:
             known = (look is not None and not look.empty) or floor is not None
             v = self._match_locked(look, floor, exclude, now, visible_only) if known else None
+            if v is None and camera_id is not None:
+                v = self._handoff_locked(look, floor, exclude, camera_id, now, when)
             if v is not None:
                 return v, False
             v = create()
@@ -219,12 +295,13 @@ class VisitorRegistry:
             if height is not None:
                 visitor.height = height if visitor.height is None else visitor.height * 0.8 + height * 0.2
 
-    def first_in(self, visitor: Visitor, camera_id: str) -> bool:
+    def first_in(self, visitor: Visitor, camera_id: str, when: float | None = None) -> bool:
         """True once per camera per visit: this camera records its In event now."""
         with self._lock:
             if visitor.left or camera_id in visitor.cameras_in:
                 return False
             visitor.cameras_in.add(camera_id)
+            visitor.in_at[camera_id] = time.time() if when is None else when
             return True
 
     def set_region(self, visitor: Visitor, region, camera_id: str) -> bool:

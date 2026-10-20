@@ -224,6 +224,21 @@ How the box knows it is the same person:
    the same floor spot (within `SAME_PLACE_METRES`, default 0.9 m).
 3. Someone already followed as a different person in the same picture is
    never a match (two people side by side).
+4. **Overlap handoff** — one person seen from 2 camera angles often does not
+   look alike enough for the strict match in 1, and a missed match used to make
+   a duplicate visit with the 2nd camera's track_id. Now, before a new visit
+   is made, a visitor that **another camera sees right now** (`OVERLAP_SECONDS`,
+   default 2) or that **went In on another camera at the same moment**
+   (`OVERLAP_IN_SECONDS`, default 4) is taken, unless the look is clearly
+   different (looser limit `OVERLAP_DISTANCE`, default 0.675). The 2nd camera
+   then writes its cctv_event rows with the first camera's visit_id / track_id.
+5. **Out on a camera that has no track_id for the person yet** — e.g. they
+   went In on camera 1 and walk out through camera 2's count line before
+   camera 2 linked them. The feet crossing into the Out area now recognises
+   them (rules 1–4) and records the Out for their **existing** track_id; the
+   track_id is then remembered outside for `OUTSIDE_KEEP_SECONDS`. Someone
+   who only stepped over the line and back (less than
+   `NEW_VISITOR_HOLD_SECONDS`) gets nothing recorded.
 
 **People Still Inside** on the dashboard (today) is what the cameras see right
 now: every visitor seen by any camera in the last 5 minutes (TRACK_KEEP_SECONDS), each person once
