@@ -154,6 +154,14 @@ def comparable(a: Look | None, b: Look | None) -> bool:
     return any(getattr(a, n) is not None and getattr(b, n) is not None for n in ("attire", "face", "body", "height"))
 
 
+def same_face(a: Look | None, b: Look | None) -> bool:
+    """True when both looks have a face and it is SURELY the same face (the
+    strongest evidence: it may overrule small differences elsewhere)."""
+    if a is None or b is None or a.face is None or b.face is None:
+        return False
+    return float(a.face @ b.face) >= FACE_SAME + 0.1
+
+
 def compare(a: Look | None, b: Look | None) -> float | None:
     """0 = surely the same person, 1 = nothing alike, None = clearly a
     different person (or nothing to compare)."""

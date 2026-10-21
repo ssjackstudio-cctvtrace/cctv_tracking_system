@@ -257,7 +257,10 @@ How the box knows it is the same person:
    the `REID_*` values in `.env`.
 2. **Floor position** (optional) — cameras marked "Placed on the shop plan"
    in Adjust 3D floor share one floor: a person seen by two of them stands on
-   the same floor spot (within `SAME_PLACE_METRES`, default 0.9 m).
+   the same floor spot (within `SAME_PLACE_METRES`, default 0.9 m). When the
+   face is surely the same, up to `FLOOR_FACE_METRES` (default 2.0 m) apart is
+   still the same person, so a small calibration error between two cameras
+   never gives one person a second track_id.
 3. Someone already followed as a different person in the same picture is
    never a match (two people side by side).
 4. **Overlap handoff** — one person seen from 2 camera angles often does not

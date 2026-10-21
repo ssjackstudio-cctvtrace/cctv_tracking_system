@@ -78,7 +78,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .demographics import Estimate
-from .reid import MAX_DISTANCE, Look, appearance, attire_distance, comparable, compare
+from .reid import MAX_DISTANCE, Look, appearance, attire_distance, comparable, compare, same_face
 
 # Older names, kept for other modules
 distance = attire_distance
@@ -93,6 +93,11 @@ LOOSE_DISTANCE = min(0.9, MAX_DISTANCE * 1.5)  # look match for a hidden visitor
 HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have walked in KEEP_SECONDS (cameras on the shop plan)
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
 POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long after it was seen
+# Cameras on the shop plan are calibrated by hand, so two cameras can put the SAME person
+# a little apart (more for people far from a camera). A floor difference above
+# SAME_PLACE_METRES normally means "someone else", but when the face is surely the same,
+# up to this far apart is still the same person (no second track_id for them).
+FLOOR_FACE_METRES = float(os.getenv("FLOOR_FACE_METRES", "2.0"))
 # Someone first seen OUTSIDE may be a visitor who was inside this recently: they just walked out
 # (the tracker often gives a new number while people pass behind the displays at the shop front)
 EXIT_LINK_SECONDS = float(os.getenv("EXIT_LINK_SECONDS", "8"))
@@ -177,7 +182,10 @@ class VisitorRegistry:
         if fresh:
             d = math.dist(floor, v.floor)  # type: ignore[arg-type]
             if d > self.same_place:
-                return None  # that visitor is somewhere else on the floor right now
+                if d > FLOOR_FACE_METRES or not same_face(look, v.look):
+                    return None  # that visitor is somewhere else on the floor right now
+                # the cameras' floor spots differ a little, but it is surely the same face
+                return 1.0 + (app / self.max_distance if app is not None else 0.0)
             if app is not None and app > min(0.95, self.max_distance * 1.6):
                 return None  # same spot but clearly a different look
             # same floor spot: strong evidence (ranks before look-only matches)
@@ -185,7 +193,9 @@ class VisitorRegistry:
         moved = None
         if floor is not None and v.floor is not None:  # last seen a while ago: could they have walked here?
             moved = math.dist(floor, v.floor)
-            if moved > self.same_place + PERSON_SPEED_MPS * max(0.0, now - v.floor_at):
+            walk = PERSON_SPEED_MPS * max(0.0, now - v.floor_at)
+            if moved > self.same_place + walk and \
+                    not (moved <= FLOOR_FACE_METRES + walk and same_face(look, v.look)):
                 return None  # too far from where that visitor was last seen
         if app is None or app >= self.max_distance:
             return None
@@ -268,9 +278,10 @@ class VisitorRegistry:
                 c != camera_id and abs(t - when) <= OVERLAP_IN_SECONDS for c, t in v.in_at.items())
             if not (seen_now or went_in):
                 continue
-            if floor is not None and v.floor is not None and now - v.floor_at <= POSITION_FRESH_SECONDS \
-                    and math.dist(floor, v.floor) > self.same_place:
-                continue  # standing somewhere else on the shop plan
+            if floor is not None and v.floor is not None and now - v.floor_at <= POSITION_FRESH_SECONDS:
+                apart = math.dist(floor, v.floor)
+                if apart > self.same_place and not (apart <= FLOOR_FACE_METRES and same_face(look, v.look)):
+                    continue  # standing somewhere else on the shop plan (same face: calibration gap, allowed)
             if not comparable(look, v.look):
                 if went_in:
                     blind.append(v)
