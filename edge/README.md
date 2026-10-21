@@ -417,7 +417,8 @@ Turn it off with `DEMOGRAPHICS=off` in `.env`.
 
 ## Not in this version yet (phase 2)
 
-- Face recognition → `recognition_event`. The SQL function
-  `match_member_face` is ready for it.
+- Face recognition → `recognition_event`. The SQL function `match_face`
+  (members and staff, from `face_template`) is ready for it;
+  `match_member_face` still works for members only.
 - Rows waiting while the internet is down are kept in memory, so a power cut
   during an outage loses them.

@@ -34,7 +34,11 @@ type RecognitionEventRow = {
     est_age: number | null
     demographic_score: number | null
   } | null
-  member_face_template: { member: { member_no: string; full_name: string } | null } | null
+  // the matched face belongs to a member OR a staff
+  face_template: {
+    member: { member_no: string; full_name: string } | null
+    staff: { staff_no: string; full_name: string } | null
+  } | null
 }
 
 // DD Month YYYY hh:mm AM/PM, e.g. 05 March 2026 03:45 PM
@@ -125,16 +129,17 @@ export function CctvEventsTable({ limit = 100, day }: { limit?: number; day?: st
 }
 
 // select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
-//        m.member_no, m.full_name, re.match_score, re.result, re.event_time
+//        coalesce(m.member_no, s.staff_no), coalesce(m.full_name, s.full_name), re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id join visit v on re.visit_id = v.visit_id
-// join member_face_template mft on re.face_template_id = mft.face_template_id join member m on mft.member_id = m.member_id
+// join face_template ft on re.face_template_id = ft.face_template_id
+// left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
 function RecognitionEventsTable({ limit = 100, day }: { limit?: number; day?: string }) {
   const t = useRows<RecognitionEventRow>(
     () => {
       let q = supabase
         .from(TABLES.recognitionEvent)
         .select(
-          'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), member_face_template!inner(member!inner(member_no, full_name))',
+          'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), face_template!inner(member(member_no, full_name), staff(staff_no, full_name))',
         )
       if (day) q = q.gte('event_time', dayRange(day)[0]).lt('event_time', dayRange(day)[1])
       return q.order('event_time', { ascending: false }).limit(day ? Math.max(limit, DAY_LIMIT) : limit)
@@ -156,8 +161,14 @@ function RecognitionEventsTable({ limit = 100, day }: { limit?: number; day?: st
         { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
         { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
         { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
-        { header: 'Member no.', render: (r) => r.member_face_template?.member?.member_no ?? '—' },
-        { header: 'Full name', render: (r) => r.member_face_template?.member?.full_name ?? '—' },
+        {
+          header: 'Member / Staff no.',
+          render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
+        },
+        {
+          header: 'Full name',
+          render: (r) => r.face_template?.member?.full_name ?? r.face_template?.staff?.full_name ?? '—',
+        },
         { header: 'Match score', render: (r) => fmt2(r.match_score) },
         { header: 'Result', render: (r) => <Badge text={r.result} /> },
         { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },

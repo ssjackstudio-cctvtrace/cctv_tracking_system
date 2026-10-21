@@ -86,7 +86,8 @@ type LatestRecognition = {
   result: string
   event_time: string
   camera: { camera_name: string } | null
-  member_face_template: { member: { member_no: string } | null } | null
+  // the matched face belongs to a member OR a staff
+  face_template: { member: { member_no: string } | null; staff: { staff_no: string } | null } | null
   visit: { est_gender: string; est_age: number | null } | null
 }
 
@@ -320,15 +321,16 @@ function latestEvents(branch: string, range: Range) {
   return q.order('event_time', { ascending: false }).limit(50)
 }
 
-// select ca.camera_name, m.member_no, v.est_gender, v.est_age, re.match_score, re.result, re.event_time
+// select ca.camera_name, coalesce(m.member_no, s.staff_no), v.est_gender, v.est_age, re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id
-// join member_face_template mft on re.face_template_id = mft.face_template_id
-// join member m on mft.member_id = m.member_id join visit v on re.visit_id = v.visit_id  (latest 50)
+// join face_template ft on re.face_template_id = ft.face_template_id
+// left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
+// join visit v on re.visit_id = v.visit_id  (latest 50)
 function latestRecognitions(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.recognitionEvent)
     .select(
-      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), member_face_template!inner(member!inner(member_no)), visit!inner(est_gender, est_age)',
+      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), face_template!inner(member(member_no), staff(staff_no)), visit!inner(est_gender, est_age)',
     )
   if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
@@ -578,7 +580,10 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
             rowKey={(r) => r.recognition_event_id}
             columns={[
               { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
-              { header: 'Member no.', render: (r) => r.member_face_template?.member?.member_no ?? '—' },
+              {
+                header: 'Member / Staff no.',
+                render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
+              },
               { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
               { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
               { header: 'Match score', render: (r) => `${Number(r.match_score).toFixed(2)}%` },

@@ -94,6 +94,7 @@ export type Visit = {
   visit_id: string
   branch_id: string
   member_id: string | null
+  staff_id: string | null // set for a Staff visit (never together with member_id)
   track_id: string
   visit_type: 'Member' | 'Staff' | 'Guest' // Guest = default (not recognised as a member or staff)
   est_gender: 'Male' | 'Female' | 'Unknown'
@@ -154,10 +155,31 @@ export type MemberEditable = Pick<
   'member_no' | 'full_name' | 'phone_number' | 'email' | 'consent_pdpa' | 'status'
 >
 
-// ---------- MEMBER_FACE_TEMPLATE ----------
-export type MemberFaceTemplate = {
+// ---------- STAFF ----------
+export type Staff = {
+  staff_id: string
+  staff_no: string
+  full_name: string
+  phone_number: string | null
+  email: string | null
+  consent_pdpa: boolean
+  status: 'Active' | 'Inactive' | 'Resigned'
+  designed_at: string // date the person became staff
+  resigned_at: string | null // null while still working; required when status is Resigned
+  branch_id: string
+}
+
+export type StaffEditable = Pick<
+  Staff,
+  'staff_no' | 'full_name' | 'phone_number' | 'email' | 'consent_pdpa' | 'status' | 'designed_at' | 'resigned_at' | 'branch_id'
+>
+
+// ---------- FACE_TEMPLATE ----------
+// A face of a member OR a staff: exactly one of member_id / staff_id is set.
+export type FaceTemplate = {
   face_template_id: string
-  member_id: string
+  member_id: string | null
+  staff_id: string | null
   embedding: string | number[] // pgvector column; PostgREST returns it as text like "[0.1,0.2,...]"
   model_name: string | null
   consent_biometric: true // database only accepts TRUE
