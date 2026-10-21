@@ -9,13 +9,16 @@ import EdgeDevicePage from './Edgedevicepage'
 import { EditEdgeDevicePage, NewEdgeDevicePage } from './Edgedeviceform'
 import EventsPage, { type EventTab } from './Eventspage'
 import MemberPage from './Memberpage'
+import MemberDetailsPage from './Memberdetails'
+import StaffPage from './Staffpage'
+import StaffDetailsPage from './Staffdetails'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
-type PageKey = 'dashboard' | 'branch' | 'camera' | 'edge-device' | 'eventhistory' | 'members' | 'transactions'
+type PageKey = 'dashboard' | 'branch' | 'camera' | 'edge-device' | 'eventhistory' | 'staff' | 'members' | 'transactions'
 
 // Titles for sub-pages (the sidebar keeps the parent page highlighted on these)
 const SUB_TITLES: { match: RegExp; title: string }[] = [
@@ -26,6 +29,8 @@ const SUB_TITLES: { match: RegExp; title: string }[] = [
   { match: /^\/camera\/[^/]+\/edit$/, title: 'Edit Camera' },
   { match: /^\/edge-device\/new$/, title: 'New AI Edge Box' },
   { match: /^\/edge-device\/[^/]+\/edit$/, title: 'Edit AI Edge Box' },
+  { match: /^\/staff\/[^/]+$/, title: 'Staff Details' },
+  { match: /^\/members\/[^/]+$/, title: 'Member Details' },
 ]
 
 const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
@@ -34,6 +39,7 @@ const NAV: { key: PageKey; label: string; icon: ReactNode }[] = [
   { key: 'edge-device', label: 'AI Edge Device', icon: <path d="M6 6h12v12H6zM9.5 9.5h5v5h-5zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /> },
   { key: 'camera', label: 'Camera', icon: <path d="M3 7h4l2-3h6l2 3h4v13H3zM12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" /> },
   { key: 'eventhistory', label: 'Event History', icon: <path d="M13 2 4 14h7l-1 8 9-12h-7z" /> },
+  { key: 'staff', label: 'Staff', icon: <path d="M9 2h6v4H9zM5 4h4M15 4h4v18H5V4M12 14a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM8 19c.6-1.8 2.2-2.7 4-2.7s3.4.9 4 2.7" /> },
   { key: 'members', label: 'Member', icon: <path d="M3 5h18v14H3zM8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM5 16c.5-1.7 1.8-2.5 3-2.5s2.5.8 3 2.5M14 9h4M14 13h4" /> },
   { key: 'transactions', label: 'Transaction', icon: <path d="M3 7h16l-4-4M21 17H5l4 4" /> },
 ]
@@ -613,6 +619,22 @@ function EditEdgeDeviceRoute() {
   return <EditEdgeDevicePage edgeDeviceId={edgeDeviceId} onBack={() => navigate('/edge-device')} />
 }
 
+// /staff/:staffId
+function StaffDetailsRoute() {
+  const { staffId } = useParams()
+  const navigate = useNavigate()
+  if (!staffId) return <Navigate to="/staff" replace />
+  return <StaffDetailsPage staffId={staffId} onBack={() => navigate('/staff')} />
+}
+
+// /members/:memberId
+function MemberDetailsRoute() {
+  const { memberId } = useParams()
+  const navigate = useNavigate()
+  if (!memberId) return <Navigate to="/members" replace />
+  return <MemberDetailsPage memberId={memberId} onBack={() => navigate('/members')} />
+}
+
 // /eventhistory, /eventhistory?tab=recognition, /eventhistory?date=2026-10-18
 function EventsRoute() {
   const [params] = useSearchParams()
@@ -821,7 +843,10 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
           <Route path="/edge-device/new" element={<NewEdgeDevicePage onBack={() => navigate('/edge-device')} />} />
           <Route path="/edge-device/:edgeDeviceId/edit" element={<EditEdgeDeviceRoute />} />
           <Route path="/eventhistory" element={<EventsRoute />} />
-          <Route path="/members" element={<MemberPage />} />
+          <Route path="/staff" element={<StaffPage onView={(id) => navigate(`/staff/${id}`)} />} />
+          <Route path="/staff/:staffId" element={<StaffDetailsRoute />} />
+          <Route path="/members" element={<MemberPage onView={(id) => navigate(`/members/${id}`)} />} />
+          <Route path="/members/:memberId" element={<MemberDetailsRoute />} />
           <Route path="/transactions" element={<TransactionsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

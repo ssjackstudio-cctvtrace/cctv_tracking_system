@@ -148,6 +148,8 @@ export type Member = {
   consent_pdpa: boolean
   status: 'Active' | 'Inactive' | 'Terminated'
   joined_at: string
+  gender: 'Male' | 'Female' | null
+  dob: string | null // date of birth, YYYY-MM-DD
 }
 
 export type MemberEditable = Pick<
@@ -166,12 +168,26 @@ export type Staff = {
   status: 'Active' | 'Inactive' | 'Resigned'
   designed_at: string // date the person became staff
   resigned_at: string | null // null while still working; required when status is Resigned
+  gender: 'Male' | 'Female' | null
+  dob: string | null // date of birth, YYYY-MM-DD
+  position: string | null // job position, e.g. Cashier
   branch_id: string
 }
 
 export type StaffEditable = Pick<
   Staff,
-  'staff_no' | 'full_name' | 'phone_number' | 'email' | 'consent_pdpa' | 'status' | 'designed_at' | 'resigned_at' | 'branch_id'
+  | 'staff_no'
+  | 'full_name'
+  | 'phone_number'
+  | 'email'
+  | 'consent_pdpa'
+  | 'status'
+  | 'designed_at'
+  | 'resigned_at'
+  | 'branch_id'
+  | 'gender'
+  | 'dob'
+  | 'position'
 >
 
 // ---------- FACE_TEMPLATE ----------

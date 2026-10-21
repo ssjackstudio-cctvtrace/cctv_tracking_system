@@ -1,10 +1,15 @@
-/* Member page (uses the theme variables from dashboard.css) */
+/* Member and Staff pages (use the theme variables from dashboard.css).
+   "Collapsed" = the sidebar is hidden (.ds--collapsed) or the window is narrow. */
 
 /* Toolbar: one row when expanded */
-.mp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
-.mp-search { flex: 1 1 260px; min-width: 0; }
+.mp-toolbar { display: grid; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+.mp-toolbar--member { grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)); }
+.mp-toolbar--staff { grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); }
 .mp-toolbar input,
 .mp-toolbar select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 0.55rem 0.8rem;
   border: 1px solid #c9d3d0;
   border-radius: 6px;
@@ -15,20 +20,21 @@
 .mp-toolbar input:focus-visible,
 .mp-toolbar select:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
 
-.mp-date { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-.mp-date-label { color: var(--ds-muted); font-size: 0.9rem; }
-.mp-date-clear { padding: 0.4rem 0.75rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; font-size: 0.85rem; cursor: pointer; }
-.mp-date-clear:hover { background: var(--ds-paper); }
-
-/* Collapsed: search on its own row */
+/* Collapsed toolbar, two columns:
+   Member: search alone, then gender + status
+   Staff:  search + branch, then gender + status */
+.ds--collapsed .mp-toolbar--member,
+.ds--collapsed .mp-toolbar--staff { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ds--collapsed .mp-toolbar--member .mp-search { grid-column: 1 / -1; }
 @media (max-width: 760px) {
-  .mp-search { flex: 1 1 100%; }
-  .mp-select { flex: 1 1 0; min-width: 0; }
-  .mp-date { flex: 1 1 100%; }
+  .mp-toolbar--member,
+  .mp-toolbar--staff { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mp-toolbar--member .mp-search { grid-column: 1 / -1; }
 }
 
 /* Cards: 4 per row expanded, 2 per row collapsed */
 .mp-grid { display: grid; gap: 1rem; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.ds--collapsed .mp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 1100px) {
   .mp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -38,4 +44,49 @@
 .mc-details { display: grid; grid-template-columns: auto auto 1fr; gap: 0.4rem 0.5rem; font-size: 0.92rem; }
 .mc-row { display: contents; }
 .mc-label { color: var(--ds-muted); }
-.mc-value { overflow-wrap: anywhere; }
+.mc-value { overflow-wrap: anywhere; min-width: 0; }
+
+/* "View … Details" at the bottom right of each card */
+.mc-actions { display: flex; justify-content: flex-end; margin-top: auto; padding-top: 1rem; }
+.mc-btn {
+  padding: 0.5rem 0.9rem;
+  border: 0;
+  border-radius: 6px;
+  background: var(--ds-ink, #10202b);
+  color: #fff;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.mc-btn:hover { opacity: 0.88; }
+.mc-btn:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 2px; }
+
+/* Details pages */
+.pd-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pd-back:hover { background: #f1f5f9; }
+.pd-back:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.pd-back svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pd-card { max-width: 640px; }
+.pd-card .mc-details { font-size: 0.95rem; gap: 0.55rem 0.6rem; }
+
+/* Phone, 2 cards per row: label above its value so the value has the full card width */
+@media (max-width: 600px) {
+  .mp-grid { gap: 0.6rem; }
+  .mp-grid .mc { padding: 0.8rem 0.75rem; }
+  .mp-grid .mc-details { grid-template-columns: minmax(0, 1fr); gap: 0; font-size: 0.85rem; }
+  .mp-grid .mc-colon { display: none; }
+  .mp-grid .mc-label { font-size: 0.75rem; margin-top: 0.45rem; }
+  .mp-grid .mc-btn { width: 100%; padding: 0.5rem; font-size: 0.8rem; }
+}

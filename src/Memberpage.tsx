@@ -1,19 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
 import type { Member } from './types'
-import { Badge } from './Datatable'
+import { DetailList, GENDERS, StatusBadge, fmtDob, fmtLongDate, orDash } from './Peoplecards.tsx'
 import './Members.css'
 
-const COLUMNS = 'member_id, member_no, full_name, phone_number, email, consent_pdpa, status, joined_at'
+// select member_id, member_no, full_name, phone_number, gender, dob, email, status, joined_at from member
+const COLUMNS = 'member_id, member_no, full_name, phone_number, gender, dob, email, consent_pdpa, status, joined_at'
 const STATUSES: Member['status'][] = ['Active', 'Inactive', 'Terminated']
-
-const pad = (n: number) => String(n).padStart(2, '0')
-// Local calendar day, e.g. 2026-09-30
-const dayKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-// DD Month YYYY, e.g. 05 March 2026
-const fmtDate = (d: Date) =>
-  d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
 
 // Reads every member (pages of 1,000, up to 10,000 rows)
 async function loadMembers(): Promise<Member[]> {
@@ -32,39 +26,37 @@ async function loadMembers(): Promise<Member[]> {
   return out
 }
 
-function MemberCard({ member }: { member: Member }) {
-  const rows: { label: string; value: ReactNode }[] = [
-    { label: 'Full name', value: member.full_name },
-    { label: 'Phone number', value: member.phone_number || '—' },
-    { label: 'Email', value: member.email || '—' },
-    { label: 'Status', value: <Badge text={member.status} /> },
-    { label: 'Joined at', value: member.joined_at ? fmtDate(new Date(member.joined_at)) : '—' },
-  ]
-
+function MemberCard({ member, onView }: { member: Member; onView: () => void }) {
   return (
     <div className="mc">
       <h2 className="mc-title">{member.member_no}</h2>
-      <div className="mc-details">
-        {rows.map((r) => (
-          <div className="mc-row" key={r.label}>
-            <span className="mc-label">{r.label}</span>
-            <span className="mc-colon">:</span>
-            <span className="mc-value">{r.value}</span>
-          </div>
-        ))}
+      <DetailList
+        rows={[
+          { label: 'Member Name', value: member.full_name },
+          { label: 'Gender', value: orDash(member.gender) },
+          { label: 'Date of birth', value: fmtDob(member.dob) },
+          { label: 'Email', value: orDash(member.email) },
+          { label: 'Joined at', value: fmtLongDate(member.joined_at) },
+          { label: 'Status', value: <StatusBadge status={member.status} /> },
+        ]}
+      />
+      <div className="mc-actions">
+        <button type="button" className="mc-btn" onClick={onView}>
+          View Member Details
+        </button>
       </div>
     </div>
   )
 }
 
-export default function MemberPage() {
+export default function MemberPage({ onView }: { onView: (memberId: string) => void }) {
   const [members, setMembers] = useState<Member[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
   const [search, setSearch] = useState('')
+  const [gender, setGender] = useState('') // '' = all genders
   const [status, setStatus] = useState('') // '' = all statuses
-  const [joined, setJoined] = useState(() => dayKey(new Date())) // starts on today; '' = all dates
 
   useEffect(() => {
     let cancelled = false
@@ -87,19 +79,19 @@ export default function MemberPage() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return members.filter((m) => {
+      if (gender && m.gender !== gender) return false
       if (status && m.status !== status) return false
-      if (joined && dayKey(new Date(m.joined_at)) !== joined) return false
       if (!q) return true
       return [m.member_no, m.full_name, m.email].some((v) => (v ?? '').toLowerCase().includes(q))
     })
-  }, [members, search, status, joined])
+  }, [members, search, gender, status])
 
   return (
     <>
       <h1>Member</h1>
       <p className="ds-lead">Search and view your members.</p>
 
-      <div className="mp-toolbar">
+      <div className="mp-toolbar mp-toolbar--member">
         <input
           type="search"
           className="mp-search"
@@ -108,12 +100,15 @@ export default function MemberPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select
-          className="mp-select"
-          aria-label="Filter by status"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-        >
+        <select className="mp-select" aria-label="Filter by gender" value={gender} onChange={(e) => setGender(e.target.value)}>
+          <option value="">All genders</option>
+          {GENDERS.map((g) => (
+            <option key={g} value={g}>
+              {g}
+            </option>
+          ))}
+        </select>
+        <select className="mp-select" aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">All statuses</option>
           {STATUSES.map((s) => (
             <option key={s} value={s}>
@@ -121,20 +116,6 @@ export default function MemberPage() {
             </option>
           ))}
         </select>
-        <div className="mp-date">
-          <input
-            type="date"
-            aria-label="Filter by joined date"
-            value={joined}
-            onChange={(e) => setJoined(e.target.value)}
-          />
-          <span className="mp-date-label">{joined ? fmtDate(new Date(`${joined}T00:00:00`)) : 'All dates'}</span>
-          {joined && (
-            <button type="button" className="mp-date-clear" onClick={() => setJoined('')}>
-              Clear
-            </button>
-          )}
-        </div>
       </div>
 
       {loading && <p className="ds-empty">Loading…</p>}
@@ -146,7 +127,7 @@ export default function MemberPage() {
 
       <div className="mp-grid">
         {filtered.map((m) => (
-          <MemberCard key={m.member_id} member={m} />
+          <MemberCard key={m.member_id} member={m} onView={() => onView(m.member_id)} />
         ))}
       </div>
     </>

@@ -5,6 +5,12 @@ import { TABLES } from './Usetable'
 
 export type EventTab = 'cctv' | 'recognition'
 
+// staff / member of a recognised visit (null for a Guest)
+type VisitPerson = {
+  staff: { staff_no: string; full_name: string; position: string | null } | null
+  member: { member_no: string; full_name: string } | null
+}
+
 type CctvEventRow = {
   cctv_event_id: string
   direction: string
@@ -12,13 +18,15 @@ type CctvEventRow = {
   confidence: number
   event_time: string
   camera: { camera_name: string; tapo_model: string | null } | null
-  visit: {
-    track_id: string
-    visit_type: string
-    est_gender: string
-    est_age: number | null
-    demographic_score: number | null
-  } | null
+  visit:
+    | ({
+        track_id: string
+        visit_type: string
+        est_gender: string
+        est_age: number | null
+        demographic_score: number | null
+      } & VisitPerson)
+    | null
 }
 
 type RecognitionEventRow = {
@@ -89,15 +97,16 @@ function useRows<T>(load: () => PromiseLike<{ data: unknown; error: { message: s
 }
 
 // select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
-//        cc.direction, cc.confidence, cc.event_time
+//        s.staff_no, s.full_name, s.position, m.member_no, m.full_name, cc.direction, cc.confidence, cc.event_time
 // from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id
+// left join staff s on v.staff_id = s.staff_id left join member m on v.member_id = m.member_id
 export function CctvEventsTable({ limit = 100, day }: { limit?: number; day?: string }) {
   const t = useRows<CctvEventRow>(
     () => {
       let q = supabase
         .from(TABLES.cctvEvent)
         .select(
-          'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score)',
+          'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score, staff(staff_no, full_name, position), member(member_no, full_name))',
         )
       if (day) q = q.gte('event_time', dayRange(day)[0]).lt('event_time', dayRange(day)[1])
       return q.order('event_time', { ascending: false }).limit(day ? Math.max(limit, DAY_LIMIT) : limit)
@@ -116,6 +125,11 @@ export function CctvEventsTable({ limit = 100, day }: { limit?: number; day?: st
         { header: 'Track ID', render: (r) => r.visit?.track_id ?? '—' },
         { header: 'Tapo model', render: (r) => r.camera?.tapo_model ?? '—' },
         { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
+        { header: 'Staff No.', render: (r) => r.visit?.staff?.staff_no ?? '-' },
+        { header: 'Staff Name', render: (r) => r.visit?.staff?.full_name ?? '-' },
+        { header: 'Position', render: (r) => r.visit?.staff?.position ?? '-' },
+        { header: 'Member No.', render: (r) => r.visit?.member?.member_no ?? '-' },
+        { header: 'Member Name', render: (r) => r.visit?.member?.full_name ?? '-' },
         { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
         { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
         { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
