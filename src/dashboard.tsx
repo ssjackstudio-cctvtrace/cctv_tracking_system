@@ -112,7 +112,8 @@ type Counts = {
 type Tally = { all: number; male: number; female: number; unknown: number }
 
 // One finished stay in the shop (Top 5 Longest Stay)
-type Stay = { trackId: string; gender: string; seconds: number }
+// fullName: the member's / staff's name (null for a Guest)
+type Stay = { trackId: string; visitType: string; fullName: string | null; gender: string; seconds: number }
 
 const pad = (n: number) => String(n).padStart(2, '0')
 // Local calendar day of a timestamp, e.g. 2026-09-30
@@ -143,7 +144,13 @@ type PersonEvent = {
   visit_id: string
   direction: string
   event_time: string
-  visit: { est_gender: string; track_id: string } | null
+  visit: {
+    est_gender: string
+    track_id: string
+    visit_type: string
+    member: { full_name: string } | null
+    staff: { full_name: string } | null
+  } | null
 }
 
 // All cctv_event rows of the branch in the date range, oldest first
@@ -153,7 +160,9 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
   for (let from = 0; from < 50000; from += 1000) {
     let q = supabase
       .from(TABLES.cctvEvent)
-      .select('visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender, track_id)')
+      .select(
+        'visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender, track_id, visit_type, member(full_name), staff(full_name))',
+      )
     if (branch) q = q.eq('camera.edge_device.branch_id', branch)
     if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
     const { data, error } = await q.order('event_time', { ascending: true }).range(from, from + 999)
@@ -173,11 +182,32 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 // next Passed By (walked onto the Traffic walkway) or Out; a person who comes
 // back in later adds that stay too. A stay that has not ended yet is left out.
 export function countPeople(events: PersonEvent[]) {
-  const people = new Map<string, { gender: string; wentIn: boolean; passedBy: boolean; since: number | null; seconds: number; ended: boolean }>()
+  const people = new Map<
+    string,
+    {
+      gender: string
+      visitType: string
+      fullName: string | null
+      wentIn: boolean
+      passedBy: boolean
+      since: number | null
+      seconds: number
+      ended: boolean
+    }
+  >()
   for (const e of events) {
     // events come oldest first
     const key = e.visit?.track_id ?? e.visit_id
-    const p = people.get(key) ?? { gender: e.visit?.est_gender ?? 'Unknown', wentIn: false, passedBy: false, since: null, seconds: 0, ended: false }
+    const p = people.get(key) ?? {
+      gender: e.visit?.est_gender ?? 'Unknown',
+      visitType: e.visit?.visit_type ?? 'Guest',
+      fullName: e.visit?.staff?.full_name ?? e.visit?.member?.full_name ?? null,
+      wentIn: false,
+      passedBy: false,
+      since: null,
+      seconds: 0,
+      ended: false,
+    }
     if (e.direction === 'Passed By') p.passedBy = true
     const t = new Date(e.event_time).getTime()
     if (e.direction === 'In') {
@@ -199,7 +229,13 @@ export function countPeople(events: PersonEvent[]) {
   const passedBy = tally([...people.values()].filter((p) => p.passedBy))
   const stays: Stay[] = [...people.entries()]
     .filter(([, p]) => p.ended && p.seconds >= 1)
-    .map(([trackId, p]) => ({ trackId, gender: p.gender, seconds: Math.round(p.seconds) }))
+    .map(([trackId, p]) => ({
+      trackId,
+      visitType: p.visitType,
+      fullName: p.visitType === 'Guest' ? null : p.fullName,
+      gender: p.gender,
+      seconds: Math.round(p.seconds),
+    }))
     .sort((x, y) => y.seconds - x.seconds)
   const longest = stays.slice(0, 5)
   // Average time in the shop of everyone with a finished stay on the day (null = no finished stays)
@@ -271,6 +307,14 @@ function LongestStay({ branchName, stays, loading }: { branchName: string; stays
                   <dl>
                     <dt>Track_Id</dt>
                     <dd className="ds-podium-track">{s.trackId}</dd>
+                    {s.visitType !== 'Guest' && (
+                      <>
+                        <dt>Full Name</dt>
+                        <dd>{s.fullName ?? '-'}</dd>
+                      </>
+                    )}
+                    <dt>Visit Type</dt>
+                    <dd>{s.visitType}</dd>
                     <dt>Gender</dt>
                     <dd>{s.gender}</dd>
                     <dt>Time Taken</dt>
@@ -286,16 +330,23 @@ function LongestStay({ branchName, stays, loading }: { branchName: string; stays
             )}
           </div>
           {stays.length > 3 && (
-            <ol className="ds-stay-rows" start={4}>
-              {stays.slice(3).map((s, i) => (
-                <li key={s.trackId}>
-                  <span className="ds-stay-rank">{i + 4}</span>
-                  <span className="ds-stay-track">{s.trackId}</span>
-                  <span>{s.gender}</span>
-                  <span className="ds-stay-time">{fmtStay(s.seconds)}</span>
-                </li>
-              ))}
-            </ol>
+            // 4th and 5th: one row each, no heading; scrolls sideways when it does not fit
+            <div className="ds-stay-rows">
+              <table>
+                <tbody>
+                  {stays.slice(3).map((s, i) => (
+                    <tr key={s.trackId}>
+                      <td className="ds-stay-rank">{i + 4}</td>
+                      <td className="ds-stay-track">{s.trackId}</td>
+                      <td>{s.visitType === 'Guest' ? '-' : s.fullName ?? '-'}</td>
+                      <td>{s.visitType}</td>
+                      <td>{s.gender}</td>
+                      <td className="ds-stay-time">{fmtStay(s.seconds)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}

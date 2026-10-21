@@ -269,17 +269,19 @@
 .ds-podium-track { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
 .ds-podium-time { font-size: 1.15rem; }
 .ds-podium-card--1 .ds-podium-time { font-size: 1.35rem; }
-.ds-stay-rows { list-style: none; margin: 1rem 0 0; padding: 0; }
-.ds-stay-rows li {
-  display: grid;
-  grid-template-columns: 2rem minmax(0, 2fr) minmax(0, 1fr) auto;
-  gap: 0.75rem;
-  align-items: center;
-  padding: 0.6rem 0.25rem;
+/* 4th and 5th: a table without headings; scrolls sideways when the columns do not fit */
+.ds-stay-rows { margin: 1rem 0 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ds-stay-rows table { width: 100%; border-collapse: collapse; }
+.ds-stay-rows td {
+  padding: 0.6rem 0.75rem;
   border-top: 1px solid #e3e9e7;
+  white-space: nowrap;
+  vertical-align: middle;
 }
-.ds-stay-rank { font-weight: 700; color: var(--ds-muted); text-align: center; }
-.ds-stay-track { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
+.ds-stay-rows td:first-child { padding-left: 0.25rem; }
+.ds-stay-rows td:last-child { padding-right: 0.25rem; text-align: right; }
+.ds-stay-rank { width: 2rem; font-weight: 700; color: var(--ds-muted); text-align: center; }
+.ds-stay-track { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
 .ds-stay-time { font-weight: 600; font-variant-numeric: tabular-nums; }
 @media (max-width: 600px) {
   .ds-podium { grid-template-columns: 1fr; }
