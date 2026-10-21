@@ -901,11 +901,13 @@ export default function CameraDetails({
           </div>
           <RecordDayFilter day={recordDay} onChange={setRecordDay} />
         </div>
-        {recordTab === 'cctv' ? (
-          <CameraCctvEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
-        ) : (
-          <CameraRecognitionEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
-        )}
+        <div className="event-log-scroll">
+          {recordTab === 'cctv' ? (
+            <CameraCctvEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
+          ) : (
+            <CameraRecognitionEvents cameraId={camera.camera_id} day={recordDay} reloadKey={savedTick} />
+          )}
+        </div>
       </section>
     </>
   )

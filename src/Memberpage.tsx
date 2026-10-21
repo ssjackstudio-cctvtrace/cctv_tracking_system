@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
 import type { Member } from './types'
-import { DetailList, GENDERS, StatusBadge, fmtDob, fmtLongDate, orDash } from './Peoplecards.tsx'
+import { DetailList, GENDERS, StatusBadge, fmtDob, fmtLongDate, orDash } from './Peoplecards'
 import './Members.css'
 
 // select member_id, member_no, full_name, phone_number, gender, dob, email, status, joined_at from member

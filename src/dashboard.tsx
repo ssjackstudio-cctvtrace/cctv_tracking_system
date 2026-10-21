@@ -559,45 +559,47 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
           </button>
         </div>
 
-        {eventTab === 'cctv' ? (
-          <DataTable
-            rows={events}
-            loading={loading}
-            error=""
-            emptyMessage="No CCTV events found."
-            rowKey={(r) => r.cctv_event_id}
-            columns={[
-              { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
-              { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
-              { header: 'Track region', render: (r) => r.track_region ?? '—' },
-              { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
-              { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
-              { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
-              { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
-              { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
-            ]}
-          />
-        ) : (
-          <DataTable
-            rows={recognitions}
-            loading={loading}
-            error=""
-            emptyMessage="No recognition events found."
-            rowKey={(r) => r.recognition_event_id}
-            columns={[
-              { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
-              {
-                header: 'Member / Staff no.',
-                render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
-              },
-              { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
-              { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
-              { header: 'Match score', render: (r) => `${Number(r.match_score).toFixed(2)}%` },
-              { header: 'Result', render: (r) => <Badge text={r.result} /> },
-              { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
-            ]}
-          />
-        )}
+        <div className="event-log-scroll">
+          {eventTab === 'cctv' ? (
+            <DataTable
+              rows={events}
+              loading={loading}
+              error=""
+              emptyMessage="No CCTV events found."
+              rowKey={(r) => r.cctv_event_id}
+              columns={[
+                { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+                { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
+                { header: 'Track region', render: (r) => r.track_region ?? '—' },
+                { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
+                { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
+                { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+                { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+                { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
+              ]}
+            />
+          ) : (
+            <DataTable
+              rows={recognitions}
+              loading={loading}
+              error=""
+              emptyMessage="No recognition events found."
+              rowKey={(r) => r.recognition_event_id}
+              columns={[
+                { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+                {
+                  header: 'Member / Staff no.',
+                  render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
+                },
+                { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
+                { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
+                { header: 'Match score', render: (r) => `${Number(r.match_score).toFixed(2)}%` },
+                { header: 'Result', render: (r) => <Badge text={r.result} /> },
+                { header: 'Event time', render: (r) => fmtDateTime(r.event_time) },
+              ]}
+            />
+          )}
+        </div>
       </section>
     </>
   )

@@ -4,6 +4,15 @@
 .table th { font-weight: 600; color: #5d7079; background: #f8faf9; }
 .table tbody tr:last-child td { border-bottom: 0; }
 
+/* Event log tables (Dashboard, Event History, Camera Details): when the columns do not fit,
+   scroll left / right inside a box no taller than the screen, so the horizontal scroll bar
+   is always in view; the header row stays on top while scrolling down */
+.event-log-scroll { max-height: 70vh; overflow: auto; background: #fff; border-radius: 6px; }
+.event-log-scroll .table-wrap { overflow: visible; border-radius: 0; }
+.event-log-scroll .table th { position: sticky; top: 0; z-index: 1; }
+.event-log-scroll .ds-empty,
+.event-log-scroll .ds-error { margin: 0; }
+
 .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background: #e4e9e8; color: #33454e; }
 .badge-active, .badge-matched, .badge-in, .badge-dealed, .badge-member { background: #d5f3ea; color: #12684f; }
 .badge-inactive, .badge-not-matched, .badge-not-detected { background: #fbe0dd; color: #9b2a1d; }

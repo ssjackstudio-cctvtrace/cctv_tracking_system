@@ -250,7 +250,9 @@ export default function EventsPage({ initialTab = 'cctv', initialDay }: { initia
         </div>
         <DayFilter day={day} onChange={setDay} />
       </div>
-      {tab === 'cctv' ? <CctvEventsTable day={day} /> : <RecognitionEventsTable day={day} />}
+      <div className="event-log-scroll">
+        {tab === 'cctv' ? <CctvEventsTable day={day} /> : <RecognitionEventsTable day={day} />}
+      </div>
     </>
   )
 }
