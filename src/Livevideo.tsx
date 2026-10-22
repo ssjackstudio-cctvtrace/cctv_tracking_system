@@ -20,8 +20,19 @@ export type LiveBox = {
   g?: string | null
   a?: number | null
   s?: number | null
+  est?: boolean // feet hidden: floor spot worked out from the head and body height
 }
-export type LiveFrame = { f: number; w: number; h: number; boxes: LiveBox[]; counts: { In: number; Out: number } }
+export type LiveObstacle = { id: string; label: string; b: [number, number, number, number] }
+// obstacles: furniture / mannequins the edge box found on the floor (Floor map)
+export type LiveFrame = {
+  f: number
+  w: number
+  h: number
+  boxes: LiveBox[]
+  counts: { In: number; Out: number }
+  inside?: number | null // people inside the shop now (all cameras of the edge box, each person once)
+  obstacles?: LiveObstacle[]
+}
 export type LiveState = 'connecting' | 'live' | 'off' | 'failed'
 
 const RETRY_MS = 3_000

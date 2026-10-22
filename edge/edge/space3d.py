@@ -25,6 +25,8 @@ Saved by the website (Camera details page → "Shop areas (3D)") in camera.floor
          "image": [{"x": .., "y": ..}, ...],                # outline on the floor, in the picture (0-1)
          "floor": [{"x": .., "y": ..}, ...] | null,          # the same outline in metres (when calibrated)
          "z_min": 0.0, "z_max": 2.2}],                      # height range of the area (metres)
+     "obstacles": [{"id": "o1", "label": "table",            # things that hide people's feet (Floor map)
+                    "b": [x1, y1, x2, y2]}],                 # picture box (0-1)
      "inside_only": false}                                  # true: the whole picture is inside the shop
 
 kind is one of "Counter", "Purchasing" (any display / Point of Purchase area,
@@ -116,6 +118,17 @@ class Region:
 
 
 @dataclass(frozen=True)
+class Obstacle:
+    """Something standing on the floor that hides people's legs / feet (display
+    table, counter, suitcase stand, mannequin), saved from the Floor map on the
+    Camera details page (camera.floor_areas.obstacles). box = picture box (0-1)."""
+
+    id: str
+    label: str
+    box: tuple[float, float, float, float]  # x1, y1, x2, y2 (0-1)
+
+
+@dataclass(frozen=True)
 class Space:
     aspect: float
     img_to_floor: np.ndarray | None  # 3x3
@@ -125,6 +138,21 @@ class Space:
     focal: float = 0.0  # focal length in picture units (needed for the lens curve)
     shared: bool = False  # floor coordinates shared with the other cameras (placed on one shop plan)
     inside_only: bool = False  # the whole picture is inside the shop (no Traffic / Out of Range)
+    obstacles: tuple[Obstacle, ...] = ()  # things on the floor that hide people's feet
+
+    def behind_obstacle(self, box: tuple[float, float, float, float]) -> Obstacle | None:
+        """The obstacle whose picture box covers the BOTTOM of this person box
+        (x1, y1, x2, y2 as 0-1): their feet are hidden behind it."""
+        x1, _, x2, y2 = box
+        w = max(x2 - x1, 1e-6)
+        for o in self.obstacles:
+            ox1, oy1, ox2, oy2 = o.box
+            overlap = min(x2, ox2) - max(x1, ox1)
+            # the box ends on the upper part of the obstacle (its top edge hides the legs);
+            # feet lower than that are in front of it, on the floor
+            if overlap >= 0.3 * w and oy1 - 0.02 <= y2 <= oy1 + 0.6 * (oy2 - oy1):
+                return o
+        return None
 
     @property
     def calibrated(self) -> bool:
@@ -210,9 +238,21 @@ class Space:
             except (TypeError, KeyError, ValueError):
                 continue
         inside_only = value.get("inside_only") is True
+        obstacles: list[Obstacle] = []
+        for i, o in enumerate(value.get("obstacles") or []):
+            try:
+                b = [float(v) for v in o["b"]]
+                if len(b) == 4 and b[2] > b[0] and b[3] > b[1]:
+                    obstacles.append(Obstacle(str(o.get("id") or f"o{i + 1}"), str(o.get("label") or "obstacle"),
+                                              (b[0], b[1], b[2], b[3])))
+            except (TypeError, KeyError, ValueError):
+                continue
         if h_inv is None:  # areas saved but no floor yet: automatic floor
-            return Space.automatic(aspect, tuple(regions), inside_only)
-        return Space(aspect, h_inv, proj, tuple(regions), k1, focal, bool(cal.get("placed")), inside_only)
+            s = Space.automatic(aspect, tuple(regions), inside_only)
+            return Space(s.aspect, s.img_to_floor, s.projection, s.regions, s.k1, s.focal, False, inside_only,
+                         tuple(obstacles))
+        return Space(aspect, h_inv, proj, tuple(regions), k1, focal, bool(cal.get("placed")), inside_only,
+                     tuple(obstacles))
 
     # ---------- picture ↔ floor ----------
     def floor_of(self, p: Point) -> Point | None:
@@ -237,6 +277,24 @@ class Space:
             return None
         z = float((P[1] @ base - v * (P[2] @ base)) / den)
         return z if MIN_HEIGHT <= z <= MAX_HEIGHT else None
+
+    def floor_from_head(self, head: Point, height: float) -> Point | None:
+        """Floor spot (metres) of a person whose FEET are hidden (behind a table,
+        a display or another shopper): the top of the head is `height` metres
+        above the floor, so the spot comes from the head instead of the feet.
+        Stops the floor position jumping when the legs disappear."""
+        if self.projection is None or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
+            return None
+        P = self.projection
+        M = np.column_stack([P[:, 0], P[:, 1], P[:, 2] * height + P[:, 3]])
+        p = self._straighten(head)
+        try:
+            X, Y, W = np.linalg.solve(M, np.array([p[0] * self.aspect, p[1], 1.0]))
+        except np.linalg.LinAlgError:
+            return None
+        if abs(W) < 1e-9:
+            return None
+        return float(X / W), float(Y / W)
 
     def to_picture(self, X: float, Y: float, Z: float) -> Point | None:
         if self.projection is None:

@@ -286,8 +286,35 @@ past day (the shop is closed) it is 0.
 
 Only numbers are kept in memory; no picture is saved.
 
-The tracker keeps a hidden person's number for 60 frames
+The tracker keeps a hidden person's number for 90 frames
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
+
+### Keeping one track_id (what the 4 live videos showed)
+
+| Seen on the videos | Cause | Fix |
+|---|---|---|
+| Boxes trail behind people; live video freezes for seconds | `MODEL=yolo11n.pt` runs on the box CPU (1–3 pictures/s for 4 cameras), and the live video sent the NEWEST picture with OLDER boxes | NPU model used automatically when `yolo11n_rknn_model` is in `edge/`; live video sends the picture the AI looked at with its own boxes (`LIVE_SYNC`) |
+| People bent over the counter / partly behind a table not detected | `CONFIDENCE=0.40` threw their boxes away before the tracker saw them | `CONFIDENCE=0.15` + ByteTrack second round keeps existing people; new people still need 0.45 |
+| Same person gets a new ID on the next camera | clothes colours change with the light, and the colour check vetoed the match; a 2–3 s gap between cameras fell between handoff and reclaim | gray-world colour balance (`REID_EVEN_LIGHT`), colours never veto when face/body agree, `OVERLAP_SECONDS=3`, `RECLAIM_AFTER_SECONDS=1` |
+| A trolley / bag pushed by someone becomes a "person" | it moves, so the move check passed | `PERSON_CONF_PEAK`, `MAX_BODY_WIDTH` |
+| Floor spot jumps when legs disappear behind displays | box bottom is not the feet | floor spot from the head and body height (`est` in the live video: "Feet hidden · spot from head"); saved obstacles (Floor map) |
+
+### Models on the box
+
+Run `python check_models.py` on the box. It lists what is installed and what
+is missing (NPU model + runtime, face / body recognition, gender / age,
+hardware video decoder) and how to add each. In order of importance:
+
+1. **NPU person model** – `yolo11n_rknn_model` folder in `edge/`,
+   `pip install rknn-toolkit-lite2`, `librknnrt.so` (see B.4).
+2. **Recognition models** – `python download_models.py` (face finder, SFace face
+   recognition, YoutuReID whole body, gender, age). Without them people are
+   matched across cameras by clothes colour and height only.
+3. **Pose model (recommended)** – knows which body parts are hidden and finds the
+   feet from the ankles. On an x86 Linux PC / WSL2:
+   `yolo export model=yolo11n-pose.pt format=rknn name=rk3588`, copy
+   `yolo11n-pose_rknn_model` to `edge/`, set `MODEL=./yolo11n-pose_rknn_model`.
+4. Optional: PA-100K body attributes (gender / age without a face).
 
 ## Feet confirmed before an area or In / Out is recorded
 
@@ -417,6 +444,21 @@ No face or body picture is saved or sent. The age model works in age
 groups (25-32, 38-43, ...), so `est_age` is a rough estimate. With `--show`
 the window prints it next to each person, e.g. `7 F 29`.
 Turn it off with `DEMOGRAPHICS=off` in `.env`.
+
+## Shop Floor Map (Camera details page)
+
+Below Shop Areas, a top view of the shop (for Bukit Tinggi: the furniture plan
+layout, 7.314 m × 5.89 m, glass front on the diagonal, the Traffic walkway in
+front). It shows every camera of the edge box, where it hangs and which way it
+looks, each camera's areas laid onto the floor, the people on the selected
+camera, and obstacles. **Adjust on map**: drag the camera, set Facing / Tilt,
+or drag the corners of its areas (the corner moves on the picture too), then
+**Save to camera** (this places the camera on the shop plan, so all cameras
+share one floor and a person seen by 2 cameras lands on one spot).
+**Save found obstacles** stores the tables / counter / mannequins the box found
+(`floor_areas.obstacles`); a person whose box ends on one has their floor spot
+worked out from their head. The live video shows Store metrics (Passed By,
+Walk-in, Inside now) in its corner instead of the small floor map.
 
 ## Not in this version yet (phase 2)
 

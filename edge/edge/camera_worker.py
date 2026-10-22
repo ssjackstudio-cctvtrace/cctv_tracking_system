@@ -164,6 +164,45 @@ STATIC_SECONDS = float(os.getenv("STATIC_SECONDS", "8"))
 MOVE_FRAMES = 2  # the move must be seen this many frames in a row (one odd box is not a move)
 MOVE_SIZE_RANGE = (0.7, 1.4)  # box height vs. first box: outside this the box was cut / covered, not moved
 
+# Things that are moved BY people (a trolley, a suitcase being pulled, a box being
+# carried) also move, so moving alone does not prove "person". Two more checks:
+#  - a new tracker number only becomes a person once the detector was SURE at least
+#    once (confidence >= PERSON_CONF_PEAK). Objects that look a bit like a person stay
+#    below it; real people reach it within a second. Low-confidence boxes still keep
+#    an EXISTING person followed while they are partly hidden (see trackers/bytetrack_cctv.yaml).
+#  - a full-body box wider on the floor than MAX_BODY_WIDTH metres is a person merged
+#    with what they push / carry: not used for areas, 3D or looks until it separates.
+PERSON_CONF_PEAK = float(os.getenv("PERSON_CONF_PEAK", "0.50"))
+MAX_BODY_WIDTH = float(os.getenv("MAX_BODY_WIDTH", "1.1"))  # metres
+
+# Feet hidden (behind a display table, the counter, another shopper) but the head is
+# seen: the floor spot is worked out from the TOP of the head and the person's known
+# height (or AVG_PERSON_HEIGHT when the feet are behind a saved obstacle), so the
+# position does not jump and the person stays in the right area.
+AVG_PERSON_HEIGHT = float(os.getenv("AVG_PERSON_HEIGHT", "1.65"))  # metres
+OBSTACLE_SHORT = 1.45  # metres: a box ending on an obstacle and "shorter" than this = legs hidden behind it
+
+# Obstacles: every OBSTACLE_SECONDS the box also looks for furniture / objects
+# standing on the floor (COCO classes below) and for "people" that never move
+# (mannequins). Ones seen in OBSTACLE_HITS scans in a row are sent with the live
+# video, so the Floor map on the Camera details page can show and save them.
+OBSTACLE_SECONDS = float(os.getenv("OBSTACLE_SECONDS", "30"))  # 0 = off
+OBSTACLE_HITS = 2
+OBSTACLE_CLASSES = {13: "bench", 24: "backpack", 26: "handbag", 28: "suitcase", 56: "chair", 57: "couch",
+                    58: "potted plant", 60: "table", 62: "tv / screen", 63: "laptop", 72: "refrigerator"}
+
+# Live video: send the picture the AI looked at, with the boxes found in it, so the
+# boxes sit exactly on the people (sending the newest picture with older boxes made
+# every box trail behind the person it belongs to). If the AI falls behind by more
+# than LIVE_SYNC_MAX_AGE seconds, the newest picture is sent without boxes instead.
+LIVE_SYNC = os.getenv("LIVE_SYNC", "on").strip().lower() not in ("off", "0", "false", "no")
+LIVE_SYNC_MAX_AGE = float(os.getenv("LIVE_SYNC_MAX_AGE", "1.5"))
+
+
+def cut_head(y1: float, h: int) -> bool:
+    """The top of the box touches the top of the picture: the head is cut off."""
+    return y1 <= h * TOP_EDGE
+
 
 def camera_powered_on(source: str | int) -> bool:
     """True when the camera answers on its RTSP port (usually 554), i.e. it is
@@ -388,6 +427,7 @@ class Person:
     feet: list[tuple[float, float]]  # bottom corners of the box at the feet (empty unless full body)
     floor: tuple[float, float] | None = None  # floor spot in metres (calibrated camera)
     height: float | None = None  # body height in metres
+    est_feet: bool = False  # feet hidden: foot / floor worked out from the head and the body height
 
 
 @dataclass
@@ -410,6 +450,8 @@ class _Motion:
     moving: bool = False  # moved: a person
     static: bool = False  # never moved for STATIC_SECONDS: an object, ignored
     hits: int = 0  # frames in a row that showed a move
+    peak: float = 0.0  # highest detection confidence seen (see PERSON_CONF_PEAK)
+    box: tuple[float, float, float, float] | None = None  # newest box (pixels), for obstacles
 
 
 class CameraWorker(threading.Thread):
@@ -470,6 +512,13 @@ class CameraWorker(threading.Thread):
         # [{"track", "b": [x1, y1, x2, y2] (0-1), "area", "visit", "full", "xyz", "region", "kind", "g", "a", "s"}]
         self.live_boxes: list[dict[str, Any]] = []
         self.live_frame_no = 0
+        # (frame no, picture the AI looked at, its boxes, time): sent together by the live video
+        self.live: tuple[int, np.ndarray, list[dict[str, Any]], float] | None = None
+        # Obstacles found on the floor (furniture, mannequins), for the Floor map:
+        # [{"id", "label", "b": [x1, y1, x2, y2] (0-1)}]
+        self.obstacles_live: list[dict[str, Any]] = []
+        self._obstacle_seen: list[dict[str, Any]] = []  # candidates with their hit counts
+        self._obstacle_model: Any = None
 
     def track_name(self, tid: int) -> str:
         """Same text as visit.track_id, e.g. ABT-01-3f9a2c-7."""
@@ -519,14 +568,48 @@ class CameraWorker(threading.Thread):
             # (No believable height, e.g. 3D floor not adjusted yet: the box is trusted as before.)
             if p.height is not None and (p.height < FOOT_MIN_HEIGHT or (known is not None and p.height < known * FOOT_HEIGHT_SHARE)):
                 p.full, p.floor, p.height = False, None, None
+            elif (p.height is None or p.height < OBSTACLE_SHORT) and \
+                    self.space.behind_obstacle((x1 / w, y1 / h, x2 / w, y2 / h)) is not None:
+                p.full, p.floor, p.height = False, None, None  # box ends on a saved table / counter: legs hidden
+            elif p.floor is not None and self._too_wide(box, w, h):
+                p.full, p.floor, p.height = False, None, None  # person + trolley / big box in one box
             elif p.height is not None:
                 hs = self._heights.setdefault(tid, [])
                 hs.append(p.height)
                 del hs[:-HEIGHT_SAMPLES]
+        if not p.full and calibrated and not cut_head(y1, h):
+            self._feet_from_head(p, w, h, known)
         if p.full:  # feet confirmed on the floor: they may count for In / Out and areas
             inset = bw * FOOT_INSET
             p.feet = [((x1 + inset) / w, foot_y / h), ((x2 - inset) / w, foot_y / h)]
         return p
+
+    def _too_wide(self, box: tuple[float, float, float, float], w: int, h: int) -> bool:
+        """The box's bottom edge is wider on the floor than one person can be."""
+        x1, _, x2, y2 = box
+        a = self.space.floor_of((x1 / w, y2 / h))
+        b = self.space.floor_of((x2 / w, y2 / h))
+        return a is not None and b is not None and math.dist(a, b) > MAX_BODY_WIDTH
+
+    def _feet_from_head(self, p: Person, w: int, h: int, known: float | None) -> None:
+        """Feet hidden (box ends above the floor: a table, the counter, a display
+        or another shopper in front), head seen: floor spot from the top of the
+        head and the body height. Known height of this person first; behind a
+        saved obstacle, the average height will do."""
+        x1, y1, x2, y2 = p.box
+        if y2 - y1 < MIN_BODY_PIXELS * 0.6:
+            return
+        height = known
+        if height is None and self.space.behind_obstacle((x1 / w, y1 / h, x2 / w, y2 / h)) is not None:
+            height = AVG_PERSON_HEIGHT
+        if height is None:
+            return
+        floor = self.space.floor_from_head(p.head, height)
+        foot = self.space.to_picture(floor[0], floor[1], 0.0) if floor is not None else None
+        # the worked-out feet must be BELOW the bottom of the box (really hidden) and in the picture
+        if foot is None or not (-0.02 <= foot[0] <= 1.02 and y2 / h - 0.01 <= foot[1] <= 1.05):
+            return
+        p.floor, p.height, p.foot, p.est_feet = floor, height, foot, True
 
     def _known_height(self, tid: int) -> float | None:
         """This person's body height (metres), measured earlier with their feet
@@ -577,6 +660,7 @@ class CameraWorker(threading.Thread):
                      "matched across cameras by their face, clothes and body only")
 
         last_no, last_snapshot, last_dark_check = 0, 0.0, 0.0
+        last_obstacles = time.time() - OBSTACLE_SECONDS + 10  # first scan 10 s after start
         paused = False  # True while the camera picture is closed (black)
         pose_logged = False
         while not self.stop_event.is_set():
@@ -613,6 +697,7 @@ class CameraWorker(threading.Thread):
                     paused = True
                 self.preview = None
                 self.live_boxes = []
+                self.live = None
                 continue
             paused = False
 
@@ -657,6 +742,11 @@ class CameraWorker(threading.Thread):
             # For the website's live video: where each person is in this frame, and who they are
             self.live_boxes = [self._live_box(p, w, h) for p in people + waiting]
             self.live_frame_no = frame_no
+            self.live = (frame_no, frame, self.live_boxes, time.time())  # picture + its boxes, together
+
+            if OBSTACLE_SECONDS > 0 and now - last_obstacles >= OBSTACLE_SECONDS:
+                last_obstacles = now
+                self._scan_obstacles(frame, now)
 
             if self.offer_snapshot and now - last_snapshot >= self.snapshot_seconds:
                 ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -673,9 +763,9 @@ class CameraWorker(threading.Thread):
         """Split the detections into (people: they have moved, so they are
         followed and counted, waiting: not moved yet, shown on the live video
         only with "Show everyone detected"). Objects that never moved for
-        STATIC_SECONDS are left out of both: they are not tracked any more."""
-        if not MOVE_CHECK:
-            return people, []
+        STATIC_SECONDS are left out of both: they are not tracked any more.
+        A detection the detector was never sure about (PERSON_CONF_PEAK) also
+        waits: things pushed or carried by people move too."""
         moving: list[Person] = []
         waiting: list[Person] = []
         for p in people:
@@ -684,7 +774,14 @@ class CameraWorker(threading.Thread):
             m = self._motion.get(p.tid)
             if m is None:
                 m = self._motion[p.tid] = _Motion(now, (cx, cy, bh))
-            m.seen = now
+            m.seen, m.box = now, p.box
+            m.peak = max(m.peak, p.conf)
+            if m.peak < PERSON_CONF_PEAK:
+                waiting.append(p)  # detector never sure yet: may be an object (a trolley, a bag)
+                continue
+            if not MOVE_CHECK:
+                moving.append(p)
+                continue
             if not m.moving:
                 ax, ay, ah = m.anchor
                 shift = math.hypot(cx - ax, cy - ay) / ah
@@ -709,6 +806,50 @@ class CameraWorker(threading.Thread):
             del self._motion[tid]
         return moving, waiting
 
+    def _scan_obstacles(self, frame: np.ndarray, now: float) -> None:
+        """Furniture / objects standing on the floor, and "people" that never
+        move (mannequins). Kept when seen OBSTACLE_HITS scans in a row at the
+        same place; sent with the live video for the Floor map."""
+        h, w = frame.shape[:2]
+        found: list[tuple[str, tuple[float, float, float, float]]] = []
+        try:
+            if self._obstacle_model is None:
+                from ultralytics import YOLO
+
+                self._obstacle_model = YOLO(self.model_path)  # own copy: never disturbs the people tracker
+            res = self._obstacle_model.predict(frame, classes=list(OBSTACLE_CLASSES), conf=0.35,
+                                               imgsz=self.image_size, verbose=False)[0]
+            if res.boxes is not None:
+                for (x1, y1, x2, y2), c in zip(res.boxes.xyxy.tolist(), res.boxes.cls.int().tolist()):
+                    found.append((OBSTACLE_CLASSES.get(c, "object"), (x1 / w, y1 / h, x2 / w, y2 / h)))
+        except Exception as exc:  # never stop the people tracking for this
+            log.warning("obstacle scan failed: %s", exc)
+            return
+        for m in self._motion.values():  # mannequins / stands detected as a "person" that never moved
+            if m.static and m.box is not None and now - m.seen < OBSTACLE_SECONDS:
+                x1, y1, x2, y2 = m.box
+                found.append(("mannequin / stand", (x1 / w, y1 / h, x2 / w, y2 / h)))
+
+        def iou(a, b) -> float:
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            inter = ix * iy
+            union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+            return inter / union if union > 0 else 0.0
+
+        kept: list[dict[str, Any]] = []
+        for label, b in found:
+            old = next((o for o in self._obstacle_seen if iou(o["box"], b) >= 0.5), None)
+            hits = old["hits"] + 1 if old else 1
+            if old:
+                self._obstacle_seen.remove(old)
+            kept.append({"label": label, "box": b, "hits": hits})
+        self._obstacle_seen = kept  # not seen again in this scan: dropped
+        self.obstacles_live = [
+            {"id": f"o{i + 1}", "label": o["label"], "b": [round(v, 4) for v in o["box"]]}
+            for i, o in enumerate(o for o in kept if o["hits"] >= OBSTACLE_HITS)
+        ]
+
     def _live_box(self, p: Person, w: int, h: int) -> dict[str, Any]:
         x1, y1, x2, y2 = p.box
         v = self._link.get(p.tid)
@@ -725,6 +866,7 @@ class CameraWorker(threading.Thread):
                 "out" if st is not None and st.kind is not None else None),
             "visit": v is not None,  # linked to a visitor (has a visit row / track_id)
             "full": p.full,
+            "est": p.est_feet,  # feet hidden: floor spot worked out from the head
             "xyz": [round(p.floor[0], 2), round(p.floor[1], 2), round(p.height or 1.7, 2)] if p.floor else None,
             "region": region.name if region else None,
             "kind": region.kind if region else None,
@@ -1083,13 +1225,14 @@ class CameraWorker(threading.Thread):
           inside              → In (new visitor, came back, or the other kind of area)
           inside → Traffic    → Passed By, track_region Traffic (the stay ends)
           inside → Out of Range → Out, track_region Out of Range
-        Only people whose feet are confirmed on the floor (p.full); feet hidden:
-        they keep the spot they were in."""
+        Only people whose feet are confirmed on the floor (p.full), or worked
+        out from the head when hidden behind a table / another shopper
+        (p.est_feet); otherwise they keep the spot they were in."""
         if self.space is None or not self.space.counting:
             return
         for p in people:
-            if not p.full:
-                continue  # partly hidden: keep the area they were in
+            if not p.full and not p.est_feet:
+                continue  # partly hidden, feet unknown: keep the area they were in
             r = self.space.region_at(p.foot, None, p.height)  # flat: the feet point in the outline drawn on the picture
             kind = self.space.kind_at(r)
             if kind == TRAFFIC:

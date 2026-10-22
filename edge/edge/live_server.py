@@ -12,7 +12,10 @@ and receives, many times a second, one binary message per picture:
                "boxes": [{"track": "ABT-01-3f9a2c-7", "b": [x1, y1, x2, y2], "area": "in",
                           "visit": true, "full": true, "xyz": [X, Y, Z] (metres) or null,
                           "region": "Counter", "kind": "Counter", "g": "Female", "a": 29, "s": 71.5}],
-               "counts": {"In": 3, "Out": 1}}
+               "counts": {"In": 3, "Out": 1}, "inside": 2 (people inside the shop now, all cameras),
+               "obstacles": [{"id": "o1", "label": "table", "b": [x1, y1, x2, y2]}]}
+    The picture is the one the AI looked at, so the boxes sit exactly on the
+    people (camera_worker.LIVE_SYNC).
     JPEG      the picture
 
 plus small text messages:
@@ -44,6 +47,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 import cv2
+
+from .camera_worker import LIVE_SYNC, LIVE_SYNC_MAX_AGE
 
 log = logging.getLogger("live")
 
@@ -206,6 +211,15 @@ class LiveServer(threading.Thread):
             worker = self.workers().get(camera_id)
             frame_no, frame = worker.grabber.latest() if worker else (0, None)
             live = worker is not None and frame is not None and worker.active_status() == "Active"
+            boxes = worker.live_boxes if worker else []
+            if live and LIVE_SYNC:
+                # the picture the AI looked at + the boxes found in it (boxes sit on the people);
+                # AI too far behind: the newest picture, without boxes that would be in the wrong place
+                synced = worker.live
+                if synced is not None and time.time() - synced[3] <= LIVE_SYNC_MAX_AGE:
+                    frame_no, frame, boxes = synced[0], synced[1], synced[2]
+                else:
+                    boxes = []
             if not live:
                 msg = ("This camera is not run by this edge box" if worker is None
                        else "Camera off, closed or not connected")
@@ -219,7 +233,9 @@ class LiveServer(threading.Thread):
                 last_no = frame_no
                 jpeg, w, h = await loop.run_in_executor(None, self._encode, camera_id, frame_no, frame, width)
                 head = json.dumps(
-                    {"f": frame_no, "w": w, "h": h, "boxes": worker.live_boxes, "counts": worker.counts},
+                    {"f": frame_no, "w": w, "h": h, "boxes": boxes, "counts": worker.counts,
+                     "inside": worker.registry.count() if hasattr(worker, "registry") else None,
+                     "obstacles": getattr(worker, "obstacles_live", [])},
                     separators=(",", ":"),
                 ).encode()
                 writer.write(_frame(0x2, struct.pack("!I", len(head)) + head + jpeg))

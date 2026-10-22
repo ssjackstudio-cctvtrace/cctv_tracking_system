@@ -13,7 +13,8 @@ import { supabase } from './lib/supabase'
 import { TABLES, isOnline } from './Usetable'
 import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
-import { AreasEditor, drawFloorMap, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
+import { AreasEditor, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
+import { FloorMap } from './Floormap'
 import { REGION_COLORS, floorOrAuto, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './Camera.css'
@@ -687,9 +688,26 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
   } else {
     ctx.lineWidth = linked ? Math.max(2, W / 320) : 1
     ctx.strokeStyle = color
+    if (linked) {
+      // light fill in the area colour: each person keeps their own box, also where people overlap
+      ctx.globalAlpha = 0.16
+      ctx.fillStyle = color
+      ctx.fillRect(x1, y1, x2 - x1, y2 - y1)
+      ctx.globalAlpha = 1
+    }
     if (!linked || box.full === false) ctx.setLineDash([6, 4])
     ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
     ctx.setLineDash([])
+  }
+  if (linked && !in3d && box.full) {
+    // feet point: where the person stands (what the shop areas are checked against)
+    ctx.fillStyle = color
+    ctx.strokeStyle = '#fff'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.arc((x1 + x2) / 2, y2, Math.max(3, W / 240), 0, Math.PI * 2)
+    ctx.fill()
+    ctx.stroke()
   }
 
   const v = rec?.visit
@@ -705,7 +723,7 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
         ...(box.xyz && box.full ? [`X ${box.xyz[0].toFixed(1)} · Y ${box.xyz[1].toFixed(1)} · Z ${box.xyz[2].toFixed(2)} m`] : []),
         ...(rec ? [`Match Confidence ${fmt2(rec.confidence)}%`] : []),
         `Demographic Score ${fmt2(score)}`,
-        ...(box.full === false ? ['Partly hidden'] : []),
+        ...(box.est ? ['Feet hidden · spot from head'] : box.full === false ? ['Partly hidden'] : []),
       ]
     : [`${box.track.split('-').pop() ?? box.track}${box.full === false ? ' · partly hidden' : ''}`]
   const font = Math.max(11, Math.round(H * 0.024))
@@ -724,6 +742,37 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
   ctx.globalAlpha = 1
   ctx.fillStyle = '#fff'
   lines.forEach((l, i) => ctx.fillText(l, lx + pad, ly + pad + i * lineH))
+  ctx.restore()
+}
+
+// "Store metrics" in the top-left corner of the live video: this camera's
+// People Passed By / Walk-in today, and the people inside the shop right now
+// (all cameras of the edge box, each person once)
+function drawMetrics(ctx: CanvasRenderingContext2D, passedBy: number, walkIn: number, inside: number | null | undefined) {
+  const H = ctx.canvas.height
+  const font = Math.max(11, Math.round(H * 0.028))
+  const lines: [string, string][] = [
+    ['STORE METRICS', '#cbd5e1'],
+    [`Passed By: ${passedBy}`, OUT_COLOR],
+    [`Walk-in: ${walkIn}`, IN_COLOR],
+    [`Inside now: ${inside ?? '—'}`, '#ffffff'],
+  ]
+  ctx.save()
+  ctx.font = `700 ${font}px system-ui, sans-serif`
+  const pad = Math.round(font * 0.5)
+  const lineH = Math.round(font * 1.3)
+  const w = Math.max(...lines.map(([t]) => ctx.measureText(t).width)) + pad * 2
+  const top = Math.round(H * 0.07) // below the camera's own date / time
+  ctx.globalAlpha = 0.72
+  ctx.fillStyle = '#0f172a'
+  ctx.fillRect(pad, top, w, lines.length * lineH + pad * 2)
+  ctx.globalAlpha = 1
+  ctx.textBaseline = 'top'
+  ctx.textAlign = 'left'
+  lines.forEach(([t, c], i) => {
+    ctx.fillStyle = c
+    ctx.fillText(t, pad * 2, top + pad + i * lineH)
+  })
   ctx.restore()
 }
 
@@ -763,6 +812,10 @@ export default function CameraDetails({
     return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: null })) }
   }, [savedAreas])
   const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
+  // The Areas editor works on the newest saved floor (also when the Floor map saved it)
+  const editorCamera = useMemo(() => ({ ...camera, floor_areas: savedAreas }), [camera, savedAreas])
+  // Newest live picture (people, obstacles), for the Shop Floor Map
+  const liveFrame = useRef<LiveFrame | null>(null)
   // Full-body people seen on the live video (feet + top of head), for "Auto-fit tilt from people"
   const peopleSeen = useRef<{ foot: Point; head: Point }[]>([])
   const lastSample = useRef(0)
@@ -775,8 +828,9 @@ export default function CameraDetails({
   const [recordDay, setRecordDay] = useState(todayKey)
 
   // Live view: the shop areas (Purchasing / Counter / Traffic), then each
-  // person (3D box + label), and a floor map
+  // person (3D box + label), and the store metrics (the floor map is below the video)
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
+    liveFrame.current = frame
     if (Date.now() - lastSample.current > 500) {
       lastSample.current = Date.now()
       for (const b of frame.boxes) {
@@ -789,9 +843,7 @@ export default function CameraDetails({
     drawSpace(ctx, { ...space, grid: [], axes: [] }) // flat areas only: no floor grid / axes on the live video
     const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
     for (const box of shown) drawPerson(ctx, box, records.byTrack.get(box.track), floorAreas.calibration)
-    drawFloorMap(ctx, floorAreas, shown, (b) =>
-      b.kind && b.kind in REGION_COLORS ? REGION_COLORS[b.kind as RegionKind] : b.visit ? IN_COLOR : '#94a3b8',
-    )
+    drawMetrics(ctx, people.passedBy, people.in, frame.inside)
   }
 
   const cameraRows: [string, ReactNode][] = [
@@ -865,11 +917,19 @@ export default function CameraDetails({
       </div>
 
       <AreasEditor
-        camera={camera}
+        camera={editorCamera}
         grabFrame={() => grabFrameRef.current?.() ?? null}
         liveReady={liveMsg.state === 'live'}
         onSaved={setFloorAreas}
         people={peopleSeen}
+      />
+
+      <FloorMap
+        camera={camera}
+        branchName={edge?.branch?.branch_name}
+        areas={savedAreas}
+        live={liveFrame}
+        onSaved={setFloorAreas}
       />
 
 

@@ -71,6 +71,29 @@ def _unit(v: np.ndarray) -> np.ndarray:
 
 
 # ---------- attire (clothes colours) ----------
+# The same shirt looks a different colour on each camera: warm shop spotlights on
+# one side, cold mall light or the glass front on the other, and every camera
+# sets its own white balance. Without a correction the clothes "look different"
+# and the person gets a NEW track_id on the next camera. Gray-world colour
+# balance: each person crop is scaled so its average colour is grey, which
+# removes most of the light / camera colour cast before the colours are compared.
+EVEN_LIGHT = os.getenv("REID_EVEN_LIGHT", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _even_light(crop: np.ndarray) -> np.ndarray:
+    """Gray-world white balance of one person crop (BGR)."""
+    if not EVEN_LIGHT or crop.size == 0:
+        return crop
+    px = crop.reshape(-1, 3).astype(np.float32)
+    lum = px.mean(axis=1)
+    keep = px[(lum > 25) & (lum < 235)]  # very dark / blown-out pixels carry no colour
+    if len(keep) < 50:
+        return crop
+    means = keep.mean(axis=0)
+    gain = np.clip(means.mean() / np.maximum(means, 1.0), 0.6, 1.6)
+    return np.clip(crop.astype(np.float32) * gain, 0, 255).astype(np.uint8)
+
+
 def appearance(frame: np.ndarray, box: tuple[float, float, float, float]) -> np.ndarray | None:
     """Clothes colour signature of one person box: hue/saturation histograms of
     the upper body and the lower body (head and feet left out)."""
@@ -82,9 +105,10 @@ def appearance(frame: np.ndarray, box: tuple[float, float, float, float]) -> np.
     if bh < 40 or bw < 16:
         return None  # too small to judge
     x1, x2 = x1 + bw // 8, x2 - bw // 8  # trim the sides (background) a little
+    person = _even_light(frame[y1:y2, x1:x2])
     parts = []
     for top, bottom in ((0.18, 0.55), (0.55, 0.92)):  # upper body, lower body
-        crop = frame[y1 + int(bh * top): y1 + int(bh * bottom), x1:x2]
+        crop = person[int(bh * top): int(bh * bottom)]
         if crop.size == 0:
             return None
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
@@ -176,14 +200,18 @@ def compare(a: Look | None, b: Look | None) -> float | None:
         face_sure = s >= FACE_SAME + 0.1
         # FACE_SAME lands on MAX_DISTANCE, identical faces on 0
         parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6)), WEIGHTS["face"]))
+    body_sure = False
     if a.body is not None and b.body is not None:
         s = float(a.body @ b.body)
         if s < BODY_DIFFERENT and not face_sure:
             return None  # another body
+        body_sure = s >= BODY_SAME
         parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6)), WEIGHTS["body"]))
     if a.attire is not None and b.attire is not None:
         d = attire_distance(a.attire, b.attire)
-        if d > ATTIRE_DIFFERENT and not face_sure:
+        # Clothes colours alone never veto when the face or the whole-body model says
+        # "same person": colours change with the light and the camera angle
+        if d > ATTIRE_DIFFERENT and not face_sure and not body_sure:
             return None  # other clothes
         parts.append((d, WEIGHTS["attire"]))
     if a.height is not None and b.height is not None:

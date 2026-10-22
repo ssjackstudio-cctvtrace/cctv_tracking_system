@@ -495,6 +495,8 @@ export function AreasEditor({
       // flat areas: the edge box checks the feet point against the outline on the picture
       regions: next.regions.map((r) => ({ ...r, floor: null })),
       inside_only: next.inside_only === true,
+      // obstacles saved from the Floor map stay when the floor / areas are saved here
+      ...(next.obstacles?.length ? { obstacles: next.obstacles } : {}),
     }
     setSaving(true)
     setMessage('')

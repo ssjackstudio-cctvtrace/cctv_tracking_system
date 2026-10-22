@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import platform
 import re
 from dataclasses import dataclass
 
@@ -36,6 +38,29 @@ class Settings:
     live_quality: int
 
 
+EDGE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def resolve_model(model: str) -> str:
+    """On the RK3588 box (ARM), a PyTorch model (.pt) runs on the CPU: about
+    1-3 pictures a second for 4 cameras, so boxes trail behind people, the live
+    video stutters and people are missed. When the NPU copy of the same model
+    (e.g. yolo11n_rknn_model, made with `yolo export ... format=rknn`) is in the
+    edge folder, it is used instead (10x faster). MODEL_AUTO_NPU=off keeps the .pt."""
+    auto = os.getenv("MODEL_AUTO_NPU", "on").strip().lower() not in ("off", "0", "false", "no")
+    if not auto or not model.endswith(".pt") or platform.machine().lower() not in ("aarch64", "arm64"):
+        return model
+    name = os.path.splitext(os.path.basename(model))[0]
+    rknn = os.path.join(EDGE_DIR, f"{name}_rknn_model")
+    if os.path.isdir(rknn):
+        logging.getLogger("config").info("MODEL=%s would run on the CPU: using the NPU model %s instead", model, rknn)
+        return rknn
+    logging.getLogger("config").warning(
+        "MODEL=%s runs on the CPU of this ARM box (slow: laggy live video, missed people). "
+        "Copy %s_rknn_model into %s and set MODEL=./%s_rknn_model (README → Use the NPU)", model, name, EDGE_DIR, name)
+    return model
+
+
 def load_settings(offline: bool = False) -> Settings:
     load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
     need = (lambda n, d=None: os.getenv(n, d or "")) if offline else _env
@@ -45,8 +70,10 @@ def load_settings(offline: bool = False) -> Settings:
         edge_device_id=need("EDGE_DEVICE_ID"),
         tapo_user=os.getenv("TAPO_USER", ""),
         tapo_pass=os.getenv("TAPO_PASS", ""),
-        model=os.getenv("MODEL", "yolo11n.pt"),
-        confidence=float(os.getenv("CONFIDENCE", "0.40")),
+        model=resolve_model(os.getenv("MODEL", "yolo11n.pt")),
+        # Low on purpose: partly hidden people (lower score) keep their tracker number;
+        # new people still need a sure detection (new_track_thresh, PERSON_CONF_PEAK)
+        confidence=float(os.getenv("CONFIDENCE", "0.15")),
         image_size=int(os.getenv("IMAGE_SIZE", "640")),
         anchor=os.getenv("ANCHOR", "bottom"),
         snapshot_seconds=float(os.getenv("SNAPSHOT_SECONDS", "5")),

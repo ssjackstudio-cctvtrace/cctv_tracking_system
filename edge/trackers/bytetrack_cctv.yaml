@@ -1,11 +1,17 @@
 # ByteTrack settings for the shop cameras (Ultralytics tracker file).
-# Same as Ultralytics' bytetrack.yaml, except track_buffer: a person hidden
-# behind a shelf or another shopper keeps the same tracker number for longer
-# (60 frames instead of 30), so their track_id label does not jump.
+# Tuned for 4 corner cameras in a shop with display tables and a counter:
+#  - CONFIDENCE in .env is low (0.15), so boxes of PARTLY HIDDEN people (lower
+#    score) still reach the tracker. ByteTrack uses them in its second round
+#    (track_low_thresh .. track_high_thresh) to keep an EXISTING person's number,
+#    but never starts a new person from them (new_track_thresh). Fewer new
+#    track_ids when a shopper walks behind a table, and fewer "people" made from
+#    bags, trolleys and mannequins.
+#  - track_buffer: a lost person keeps the same tracker number for 90 frames
+#    (about 6 s at 15 pictures a second on the NPU).
 tracker_type: bytetrack
-track_high_thresh: 0.25 # threshold for the first association
-track_low_thresh: 0.1 # threshold for the second association
-new_track_thresh: 0.25 # threshold to start a new track
-track_buffer: 60 # frames a lost person is kept before their number is dropped
+track_high_thresh: 0.35 # first association: sure boxes
+track_low_thresh: 0.12 # second association: partly hidden people (keep existing numbers only)
+new_track_thresh: 0.45 # a new tracker number needs a fairly sure detection
+track_buffer: 90 # frames a lost person is kept before their number is dropped
 match_thresh: 0.8 # threshold for matching tracks
 fuse_score: True # fuse confidence scores with the iou distances before matching

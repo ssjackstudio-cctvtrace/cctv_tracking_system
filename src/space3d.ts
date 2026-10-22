@@ -214,7 +214,19 @@ export function fitTilt(samples: { foot: Point; head: Point }[], aspect: number,
 
 // inside_only: the whole picture is inside the shop (a camera that never sees the
 // walkway, e.g. ABT-03): no Traffic / Out of Range, only In
-export type FloorAreas = { version: 3; calibration: Calibration | null; regions: Region[]; inside_only?: boolean }
+// Something standing on the floor that hides people's legs (display table, counter,
+// mannequin): its box on this camera's picture (0–1). Found by the edge box, saved
+// from the Floor map; the edge box then works out the floor spot of a person whose
+// legs are hidden behind it from the top of their head.
+export type Obstacle = { id: string; label: string; b: [number, number, number, number] }
+
+export type FloorAreas = {
+  version: 3
+  calibration: Calibration | null
+  regions: Region[]
+  inside_only?: boolean
+  obstacles?: Obstacle[]
+}
 
 type M3 = number[] // 9, row by row
 type M34 = number[] // 12, row by row
@@ -400,7 +412,32 @@ export function readFloorAreas(value: unknown): FloorAreas {
       z_min: Number(r.z_min ?? 0) || 0,
       z_max: Number(r.z_max ?? 2.2) || 2.2,
     }))
-  return { version: 3, calibration, regions, inside_only: v.inside_only === true }
+  const obstacles = (Array.isArray(v.obstacles) ? v.obstacles : [])
+    .filter((o) => o && Array.isArray(o.b) && o.b.length === 4 && o.b.every((n) => typeof n === 'number'))
+    .map((o, i) => ({ id: o.id || `o${i + 1}`, label: o.label || 'obstacle', b: o.b }))
+  return {
+    version: 3,
+    calibration,
+    regions,
+    inside_only: v.inside_only === true,
+    ...(obstacles.length ? { obstacles } : {}),
+  }
+}
+
+// Where an obstacle stands on the floor (metres): the bottom edge of its box is
+// its front on the floor; it is drawn depth metres deep, away from the camera.
+export function obstacleFootprint(cal: Calibration, o: Obstacle, depth = 0.5): Point[] | null {
+  const [x1, , x2, y2] = o.b
+  const a = floorOf(cal, { x: x1, y: y2 })
+  const b = floorOf(cal, { x: x2, y: y2 })
+  const cam = cal.place ?? { x: 0, y: 0 }
+  if (!a || !b) return null
+  const mx = (a.x + b.x) / 2 - cam.x
+  const my = (a.y + b.y) / 2 - cam.y
+  const n = Math.hypot(mx, my)
+  if (n < 1e-6 || n > 25) return null
+  const [dx, dy] = [(mx / n) * depth, (my / n) * depth]
+  return [a, b, { x: b.x + dx, y: b.y + dy }, { x: a.x + dx, y: a.y + dy }]
 }
 
 // ---------- areas must not overlap ----------

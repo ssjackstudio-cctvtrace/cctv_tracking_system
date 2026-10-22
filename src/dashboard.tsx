@@ -143,6 +143,7 @@ const todayKey = () => dateKey(new Date().toISOString())
 type PersonEvent = {
   visit_id: string
   direction: string
+  track_region: string | null
   event_time: string
   visit: {
     est_gender: string
@@ -161,7 +162,7 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
     let q = supabase
       .from(TABLES.cctvEvent)
       .select(
-        'visit_id, direction, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender, track_id, visit_type, member(full_name), staff(full_name))',
+        'visit_id, direction, track_region, event_time, camera!inner(edge_device!inner(branch_id)), visit!inner(est_gender, track_id, visit_type, member(full_name), staff(full_name))',
       )
     if (branch) q = q.eq('camera.edge_device.branch_id', branch)
     if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
@@ -176,8 +177,10 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 
 // People, not events: one person (one track_id) can be seen going In by several
 // cameras and walk into several areas, so each number counts distinct track_ids.
-//   People Passed By = distinct track_ids with a Passed By event (Male + Female + Unknown = the total)
-//   People Walk-in = distinct track_ids with an In event (Male + Female + Unknown = the total)
+//   People Passed By = distinct track_ids with a Passed By event in track_region Traffic
+//   People Walk-in = distinct track_ids with an In event in track_region Counter or Purchasing
+//     (one track_id with In rows in several areas / from several cameras is one person)
+//   (Male + Female + Unknown = the total)
 // Time in the shop, per track_id: from an In (Purchasing / Counter) until the
 // next Passed By (walked onto the Traffic walkway) or Out; a person who comes
 // back in later adds that stay too. A stay that has not ended yet is left out.
@@ -208,10 +211,10 @@ export function countPeople(events: PersonEvent[]) {
       seconds: 0,
       ended: false,
     }
-    if (e.direction === 'Passed By') p.passedBy = true
+    if (e.direction === 'Passed By' && e.track_region === 'Traffic') p.passedBy = true
     const t = new Date(e.event_time).getTime()
     if (e.direction === 'In') {
-      p.wentIn = true
+      if (e.track_region === 'Counter' || e.track_region === 'Purchasing') p.wentIn = true
       if (p.since === null) p.since = t // came into the shop (another In while inside = moved to another area)
     } else if ((e.direction === 'Passed By' || e.direction === 'Out') && p.since !== null) {
       p.seconds += Math.max(0, (t - p.since) / 1000)

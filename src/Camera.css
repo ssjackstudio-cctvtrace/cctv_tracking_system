@@ -754,3 +754,71 @@
   outline: 2px solid var(--ds-lens);
   outline-offset: 2px;
 }
+
+/* Shop Floor Map (Camera details page) */
+.fm-wrap {
+  max-width: 900px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.fm-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  touch-action: none;
+}
+
+.fm-camera--drag circle,
+.fm-corner {
+  cursor: grab;
+}
+
+.fm-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+
+.fm-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.fm-controls input[type='number'] {
+  width: 90px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.fm-controls .fm-slider input {
+  width: 180px;
+}
+
+.fm-message {
+  color: #92400e;
+}
+
+.fm-occupancy {
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+@media (max-width: 600px) {
+  .fm-controls input[type='number'] {
+    width: 72px;
+  }
+  .fm-controls .fm-slider input {
+    width: 140px;
+  }
+}

@@ -89,6 +89,11 @@ KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "300"))  # 5 minutes
 # After Out: the track_id is kept this long after the last camera saw the person (outside the shop)
 OUTSIDE_KEEP_SECONDS = float(os.getenv("OUTSIDE_KEEP_SECONDS", "300"))
 HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this long is "hidden" (may come back)
+# A visitor no camera has seen for this long may be given back to someone who appears INSIDE
+# with a matching look (reclaim). Was HIDDEN_SECONDS (3 s): a person who walked out of one
+# camera's picture and into the next camera's picture 2-3 s later fell in the gap between the
+# overlap handoff (OVERLAP_SECONDS) and reclaim, and got a NEW track_id.
+RECLAIM_AFTER_SECONDS = min(float(os.getenv("RECLAIM_AFTER_SECONDS", "1.0")), KEEP_SECONDS)
 LOOSE_DISTANCE = min(0.9, MAX_DISTANCE * 1.5)  # look match for a hidden visitor coming back (within KEEP_SECONDS)
 HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have walked in KEEP_SECONDS (cameras on the shop plan)
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
@@ -108,7 +113,7 @@ EXIT_LINK_SCORE = 1.8  # ... but only with a clearly matching look (score below 
 # a new track_id. Handoff: a visitor ANOTHER camera sees right now (or who went In
 # on another camera a moment ago), and whom this camera is not following yet, is
 # the same person unless the look is clearly different (looser match).
-OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "2.0"))  # "seen by another camera right now"
+OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "3.0"))  # "seen by another camera right now"
 OVERLAP_IN_SECONDS = float(os.getenv("OVERLAP_IN_SECONDS", "4.0"))  # In on 2 cameras this close = same entry
 OVERLAP_DISTANCE = float(os.getenv("OVERLAP_DISTANCE", str(LOOSE_DISTANCE)))  # look match allowed for a handoff
 # Areas: another camera that saw the person on the other side (inside / on the walkway) this
@@ -504,7 +509,7 @@ class VisitorRegistry:
                 if v.left or v.outside or v.visit_id in exclude:
                     continue  # people who went Out come back through the entrance, not from hiding
                 last = v.last_any
-                if now - last < HIDDEN_SECONDS or now - last > self.keep_seconds:
+                if now - last < RECLAIM_AFTER_SECONDS or now - last > self.keep_seconds:
                     continue  # seen right now (not hidden), or already ended
                 if not comparable(look, v.look):
                     continue  # nothing to recognise them by: a new person
