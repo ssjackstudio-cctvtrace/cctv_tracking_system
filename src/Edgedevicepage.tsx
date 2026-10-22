@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
-import { TABLES } from './Usetable'
+import { TABLES, edgeStatusNow } from './Usetable'
 import type { Branch, EdgeDevice } from './types'
 import './Branches.css'
 import './Edgedevice.css'
@@ -98,7 +98,7 @@ function EdgeDeviceCard({
           <span className="bc-label">Status</span>
           <span className="bc-colon">:</span>
           <span className="bc-value">
-            <EdgeStatus status={device.status} />
+            <EdgeStatus status={edgeStatusNow(device)} />
           </span>
         </div>
       </div>
@@ -162,9 +162,9 @@ export default function EdgeDevicePage({ onAdd, onManage }: Props) {
     const q = search.trim().toLowerCase()
     return devices.filter((d) => {
       if (branchFilter && d.branch_id !== branchFilter) return false
-      if (statusFilter && d.status !== statusFilter) return false
+      if (statusFilter && edgeStatusNow(d) !== statusFilter) return false
       if (!q) return true
-      return [d.branch?.branch_name ?? '', d.device_name, d.status].some((v) => v.toLowerCase().includes(q))
+      return [d.branch?.branch_name ?? '', d.device_name, edgeStatusNow(d)].some((v) => v.toLowerCase().includes(q))
     })
   }, [devices, search, branchFilter, statusFilter])
 

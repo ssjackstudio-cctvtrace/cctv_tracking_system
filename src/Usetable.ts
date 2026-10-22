@@ -163,3 +163,11 @@ export const formatAmount = (amount: number | null) =>
 // True when a camera or edge box has reported within the last few minutes
 export const isOnline = (lastSeen: string | null, withinMinutes = 5) =>
   !!lastSeen && Date.now() - new Date(lastSeen).getTime() < withinMinutes * 60_000
+
+// AI edge box status as it is NOW. The box writes "Online" with a heartbeat every
+// minute, but it cannot write "Offline" when its own internet is gone (router or
+// Wi-Fi off), so edge_device.status would stay "Online". A box with no heartbeat
+// for HEARTBEAT_STALE_MINUTES is shown Offline (same 3 minutes as the cameras).
+export const HEARTBEAT_STALE_MINUTES = 3
+export const edgeStatusNow = (d: { status: string; last_heartbeat: string | null }) =>
+  d.status === 'Online' && isOnline(d.last_heartbeat, HEARTBEAT_STALE_MINUTES) ? 'Online' : 'Offline'

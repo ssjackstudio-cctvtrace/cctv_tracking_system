@@ -10,7 +10,7 @@ import {
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import DataTable, { Badge } from './Datatable'
 import { supabase } from './lib/supabase'
-import { TABLES, isOnline } from './Usetable'
+import { TABLES, edgeStatusNow, isOnline } from './Usetable'
 import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { AreasEditor, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
@@ -864,7 +864,7 @@ export default function CameraDetails({
     ? [
         ['Edge Device Name', edge.device_name],
         ['Last Heartbeat', formatLongDateTime(edge.last_heartbeat)],
-        ['Edge Device Status', <Badge text={edge.status} />],
+        ['Edge Device Status', <Badge text={edgeStatusNow(edge)} />],
       ]
     : [['Edge Device', info ? 'No edge box linked to this camera' : '—']]
 
