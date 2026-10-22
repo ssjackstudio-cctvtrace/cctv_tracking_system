@@ -360,3 +360,15 @@
 /* the real date input stays under the button, so the calendar opens next to it */
 .ev-datefilter-input { position: absolute; left: 2.6rem; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; border: 0; padding: 0; }
 @media (max-width: 760px) { .ev-toolbar { align-items: flex-start; } }
+
+/* Event History filters, under the tabs.
+   Sidebar expanded: date, visit type, gender, direction, track region in one row.
+   Sidebar collapsed: date + visit type, then gender, direction, track region underneath. */
+.ev-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; margin-bottom: 1rem; }
+.ev-filter-row { display: contents; }
+.ds--collapsed .ev-filters { flex-direction: column; align-items: flex-start; }
+.ds--collapsed .ev-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; }
+.ev-select { display: flex; align-items: center; gap: 0.5rem; }
+.ev-select select { min-width: 140px; padding: 0.5rem 0.8rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; }
+.ev-select select:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.ev-select select:disabled { background: var(--ds-paper); color: var(--ds-muted); cursor: not-allowed; }
