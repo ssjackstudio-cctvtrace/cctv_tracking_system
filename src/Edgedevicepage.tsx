@@ -21,9 +21,11 @@ type Props = {
 
 type Notice = { type: 'success' | 'error'; text: string }
 
-// DD Month YYYY, e.g. 05 March 2026
+// DD Month YYYY HH:MM:SS AM/PM, e.g. 05 March 2026 03:45:12 PM
 export const formatDate = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' }) : '—'
+  iso
+    ? `${new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}`
+    : '—'
 
 export function TickIcon() {
   return (
