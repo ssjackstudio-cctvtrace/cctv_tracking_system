@@ -29,10 +29,10 @@ export const formatLongDate = (iso: string | null) =>
     ? new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
     : '—'
 
-// "09 October 2026 04:54 PM"
+// "09 October 2026 04:54:07 PM"
 export const formatLongDateTime = (iso: string | null) =>
   iso
-    ? `${formatLongDate(iso)} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
+    ? `${formatLongDate(iso)} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}`
     : '—'
 
 // Event time: "09 October 2026 04:54:07 PM" (DD Month YYYY hh:mm:ss AM/PM)
