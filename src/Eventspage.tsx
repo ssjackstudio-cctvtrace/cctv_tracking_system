@@ -49,11 +49,11 @@ type RecognitionEventRow = {
   } | null
 }
 
-// DD Month YYYY hh:mm AM/PM, e.g. 05 March 2026 03:45 PM
+// DD Month YYYY hh:mm:ss AM/PM, e.g. 05 March 2026 03:45:12 PM (event time)
 const fmtDateTime = (iso: string) => {
   const d = new Date(iso)
   const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
-  return `${date} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
+  return `${date} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}`
 }
 // DD Month YYYY, e.g. 18 October 2026 (day = YYYY-MM-DD)
 const fmtDay = (day: string) =>

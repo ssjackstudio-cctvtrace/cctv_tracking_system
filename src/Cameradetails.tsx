@@ -35,6 +35,10 @@ export const formatLongDateTime = (iso: string | null) =>
     ? `${formatLongDate(iso)} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
     : '—'
 
+// Event time: "09 October 2026 04:54:07 PM" (DD Month YYYY hh:mm:ss AM/PM)
+const formatEventTime = (iso: string | null) =>
+  iso ? `${formatLongDate(iso)} ${new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}` : '—'
+
 // How often the camera / edge box details refresh (status, last seen, heartbeat)
 const INFO_REFRESH_MS = 10_000
 
@@ -563,7 +567,7 @@ function CameraCctvEvents({ cameraId, day, reloadKey }: { cameraId: string; day:
         { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
         { header: 'Track region', render: (r) => r.track_region ?? '—' },
         { header: 'Confidence', render: (r) => `${fmt2(r.confidence)}%` },
-        { header: 'Event time', render: (r) => formatLongDateTime(r.event_time) },
+        { header: 'Event time', render: (r) => formatEventTime(r.event_time) },
       ]}
     />
   )
@@ -608,7 +612,7 @@ function CameraRecognitionEvents({ cameraId, day, reloadKey }: { cameraId: strin
         },
         { header: 'Match score', render: (r) => fmt2(r.match_score) },
         { header: 'Result', render: (r) => <Badge text={r.result} /> },
-        { header: 'Event time', render: (r) => formatLongDateTime(r.event_time) },
+        { header: 'Event time', render: (r) => formatEventTime(r.event_time) },
       ]}
     />
   )

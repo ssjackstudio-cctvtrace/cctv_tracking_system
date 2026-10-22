@@ -124,10 +124,10 @@ const dateKey = (iso: string) => {
 // DD Month YYYY, e.g. 05 March 2026
 const fmtDate = (d: Date) =>
   d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' })
-// DD Month YYYY hh:mm AM/PM, e.g. 05 March 2026 03:45 PM
+// DD Month YYYY hh:mm:ss AM/PM, e.g. 05 March 2026 03:45:12 PM (event time)
 const fmtDateTime = (iso: string) => {
   const d = new Date(iso)
-  return `${fmtDate(d)} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`
+  return `${fmtDate(d)} ${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}`
 }
 // [start of the day, start of the next day] as ISO strings, for one date (YYYY-MM-DD)
 const dayRange = (day: string): Range => {
