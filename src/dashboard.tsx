@@ -502,7 +502,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     tone?: 'in' | 'passed'
   }[] = [
     {
-      label: 'People Passed By',
+      label: 'Passed By',
       value: counts.passedCount,
       male: counts.passedMale,
       female: counts.passedFemale,
@@ -510,7 +510,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
       tone: 'passed',
     },
     {
-      label: 'People Walk-in',
+      label: 'Walk-in',
       value: counts.inCount,
       male: counts.inMale,
       female: counts.inFemale,
