@@ -51,6 +51,16 @@ ATTIRE_DIFFERENT = float(os.getenv("REID_ATTIRE_DIFFERENT", "0.70"))
 HEIGHT_DIFFERENT = float(os.getenv("REID_HEIGHT_DIFFERENT", "0.15"))
 # How much each kind of evidence counts
 WEIGHTS = {"face": 3.0, "body": 2.0, "attire": 1.0, "height": 0.5}
+# ACROSS two different cameras (other angle, other light, other white balance, legs
+# hidden by a different table) the same person's clothes colours and measured height
+# differ a lot: in a real case the same man scored attire 0.69-0.70 (veto at 0.70) and
+# 1.38 m vs 1.60 m tall on two cameras, and got a NEW track_id on the second camera.
+# So across cameras: clothes colours and height never veto ("clearly someone else"),
+# clothes count less, height (each camera's own 3D calibration) is not compared, and
+# the whole-body model only vetoes when it is very sure (side vs back view lowers it).
+# Face stays as strong as on one camera. On ONE camera the strict rules above stay.
+CROSS_WEIGHTS = {"face": 3.0, "body": 2.0, "attire": 0.6, "height": 0.0}
+BODY_DIFFERENT_CROSS = float(os.getenv("REID_BODY_DIFFERENT_CROSS", "0.25"))
 
 H_BINS, S_BINS = 16, 8
 FACE_MIN_PIXELS = 36  # smaller faces are too blurry to recognise
@@ -78,6 +88,11 @@ def _unit(v: np.ndarray) -> np.ndarray:
 # balance: each person crop is scaled so its average colour is grey, which
 # removes most of the light / camera colour cast before the colours are compared.
 EVEN_LIGHT = os.getenv("REID_EVEN_LIGHT", "on").strip().lower() not in ("off", "0", "false", "no")
+# How strongly the colour cast is removed (0 = not at all, 1 = full gray-world). Full
+# gray-world also greys out a strongly coloured shirt (it takes the shirt's own colour
+# for a colour cast): a yellow shirt matched WORSE with it (0.75) than without (0.62).
+# Half strength removes most of the light's cast and keeps the clothes' colour.
+EVEN_LIGHT_STRENGTH = min(1.0, max(0.0, float(os.getenv("REID_EVEN_LIGHT_STRENGTH", "0.5"))))
 
 
 def _even_light(crop: np.ndarray) -> np.ndarray:
@@ -90,7 +105,7 @@ def _even_light(crop: np.ndarray) -> np.ndarray:
     if len(keep) < 50:
         return crop
     means = keep.mean(axis=0)
-    gain = np.clip(means.mean() / np.maximum(means, 1.0), 0.6, 1.6)
+    gain = np.clip(means.mean() / np.maximum(means, 1.0), 0.6, 1.6) ** EVEN_LIGHT_STRENGTH
     return np.clip(crop.astype(np.float32) * gain, 0, 255).astype(np.uint8)
 
 
@@ -171,11 +186,13 @@ class Look:
         return c
 
 
-def comparable(a: Look | None, b: Look | None) -> bool:
-    """Both looks have at least one kind of evidence in common."""
+def comparable(a: Look | None, b: Look | None, cross: bool = False) -> bool:
+    """Both looks have at least one kind of evidence in common (across cameras
+    the height does not count: each camera measures it with its own calibration)."""
     if a is None or b is None:
         return False
-    return any(getattr(a, n) is not None and getattr(b, n) is not None for n in ("attire", "face", "body", "height"))
+    kinds = ("attire", "face", "body") if cross else ("attire", "face", "body", "height")
+    return any(getattr(a, n) is not None and getattr(b, n) is not None for n in kinds)
 
 
 def same_face(a: Look | None, b: Look | None) -> bool:
@@ -186,11 +203,15 @@ def same_face(a: Look | None, b: Look | None) -> bool:
     return float(a.face @ b.face) >= FACE_SAME + 0.1
 
 
-def compare(a: Look | None, b: Look | None) -> float | None:
+def compare(a: Look | None, b: Look | None, cross: bool = False) -> float | None:
     """0 = surely the same person, 1 = nothing alike, None = clearly a
-    different person (or nothing to compare)."""
-    if not comparable(a, b):
+    different person (or nothing to compare).
+    cross=True: the two looks come from DIFFERENT cameras (see CROSS_WEIGHTS):
+    only the face, or a very sure whole-body model, can say "someone else"."""
+    if not comparable(a, b, cross):
         return None
+    weights = CROSS_WEIGHTS if cross else WEIGHTS
+    body_different = BODY_DIFFERENT_CROSS if cross else BODY_DIFFERENT
     parts: list[tuple[float, float]] = []  # (distance 0-1, weight)
     face_sure = False
     if a.face is not None and b.face is not None:
@@ -199,26 +220,26 @@ def compare(a: Look | None, b: Look | None) -> float | None:
             return None  # another face
         face_sure = s >= FACE_SAME + 0.1
         # FACE_SAME lands on MAX_DISTANCE, identical faces on 0
-        parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6)), WEIGHTS["face"]))
+        parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6)), weights["face"]))
     body_sure = False
     if a.body is not None and b.body is not None:
         s = float(a.body @ b.body)
-        if s < BODY_DIFFERENT and not face_sure:
+        if s < body_different and not face_sure:
             return None  # another body
         body_sure = s >= BODY_SAME
-        parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6)), WEIGHTS["body"]))
+        parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6)), weights["body"]))
     if a.attire is not None and b.attire is not None:
         d = attire_distance(a.attire, b.attire)
         # Clothes colours alone never veto when the face or the whole-body model says
         # "same person": colours change with the light and the camera angle
-        if d > ATTIRE_DIFFERENT and not face_sure and not body_sure:
-            return None  # other clothes
-        parts.append((d, WEIGHTS["attire"]))
-    if a.height is not None and b.height is not None:
+        if d > ATTIRE_DIFFERENT and not face_sure and not body_sure and not cross:
+            return None  # other clothes (same camera, same light: a real difference)
+        parts.append((d, weights["attire"]))
+    if a.height is not None and b.height is not None and not cross:
         dh = abs(a.height - b.height)
         if dh > HEIGHT_DIFFERENT and not face_sure:
             return None  # other height
-        parts.append((MAX_DISTANCE * dh / max(HEIGHT_DIFFERENT, 1e-6), WEIGHTS["height"]))
+        parts.append((MAX_DISTANCE * dh / max(HEIGHT_DIFFERENT, 1e-6), weights["height"]))
     if face_sure:  # the same face for sure: the rest only fine-tunes
         return min(d for d, _ in parts) * 0.5
     total = sum(w for _, w in parts)

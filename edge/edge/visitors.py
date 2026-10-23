@@ -47,8 +47,12 @@ Is this the same person? The registry compares, for every remembered visitor:
      seen by two cameras at once (overlapping views) is at the same floor
      spot. A visitor seen somewhere else on the floor right now cannot be
      this person.
-  2. Face, attire, whole body and height (reid.compare). A clear difference
-     in any of them = another person.
+  2. Face, attire, whole body and height (reid.compare). On the SAME camera a
+     clear difference in any of them = another person. Each visitor keeps a
+     look per camera: a camera compares with what it saw itself (strict), or,
+     for a visitor only other cameras saw, with their looks under the
+     cross-camera rules (only the face or a very sure whole-body model can
+     say "another person"; clothes colours count less, height not at all).
      Also for a person lost for a while: with the cameras on the shop plan,
      someone can only be a remembered visitor if they stand within walking
      distance (PERSON_SPEED_MPS x the time since that visitor was last seen)
@@ -113,7 +117,9 @@ EXIT_LINK_SCORE = 1.8  # ... but only with a clearly matching look (score below 
 # a new track_id. Handoff: a visitor ANOTHER camera sees right now (or who went In
 # on another camera a moment ago), and whom this camera is not following yet, is
 # the same person unless the look is clearly different (looser match).
-OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "3.0"))  # "seen by another camera right now"
+# 8 s: a shopper walking out of one camera's picture can take several seconds to appear
+# in the next camera's picture (e.g. ABT-02 → ABT-01 took about 9 s); with 3 s they got a new track_id
+OVERLAP_SECONDS = float(os.getenv("OVERLAP_SECONDS", "8.0"))  # "seen by another camera a moment ago"
 OVERLAP_IN_SECONDS = float(os.getenv("OVERLAP_IN_SECONDS", "4.0"))  # In on 2 cameras this close = same entry
 OVERLAP_DISTANCE = float(os.getenv("OVERLAP_DISTANCE", str(LOOSE_DISTANCE)))  # look match allowed for a handoff
 # Areas: another camera that saw the person on the other side (inside / on the walkway) this
@@ -124,12 +130,36 @@ GUARD_SECONDS = float(os.getenv("AREA_GUARD_SECONDS", "1.5"))
 PERSON_SPEED_MPS = float(os.getenv("PERSON_SPEED_MPS", "1.5"))
 
 
+def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
+    """(comparable, distance) between a new look and a remembered visitor, as
+    reid.compare (0 = same, None = clearly someone else).
+    - camera_id unknown, or the visitor has no per-camera looks: the overall look, strict.
+    - The visitor was seen on THIS camera: compared with this camera's look, strict
+      (same angle, same light: a clothes / height difference is real).
+    - Only seen on OTHER cameras: compared with each of those cameras' looks with the
+      cross-camera rules, the best one counts (another angle / light / white balance)."""
+    if camera_id is None or not v.looks:
+        ok = comparable(look, v.look)
+        return ok, compare(look, v.look) if ok else None
+    own = v.looks.get(camera_id)
+    if own is not None and comparable(look, own):
+        return True, compare(look, own)
+    others = [lk for c, lk in v.looks.items() if c != camera_id and comparable(look, lk, cross=True)]
+    if not others:
+        return False, None
+    found = [d for d in (compare(look, lk, cross=True) for lk in others) if d is not None]
+    return True, (min(found) if found else None)
+
+
 @dataclass(eq=False)
 class Visitor:
     visit_id: str
     track_id: str  # given by the first camera that saw the person go In; never changes, never reused
     first_camera: str = ""
     look: Look = field(default_factory=Look)  # face + attire + whole body, from all cameras
+    # the same, per camera: a camera compares a person with what IT saw before (same angle,
+    # same light: strict rules), and with what OTHER cameras saw (cross-camera rules, reid.compare)
+    looks: dict[str, Look] = field(default_factory=dict)
     cameras_in: set[str] = field(default_factory=set)  # cameras that already recorded In for this visit
     in_at: dict[str, float] = field(default_factory=dict)  # camera_id → time that camera recorded In (handoff)
     seen_on: dict[str, float] = field(default_factory=dict)  # camera_id → last time seen there
@@ -149,9 +179,16 @@ class Visitor:
     outside: bool = False  # counted Out (still remembered while seen, and OUTSIDE_KEEP_SECONDS after)
     left: bool = False  # ended: the track_id is finished for good
 
-    def add_look(self, look: Look | None) -> None:
-        """Keep a running average of how the visitor looks (several frames, several cameras)."""
+    def add_look(self, look: Look | None, camera_id: str | None = None) -> None:
+        """Keep a running average of how the visitor looks (several frames, several
+        cameras), and per camera when the camera is known."""
         self.look.add(look)
+        if camera_id is not None and look is not None and not look.empty:
+            own = self.looks.get(camera_id)
+            if own is None:
+                self.looks[camera_id] = look.copy()
+            else:
+                own.add(look)
 
     @property
     def last_any(self) -> float:
@@ -174,15 +211,16 @@ class VisitorRegistry:
 
     # ---------- who is this person? ----------
     def _score(self, v: Visitor, look: Look | None, floor: tuple[float, float] | None,
-               now: float) -> float | None:
+               now: float, camera_id: str | None = None) -> float | None:
         """Lower = more alike. None = cannot be this visitor."""
         if v.left or now - v.last_any > self._keep(v):
             return None  # ended (or about to be): its track_id is never given again
         app = None
-        if comparable(look, v.look):
-            app = compare(look, v.look)
+        ok, d = look_distance(look, v, camera_id)
+        if ok:
+            app = d
             if app is None:
-                return None  # another face / body / attire / height
+                return None  # another face / body (or, on the same camera, attire / height)
         fresh = floor is not None and v.floor is not None and now - v.floor_at <= POSITION_FRESH_SECONDS
         if fresh:
             d = math.dist(floor, v.floor)  # type: ignore[arg-type]
@@ -208,7 +246,7 @@ class VisitorRegistry:
 
     def _match_locked(self, look, floor, exclude: set[str], now: float, visible_only: bool = False,
                       outside_only: bool = False, inside_only: bool = False,
-                      just_out: bool = False) -> Visitor | None:
+                      just_out: bool = False, camera_id: str | None = None) -> Visitor | None:
         best, best_s = None, None
         for v in self._inside.values():
             if v.visit_id in exclude:
@@ -224,7 +262,7 @@ class VisitorRegistry:
                 continue  # someone who appeared inside cannot be a visitor who went Out
             if visible_only and not v.outside and (not v.seen_on or now - max(v.seen_on.values()) >= HIDDEN_SECONDS):
                 continue  # hidden inside: cannot be someone walking in from outside right now
-            s = self._score(v, look, floor, now)
+            s = self._score(v, look, floor, now, camera_id)
             if s is not None and leaving and s >= EXIT_LINK_SCORE:
                 continue  # just walked out: only with a clearly matching look
             if s is not None and (best_s is None or s < best_s):
@@ -234,7 +272,7 @@ class VisitorRegistry:
     def match(self, look: Look | None, floor: tuple[float, float] | None = None,
               exclude: set[str] | None = None, now: float | None = None,
               visible_only: bool = False, outside_only: bool = False, inside_only: bool = False,
-              just_out: bool = False) -> Visitor | None:
+              just_out: bool = False, camera_id: str | None = None) -> Visitor | None:
         """The remembered visitor who is most likely this person, or None.
         exclude = visit_ids already followed as other people in this camera's picture.
         visible_only: only visitors a camera sees right now (for someone who
@@ -243,12 +281,13 @@ class VisitorRegistry:
         outside_only: only visitors who went Out (for someone standing outside).
         just_out: with outside_only, also visitors inside seen in the last
         EXIT_LINK_SECONDS whose look clearly matches (they just walked out).
-        inside_only: only visitors who have not gone Out."""
+        inside_only: only visitors who have not gone Out.
+        camera_id: the asking camera (same-camera vs cross-camera look rules)."""
         if (look is None or look.empty) and floor is None:
             return None
         with self._lock:
             return self._match_locked(look, floor, exclude or set(), time.time() if now is None else now,
-                                      visible_only, outside_only, inside_only, just_out)
+                                      visible_only, outside_only, inside_only, just_out, camera_id)
 
     def _handoff_locked(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
                         camera_id: str, now: float, when: float | None, outside: bool = False) -> Visitor | None:
@@ -287,11 +326,11 @@ class VisitorRegistry:
                 apart = math.dist(floor, v.floor)
                 if apart > self.same_place and not (apart <= FLOOR_FACE_METRES and same_face(look, v.look)):
                     continue  # standing somewhere else on the shop plan (same face: calibration gap, allowed)
-            if not comparable(look, v.look):
+            ok, app = look_distance(look, v, camera_id)
+            if not ok:
                 if went_in:
                     blind.append(v)
                 continue
-            app = compare(look, v.look)
             if app is None or app > OVERLAP_DISTANCE:
                 continue  # clearly another person
             s = app - (0.05 if went_in else 0.0)  # went In at the same moment: a little more likely
@@ -310,7 +349,7 @@ class VisitorRegistry:
         now = time.time() if now is None else now
         with self._lock:
             known = (look is not None and not look.empty) or floor is not None
-            v = self._match_locked(look, floor, exclude, now, inside_only=True) if known else None
+            v = self._match_locked(look, floor, exclude, now, inside_only=True, camera_id=camera_id) if known else None
             return v or self._handoff_locked(look, floor, exclude, camera_id, now, when)
 
     def find_or_create(self, look, floor, exclude: set[str], create: Callable[[], Visitor],
@@ -323,7 +362,7 @@ class VisitorRegistry:
         now = time.time() if now is None else now
         with self._lock:
             known = (look is not None and not look.empty) or floor is not None
-            v = self._match_locked(look, floor, exclude, now, visible_only) if known else None
+            v = self._match_locked(look, floor, exclude, now, visible_only, camera_id=camera_id) if known else None
             if v is None and camera_id is not None:
                 v = self._handoff_locked(look, floor, exclude, camera_id, now, when)
             if v is not None:
@@ -341,7 +380,8 @@ class VisitorRegistry:
         now = time.time() if now is None else now
         with self._lock:
             known = (look is not None and not look.empty) or floor is not None
-            v = self._match_locked(look, floor, exclude, now, outside_only=True, just_out=True) if known else None
+            v = self._match_locked(look, floor, exclude, now, outside_only=True, just_out=True,
+                                   camera_id=camera_id) if known else None
             if v is None:
                 v = self._handoff_locked(look, floor, exclude, camera_id, now, None, outside=True)
             if v is not None:
@@ -496,7 +536,7 @@ class VisitorRegistry:
 
     # ---------- hidden people coming back ----------
     def reclaim(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
-                now: float | None = None) -> Visitor | None:
+                now: float | None = None, camera_id: str | None = None) -> Visitor | None:
         """Someone appeared INSIDE the shop (not walking in from outside) and no
         visitor matched closely: they may be a visitor who was hidden behind an
         obstacle for a few seconds (less than KEEP_SECONDS). Give them back the
@@ -511,9 +551,9 @@ class VisitorRegistry:
                 last = v.last_any
                 if now - last < RECLAIM_AFTER_SECONDS or now - last > self.keep_seconds:
                     continue  # seen right now (not hidden), or already ended
-                if not comparable(look, v.look):
+                ok, app = look_distance(look, v, camera_id)
+                if not ok:
                     continue  # nothing to recognise them by: a new person
-                app = compare(look, v.look)
                 if app is None or app > LOOSE_DISTANCE:
                     continue  # another face / body / attire / height
                 moved = math.dist(floor, v.floor) if floor is not None and v.floor is not None else None
