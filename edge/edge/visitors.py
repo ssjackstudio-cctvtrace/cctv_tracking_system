@@ -82,7 +82,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .demographics import Estimate
-from .reid import MAX_DISTANCE, Look, appearance, attire_distance, comparable, compare, same_face
+from .reid import (BODY_SAME, CROSS_WEIGHTS, FACE_SAME, MAX_DISTANCE, WEIGHTS, Look, appearance,
+                   attire_distance, comparable, compare, same_face)
 from datetime import datetime, timezone
 
 # Older names, kept for other modules
@@ -136,7 +137,10 @@ PERSON_SPEED_MPS = float(os.getenv("PERSON_SPEED_MPS", "1.5"))
 SUSPECT_DISTANCE = float(os.getenv("SUSPECT_DISTANCE", "0.80"))
 SUSPECT_GAP_SECONDS = float(os.getenv("SUSPECT_GAP_SECONDS", "60"))  # 2nd track_id started this soon after the 1st was last seen
 RETRACK_SECONDS = float(os.getenv("RETRACK_SECONDS", "120"))  # same camera: new number this soon after the old one was lost
-SAME_TIME_SECONDS = 1.0  # one camera followed both at once for longer than this = two people
+# Same place at the same time: two track_ids on DIFFERENT cameras at the same moment, in the
+# same kind of area, this close on the shop plan (cameras calibrated by hand can be 2-3 m off,
+# more when the legs are hidden) are listed even when their looks cannot be compared
+SUSPECT_PLACE_METRES = float(os.getenv("SUSPECT_PLACE_METRES", "3.0"))
 
 
 def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
@@ -217,6 +221,8 @@ class VisitorRegistry:
         self.outside_keep_seconds = outside_keep_seconds
         self.same_place = same_place
         self._inside: dict[str, Visitor] = {}  # visit_id → visitor (inside, or just went Out)
+        # pairs of visit_ids one camera saw in the SAME picture: surely two people (never a suspicious pair)
+        self._together: set[frozenset[str]] = set()
         self._lock = threading.RLock()
         self._day = time.localtime().tm_yday  # the list starts again every day
 
@@ -413,6 +419,10 @@ class VisitorRegistry:
         with self._lock:
             visitor.seen_on[camera_id] = now
             visitor.first_on.setdefault(camera_id, now)
+            # everyone this camera already saw in this same frame (same frame time) is someone else
+            for o in self._inside.values():
+                if o is not visitor and o.seen_on.get(camera_id) == now:
+                    self._together.add(frozenset((o.visit_id, visitor.visit_id)))
             visitor.last_seen = now
             if conf is not None:
                 visitor.last_conf = conf
@@ -544,6 +554,8 @@ class VisitorRegistry:
                 v.left = True
                 if not v.outside:
                     closed.append(v)
+            if self._together:  # forget pairs whose people are gone
+                self._together = {pair for pair in self._together if pair <= self._inside.keys()}
         return closed
 
     # ---------- hidden people coming back ----------
@@ -587,16 +599,21 @@ class VisitorRegistry:
         now = time.time() if now is None else now
         with self._lock:  # copy, then compare without blocking the cameras
             snap = [(v, dict(v.seen_on), dict(v.first_on), {c: lk.copy() for c, lk in v.looks.items()}, v.look.copy(),
-                     v.floor, v.floor_at, v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown")
+                     v.floor, v.floor_at, v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown",
+                     v.region_kind)
                     for v in self._inside.values() if not v.left]
+            together = set(self._together)
         snap.sort(key=lambda s: s[0].created_at)
-        out: list[dict] = []
+        best: dict[str, dict] = {}  # visit_dup → its most likely first track_id (one row per duplicate)
         for i, a in enumerate(snap):
             for b in snap[i + 1:]:
-                pair = _suspect_pair(a, b)
-                if pair is not None:
-                    out.append(pair)
-        return out
+                pair = _suspect_pair(a, b, together)
+                if pair is None:
+                    continue
+                cur = best.get(pair["visit_dup"])
+                if cur is None or _rank(pair) > _rank(cur):
+                    best[pair["visit_dup"]] = pair
+        return list(best.values())
 
     def count(self) -> int:
         """People inside the shop (not those who went Out and are only remembered)."""
@@ -620,63 +637,99 @@ class VisitorRegistry:
 
 
 def _first_on(v: Visitor, firsts: dict[str, float], camera_id: str) -> float | None:
-    return firsts.get(camera_id, v.created_at if camera_id == v.first_camera else None)
+    times = [t for t in (firsts.get(camera_id), v.created_at if camera_id == v.first_camera else None) if t is not None]
+    return min(times) if times else None
 
 
 def _iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat()
 
 
-def _suspect_pair(a: tuple, b: tuple) -> dict | None:
+def _rank(pair: dict) -> tuple:
+    """Which first track_id is the most likely one: a look that matches beats only the same
+    place; among look matches the higher score, among place-only matches the closer floor spot."""
+    apart = pair["floor_apart"] if pair["floor_apart"] != "" else 99.0
+    return (1, pair["score"], -apart) if pair["look_ok"] else (0, -apart, pair["score"])
+
+
+def _soft_distance(x: Look, y: Look, cross: bool) -> float | None:
+    """How alike two looks are (0 = same, 1 = nothing alike) like reid.compare, but WITHOUT
+    its "clearly another person" rules: a seated person, legs hidden, or seen from above on
+    one camera and from the side on another can fail those rules although it is one person."""
+    w = CROSS_WEIGHTS if cross else WEIGHTS
+    parts: list[tuple[float, float]] = []
+    if x.face is not None and y.face is not None:
+        s = float(x.face @ y.face)
+        parts.append((min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6))), w["face"]))
+    if x.body is not None and y.body is not None:
+        s = float(x.body @ y.body)
+        parts.append((min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6))), w["body"]))
+    if x.attire is not None and y.attire is not None and w["attire"] > 0:
+        parts.append((min(1.0, attire_distance(x.attire, y.attire)), w["attire"]))
+    total = sum(wt for _, wt in parts)
+    return sum(d * wt for d, wt in parts) / total if total else None
+
+
+def _suspect_pair(a: tuple, b: tuple, together: set) -> dict | None:
     """One suspicious pair for VisitorRegistry.suspects (a made before b), or None."""
-    va, a_seen, a_first, a_looks, a_look, a_floor, a_floor_at, a_gender = a
-    vb, b_seen, b_first, b_looks, b_look, b_floor, b_floor_at, b_gender = b
+    va, a_seen, a_first, a_looks, a_look, a_floor, a_floor_at, a_gender, a_region = a
+    vb, b_seen, b_first, b_looks, b_look, b_floor, b_floor_at, b_gender, b_region = b
     if va.visit_id == vb.visit_id or va.track_id == vb.track_id:
         return None
+    if frozenset((va.visit_id, vb.visit_id)) in together:
+        return None  # one camera saw both in the same picture: two people
     if {a_gender, b_gender} == {"Male", "Female"}:
         return None  # both clearly seen, and not the same gender
-    # Followed by one camera at the same time: two people side by side
-    retrack = None
-    for c in a_seen.keys() & b_seen.keys():
-        fa, fb = _first_on(va, a_first, c), _first_on(vb, b_first, c)
-        if fa is None or fb is None:
-            continue
-        if min(a_seen[c], b_seen[c]) - max(fa, fb) > SAME_TIME_SECONDS:
-            return None
-        if 0 <= fb - a_seen[c] <= RETRACK_SECONDS:
-            retrack = c  # lost on this camera, then a new number there soon after
     a_last = max([va.created_at, *a_seen.values()])
-    gap = vb.created_at - a_last  # < 0: both tracked at the same time (on different cameras)
-    if retrack is not None:
-        kind, cam_keep, cam_dup = "Same camera", retrack, retrack
-    elif gap <= SUSPECT_GAP_SECONDS and (set(b_seen) - set(a_seen) or set(a_seen) - set(b_seen)
-                                         or va.first_camera != vb.first_camera):
-        kind, cam_keep, cam_dup = "Another camera", va.first_camera, vb.first_camera
-    else:
+    gap = vb.created_at - a_last  # < 0: both tracked at the same time
+    # lost on a camera, then a new number on that camera soon after
+    retrack = next((c for c in a_seen.keys() & b_seen.keys()
+                    if (fb := _first_on(vb, b_first, c)) is not None and 0 <= fb - a_seen[c] <= RETRACK_SECONDS), None)
+    cross = gap <= SUSPECT_GAP_SECONDS and bool(set(b_seen) - set(a_seen) or set(a_seen) - set(b_seen)
+                                                or va.first_camera != vb.first_camera)
+    if retrack is None and not cross:
         return None
     # How alike: every camera's look of one against every camera's look of the other
     # (same camera: strict rules; other camera: cross-camera rules), the best one counts
     la = list(a_looks.items()) or [(None, a_look)]
     lb = list(b_looks.items()) or [(None, b_look)]
-    best = None
+    strict = soft = None
     for ca, x in la:
         for cb, y in lb:
-            cross = ca is None or cb is None or ca != cb
-            if not comparable(x, y, cross):
+            other = ca is None or cb is None or ca != cb
+            if not comparable(x, y, other):
                 continue
-            d = compare(x, y, cross)
-            if d is not None and (best is None or d < best):
-                best = d
+            d = compare(x, y, other)
+            if d is not None and (strict is None or d < strict):
+                strict = d
+            d = _soft_distance(x, y, other)
+            if d is not None and (soft is None or d < soft):
+                soft = d
     face = same_face(a_look, b_look)
-    if best is None or (best > SUSPECT_DISTANCE and not face):
-        return None
-    score = round(max(0.0, 1.0 - best) * 100, 1)
-    reasons = ["same face" if face else f"face / body / clothes {score:.0f}% alike"]
-    if face:
-        score = max(score, 90.0)
     apart = None
     if a_floor is not None and b_floor is not None and abs(a_floor_at - b_floor_at) <= 3.0:
         apart = round(math.dist(a_floor, b_floor), 2)
+    look_ok = face or (strict is not None and strict <= SUSPECT_DISTANCE) or (soft is not None and soft <= SUSPECT_DISTANCE * 0.75)
+    # same place at the same time on different cameras (looks not needed: legs hidden, other angle)
+    place_ok = (cross and gap < 0 and apart is not None and apart <= SUSPECT_PLACE_METRES
+                and a_region is not None and a_region == b_region)
+    if not (look_ok or place_ok):
+        return None
+    if retrack is not None and look_ok:
+        kind, cam_keep, cam_dup = "Same camera", retrack, retrack
+    elif cross:
+        kind, cam_keep, cam_dup = "Another camera", va.first_camera, vb.first_camera
+    else:
+        return None
+    d = strict if strict is not None else soft
+    score = round(max(0.0, 1.0 - d) * 100, 1) if d is not None else 50.0
+    if face:
+        score = max(score, 90.0)
+    reasons = ["same face" if face else (f"face / body / clothes {score:.0f}% alike" if d is not None
+                                          else "looks could not be compared")]
+    if place_ok:
+        reasons.append(f"same place at the same time ({a_region}, {apart:.1f} m apart on the floor map)")
+    elif apart is not None:
         reasons.append(f"floor spots {apart:.1f} m apart")
     if kind == "Same camera":
         reasons.append(f"new number {vb.created_at - a_seen[retrack]:.0f} s after the first was lost")
@@ -691,4 +744,5 @@ def _suspect_pair(a: tuple, b: tuple) -> dict | None:
         "kind": kind, "score": score, "floor_apart": "" if apart is None else apart,
         "reason": "; ".join(reasons),
         "seen_keep": _iso(va.created_at), "seen_dup": _iso(vb.created_at),
+        "look_ok": look_ok,
     }

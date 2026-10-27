@@ -251,6 +251,7 @@ def main() -> None:
     # Suspicious same person (Camera page): pairs of track_ids that look like one
     # person, sent every SUSPECT_SECONDS; a pair is sent again only when its score rises
     reported_suspects: dict[tuple[str, str], float] = {}
+    suspect_error = {"last": ""}  # shown once per different error (e.g. suspect_match.sql not run yet)
 
     def report_suspects() -> None:
         if supa is None:
@@ -262,9 +263,11 @@ def main() -> None:
             if key in reported_suspects and s["score"] < reported_suspects[key] + 5:
                 continue
             try:
-                supa.rpc("report_suspect_match", {"p": s})
-            except Exception as exc:  # visit row not written yet, or internet down: next round
-                log.debug("Suspicious pair not sent yet: %s", exc)
+                supa.rpc("report_suspect_match", {"p": {k: v for k, v in s.items() if k != "look_ok"}})
+            except Exception as exc:  # visit row not written yet, SQL not run, or internet down: next round
+                if str(exc) != suspect_error["last"]:
+                    log.warning("Suspicious pair %s / %s not sent yet: %s", s["track_keep"], s["track_dup"], exc)
+                    suspect_error["last"] = str(exc)
                 continue
             if key not in reported_suspects:
                 log.info("Suspicious same person: %s and %s (%s, %s%%)", s["track_keep"], s["track_dup"],
