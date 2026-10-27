@@ -84,7 +84,7 @@ type LatestEvent = {
   confidence: number
   event_time: string
   camera: { camera_name: string } | null
-  visit: { visit_type: string; est_gender: string; est_age: number | null } | null
+  visit: { visit_type: string; est_gender: string; est_age: number | null; branch: { branch_name: string } | null } | null
 }
 
 type LatestRecognition = {
@@ -95,7 +95,7 @@ type LatestRecognition = {
   camera: { camera_name: string } | null
   // the matched face belongs to a member OR a staff
   face_template: { member: { member_no: string } | null; staff: { staff_no: string } | null } | null
-  visit: { est_gender: string; est_age: number | null } | null
+  visit: { est_gender: string; est_age: number | null; branch: { branch_name: string } | null } | null
 }
 
 type Counts = {
@@ -378,29 +378,30 @@ function dealedCount(branch: string, range: Range) {
   return q
 }
 
-// select ca.camera_name, cc.direction, cc.confidence, v.visit_type, v.est_gender, v.est_age, cc.event_time
-// from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id  (latest 50)
+// select ca.camera_name, cc.direction, cc.track_region, b.branch_name, cc.confidence, v.visit_type, v.est_gender, v.est_age, cc.event_time
+// from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id
+// join branch b on v.branch_id = b.branch_id  (latest 50)
 function latestEvents(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.cctvEvent)
     .select(
-      'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(visit_type, est_gender, est_age)',
+      'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(visit_type, est_gender, est_age, branch(branch_name))',
     )
   if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
   return q.order('event_time', { ascending: false }).limit(50)
 }
 
-// select ca.camera_name, coalesce(m.member_no, s.staff_no), v.est_gender, v.est_age, re.match_score, re.result, re.event_time
+// select ca.camera_name, b.branch_name, coalesce(m.member_no, s.staff_no), v.est_gender, v.est_age, re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id
 // join face_template ft on re.face_template_id = ft.face_template_id
 // left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
-// join visit v on re.visit_id = v.visit_id  (latest 50)
+// join visit v on re.visit_id = v.visit_id join branch b on v.branch_id = b.branch_id  (latest 50)
 function latestRecognitions(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.recognitionEvent)
     .select(
-      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), face_template!inner(member(member_no), staff(staff_no)), visit!inner(est_gender, est_age)',
+      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), face_template!inner(member(member_no), staff(staff_no)), visit!inner(est_gender, est_age, branch(branch_name))',
     )
   if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
@@ -635,6 +636,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
                 { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
                 { header: 'Direction', render: (r) => <Badge text={r.direction} /> },
                 { header: 'Track region', render: (r) => r.track_region ?? '—' },
+                { header: 'Branch', render: (r) => r.visit?.branch?.branch_name ?? '—' },
                 { header: 'Confidence', render: (r) => `${Number(r.confidence).toFixed(2)}%` },
                 { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
                 { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
@@ -651,6 +653,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
               rowKey={(r) => r.recognition_event_id}
               columns={[
                 { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+                { header: 'Branch', render: (r) => r.visit?.branch?.branch_name ?? '—' },
                 {
                   header: 'Member / Staff no.',
                   render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',

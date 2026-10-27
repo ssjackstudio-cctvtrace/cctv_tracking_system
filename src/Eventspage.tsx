@@ -25,6 +25,7 @@ type CctvEventRow = {
         est_gender: string
         est_age: number | null
         demographic_score: number | null
+        branch: { branch_name: string } | null
       } & VisitPerson)
     | null
 }
@@ -41,6 +42,7 @@ type RecognitionEventRow = {
     est_gender: string
     est_age: number | null
     demographic_score: number | null
+    branch: { branch_name: string } | null
   } | null
   // the matched face belongs to a member OR a staff
   face_template: {
@@ -106,17 +108,21 @@ function useRows<T>(load: () => PromiseLike<{ data: unknown; error: { message: s
   return { rows, loading, error }
 }
 
-// select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
+// select ca.camera_name, b.branch_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
 //        s.staff_no, s.full_name, s.position, m.member_no, m.full_name, cc.direction, cc.confidence, cc.event_time
 // from cctv_event cc join camera ca on cc.camera_id = ca.camera_id join visit v on cc.visit_id = v.visit_id
+// join branch b on v.branch_id = b.branch_id
 // left join staff s on v.staff_id = s.staff_id left join member m on v.member_id = m.member_id
+// where v.branch_id = <selected branch>
 export function CctvEventsTable({
   limit = 100,
   day,
+  branch,
   filters = NO_FILTERS,
 }: {
   limit?: number
   day?: string
+  branch?: string
   filters?: EventFilters
 }) {
   const t = useRows<CctvEventRow>(
@@ -124,8 +130,9 @@ export function CctvEventsTable({
       let q = supabase
         .from(TABLES.cctvEvent)
         .select(
-          'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score, staff(staff_no, full_name, position), member(member_no, full_name))',
+          'cctv_event_id, direction, track_region, confidence, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score, branch(branch_name), staff(staff_no, full_name, position), member(member_no, full_name))',
         )
+      if (branch) q = q.eq('visit.branch_id', branch)
       if (day) q = q.gte('event_time', dayRange(day)[0]).lt('event_time', dayRange(day)[1])
       if (filters.visitType) q = q.eq('visit.visit_type', filters.visitType)
       if (filters.gender) q = q.eq('visit.est_gender', filters.gender)
@@ -133,7 +140,7 @@ export function CctvEventsTable({
       if (filters.trackRegion) q = q.eq('track_region', filters.trackRegion)
       return q.order('event_time', { ascending: false }).limit(day ? Math.max(limit, DAY_LIMIT) : limit)
     },
-    [limit, day, filters.visitType, filters.gender, filters.direction, filters.trackRegion],
+    [limit, day, branch, filters.visitType, filters.gender, filters.direction, filters.trackRegion],
   )
   return (
     <DataTable
@@ -144,6 +151,7 @@ export function CctvEventsTable({
       rowKey={(r) => r.cctv_event_id}
       columns={[
         { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+        { header: 'Branch', render: (r) => r.visit?.branch?.branch_name ?? '—' },
         { header: 'Track ID', render: (r) => r.visit?.track_id ?? '—' },
         { header: 'Tapo model', render: (r) => r.camera?.tapo_model ?? '—' },
         { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
@@ -164,18 +172,22 @@ export function CctvEventsTable({
   )
 }
 
-// select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
+// select ca.camera_name, b.branch_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
 //        coalesce(m.member_no, s.staff_no), coalesce(m.full_name, s.full_name), re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id join visit v on re.visit_id = v.visit_id
+// join branch b on v.branch_id = b.branch_id
 // join face_template ft on re.face_template_id = ft.face_template_id
 // left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
+// where v.branch_id = <selected branch>
 function RecognitionEventsTable({
   limit = 100,
   day,
+  branch,
   filters = NO_FILTERS,
 }: {
   limit?: number
   day?: string
+  branch?: string
   filters?: EventFilters
 }) {
   const t = useRows<RecognitionEventRow>(
@@ -183,14 +195,15 @@ function RecognitionEventsTable({
       let q = supabase
         .from(TABLES.recognitionEvent)
         .select(
-          'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), face_template!inner(member(member_no, full_name), staff(staff_no, full_name))',
+          'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score, branch(branch_name)), face_template!inner(member(member_no, full_name), staff(staff_no, full_name))',
         )
+      if (branch) q = q.eq('visit.branch_id', branch)
       if (day) q = q.gte('event_time', dayRange(day)[0]).lt('event_time', dayRange(day)[1])
       if (filters.visitType) q = q.eq('visit.visit_type', filters.visitType)
       if (filters.gender) q = q.eq('visit.est_gender', filters.gender)
       return q.order('event_time', { ascending: false }).limit(day ? Math.max(limit, DAY_LIMIT) : limit)
     },
-    [limit, day, filters.visitType, filters.gender],
+    [limit, day, branch, filters.visitType, filters.gender],
   )
   return (
     <DataTable
@@ -201,6 +214,7 @@ function RecognitionEventsTable({
       rowKey={(r) => r.recognition_event_id}
       columns={[
         { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
+        { header: 'Branch', render: (r) => r.visit?.branch?.branch_name ?? '—' },
         { header: 'Track ID', render: (r) => r.visit?.track_id ?? '—' },
         { header: 'Tapo model', render: (r) => r.camera?.tapo_model ?? '—' },
         { header: 'Visit type', render: (r) => (r.visit ? <Badge text={r.visit.visit_type} /> : '—') },
@@ -293,10 +307,41 @@ function SelectFilter({
   )
 }
 
+type BranchOption = { branch_id: string; branch_name: string }
+
 export default function EventsPage({ initialTab = 'cctv', initialDay }: { initialTab?: EventTab; initialDay?: string }) {
   const [tab, setTab] = useState<EventTab>(initialTab)
   const [day, setDay] = useState(initialDay ?? todayKey)
   const [filters, setFilters] = useState<EventFilters>(NO_FILTERS)
+  // Branch filter (no "All"): starts on the first branch once the branches are loaded
+  const [branches, setBranches] = useState<BranchOption[] | null>(null)
+  const [branch, setBranch] = useState('')
+  const [branchError, setBranchError] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    Promise.resolve(
+      supabase.from(TABLES.branch).select('branch_id, branch_name').order('branch_name', { ascending: true }),
+    )
+      .then((b) => {
+        if (cancelled) return
+        if (b.error) {
+          setBranchError(b.error.message)
+          setBranches([])
+          return
+        }
+        const list = (b.data ?? []) as BranchOption[]
+        setBranches(list)
+        if (list.length) setBranch((cur) => cur || list[0].branch_id)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setBranchError(err instanceof Error ? err.message : 'Failed to load the branches')
+        setBranches([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const select = (key: keyof EventFilters) => {
     const f = FILTER_OPTIONS.find((o) => o.key === key)!
     return (
@@ -313,6 +358,16 @@ export default function EventsPage({ initialTab = 'cctv', initialDay }: { initia
     <>
       <h1>Event History</h1>
       <p className="ds-lead">Activity detected by the cameras on {fmtDay(day)}.</p>
+      <div className="ds-filters">
+        <select aria-label="Filter by branch" value={branch} onChange={(e) => setBranch(e.target.value)}>
+          {(branches ?? []).map((b) => (
+            <option key={b.branch_id} value={b.branch_id}>
+              {b.branch_name}
+            </option>
+          ))}
+        </select>
+      </div>
+      {branchError && <p className="ds-error">The branches failed to load: {branchError}</p>}
       <div className="ev-toolbar">
         <div className="tabs">
           <button className={tab === 'cctv' ? 'active' : ''} onClick={() => setTab('cctv')}>
@@ -336,10 +391,13 @@ export default function EventsPage({ initialTab = 'cctv', initialDay }: { initia
         </div>
       </div>
       <div className="event-log-scroll">
-        {tab === 'cctv' ? (
-          <CctvEventsTable day={day} filters={filters} />
+        {/* Wait for a branch so the tables never show every branch at once */}
+        {!branch ? (
+          <p className="ds-empty">{branches === null ? 'Loading…' : 'No branches found.'}</p>
+        ) : tab === 'cctv' ? (
+          <CctvEventsTable day={day} branch={branch} filters={filters} />
         ) : (
-          <RecognitionEventsTable day={day} filters={filters} />
+          <RecognitionEventsTable day={day} branch={branch} filters={filters} />
         )}
       </div>
     </>
