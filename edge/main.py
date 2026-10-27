@@ -202,7 +202,13 @@ def main() -> None:
                 log.warning("Could not save live_url (run supabase/live_video.sql once): %s", exc)
         for cam_id, w in workers.items():
             if w.active_status() == "Active":
-                supa.update("camera", {"last_seen_at": utc_now()}, camera_id=f"eq.{cam_id}")
+                # Write active_status too, not only last_seen_at: while the internet was
+                # down, Supabase's mark_offline_devices() job set the camera 'Inactive',
+                # but report_status() only writes on a change it saw itself, so a camera
+                # that never stopped on the box stayed 'Inactive' on the website for good.
+                supa.update("camera", {"active_status": "Active", "last_seen_at": utc_now()},
+                            camera_id=f"eq.{cam_id}")
+                w.reported_status = "Active"
 
     # Active = connected + camera picture open; Inactive = closed or not connected
     def report_status() -> None:
