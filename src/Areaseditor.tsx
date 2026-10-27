@@ -436,13 +436,14 @@ export function AreasEditor({
     setAuto(
       cal?.mode === 'auto'
         ? {
+            height: cal.camera_height ?? CAMERA_HEIGHT,
             tilt: cal.tilt ?? AUTO_FLOOR.tilt,
             hfov: cal.hfov ?? AUTO_FLOOR.hfov,
             k1: cal.k1 ?? AUTO_FLOOR.k1,
             placed: !!cal.placed,
             place: cal.place ?? { x: 0, y: 0, yaw: 0 },
           }
-        : { ...AUTO_FLOOR, placed: false, place: { x: 0, y: 0, yaw: 0 } },
+        : { ...AUTO_FLOOR, height: CAMERA_HEIGHT, placed: false, place: { x: 0, y: 0, yaw: 0 } },
     )
     setMode('calibrate')
   }
@@ -451,7 +452,7 @@ export function AreasEditor({
   const autoFitTilt = () => {
     if (!auto) return
     const seen = people?.current ?? []
-    const tilt = fitTilt(seen, aspect, auto.hfov, auto.k1)
+    const tilt = fitTilt(seen, aspect, auto.hfov, auto.k1, auto.height)
     if (tilt === null) {
       setMessage(
         `Not enough people seen yet (${seen.length}). Keep this page open with the live video playing while people walk past, then try again.`,
@@ -514,7 +515,7 @@ export function AreasEditor({
 
   const saveCalibration = () => {
     if (!trial) return
-    store({ ...saved, calibration: trial }, `3D floor saved (camera ${CAMERA_HEIGHT} m high, tilted ${trial.tilt}°). The edge box starts using it within a minute.`)
+    store({ ...saved, calibration: trial }, `3D floor saved (camera ${trial.camera_height} m high, tilted ${trial.tilt}°). The edge box starts using it within a minute.`)
   }
 
   const resetCalibration = () => {
@@ -577,7 +578,7 @@ export function AreasEditor({
   const cal = saved.calibration
   const note =
     mode === 'calibrate'
-      ? `Camera ${CAMERA_HEIGHT} m high (fixed). Click "Auto-fit tilt from people" (people must have walked past on the live video), then fine-tune: the 1 m grid should lie flat on the floor and follow the tile lines, also at the sides of the picture (Lens curve). The Tapo lens is round, so straight floor lines look bent near the edges.`
+      ? `First type the camera's real height: measure from the floor to the camera lens (now ${auto?.height ?? CAMERA_HEIGHT} m). Then click "Auto-fit tilt from people" (people must have walked past on the live video), then fine-tune: the 1 m grid should lie flat on the floor and follow the tile lines, also at the sides of the picture (Lens curve). The Tapo lens is round, so straight floor lines look bent near the edges.`
       : mode === 'area'
         ? (draft?.image.length ?? 0) < 3
           ? 'Click the corners of the area’s outline on the FLOOR in the picture, one after another (at least 3). A dot near another area’s corner or edge snaps onto it.'
@@ -655,7 +656,11 @@ export function AreasEditor({
         <div className="cam-areas-form">
           <label>
             Camera height
-            <input value={`${CAMERA_HEIGHT} m (fixed)`} disabled />
+            {/* measured from the floor to the camera lens; kept between 1.5 m and 6 m */}
+            <DecimalInput
+              value={auto.height ?? CAMERA_HEIGHT}
+              onValue={(h) => setAuto((a) => a && { ...a, height: Math.min(Math.max(h, 1.5), 6) })}
+            />
           </label>
           <label>
             Tilt down: {auto.tilt}°

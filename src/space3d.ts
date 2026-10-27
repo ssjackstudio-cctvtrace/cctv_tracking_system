@@ -8,8 +8,8 @@ import type { Point } from './types'
 //                img_to_floor: [9], projection: [12], camera_height},
 //  regions: [{id, name, kind, image: [{x,y} 0–1], floor: [{x,y} metres] | null, z_min, z_max}]}
 //
-// The floor is made AUTOMATICALLY (autoCalibration): every camera hangs at the
-// same fixed height (CAMERA_HEIGHT, 3.25 m); the camera's tilt is worked out
+// The floor is made AUTOMATICALLY (autoCalibration): each camera's height above
+// the floor (measured, default CAMERA_HEIGHT 3.25 m); the camera's tilt is worked out
 // from people walking past (fitTilt), and the Tapo lens width and lens curve
 // are known. The Tapo lens is wide and round, so a flat floor looks bent at the
 // sides of the picture: the lens curve (k1) is removed before measuring, and
@@ -56,7 +56,7 @@ export type Calibration = {
 }
 
 // ---------- automatic floor ----------
-export const CAMERA_HEIGHT = 3.25 // metres, every camera (fixed)
+export const CAMERA_HEIGHT = 3.25 // metres, default camera height (each camera can set its own, measured)
 // Tapo C230 lens (spec: 75° across, 41° up-down, 88° corner to corner). As a
 // straight-lens width at the centre + lens curve, these give the same angles
 // (within 0.2°): 63.6° wide at the centre, curve -0.52.
@@ -76,6 +76,7 @@ export function lensAngles(aspect: number, hfov: number, k1: number) {
 const PERSON_HEIGHT = 1.65 // metres, average shopper (top of the head)
 
 export type AutoFloor = {
+  height?: number // metres from the floor to the camera lens (default CAMERA_HEIGHT)
   tilt: number
   hfov: number
   k1: number
@@ -113,7 +114,7 @@ function bend(cal: Pick<Calibration, 'aspect' | 'k1' | 'focal'>, p: Point): Poin
 
 // The whole 3D floor of a camera from its fixed height, tilt and lens.
 // Same maths as auto_matrices() on the edge box (edge/edge/space3d.py).
-export function autoCalibration(aspect: number, a: AutoFloor, height = CAMERA_HEIGHT): Calibration {
+export function autoCalibration(aspect: number, a: AutoFloor, height = a.height ?? CAMERA_HEIGHT): Calibration {
   const f = aspect / 2 / Math.tan((a.hfov * Math.PI) / 360)
   const th = (a.tilt * Math.PI) / 180
   const yaw = (a.place.yaw * Math.PI) / 180
@@ -177,14 +178,20 @@ export function floorOrAuto(cal: Calibration | null, aspect = 16 / 9): Calibrati
 }
 
 // Tilt (degrees) that best fits people walking past: their feet are on the
-// floor and their heads PERSON_HEIGHT above it, seen from CAMERA_HEIGHT.
+// floor and their heads PERSON_HEIGHT above it, seen from the camera's height.
 // samples: feet and top-of-head points (0–1) of full-body people.
-export function fitTilt(samples: { foot: Point; head: Point }[], aspect: number, hfov: number, k1: number): number | null {
+export function fitTilt(
+  samples: { foot: Point; head: Point }[],
+  aspect: number,
+  hfov: number,
+  k1: number,
+  height = CAMERA_HEIGHT,
+): number | null {
   const f = aspect / 2 / Math.tan((hfov * Math.PI) / 360)
   const lens = { aspect, k1, focal: f }
   const pts = samples.map((s) => ({ foot: straighten(lens, s.foot), head: straighten(lens, s.head) }))
   if (pts.length < 8) return null
-  const h = CAMERA_HEIGHT
+  const h = height
   const top = h - PERSON_HEIGHT
   let best: number | null = null
   let bestErr = Infinity

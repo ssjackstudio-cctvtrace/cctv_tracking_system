@@ -151,7 +151,8 @@ const pts = (list: Point[]) => list.map((p) => `${p.x.toFixed(3)},${(-p.y).toFix
 function mapCalibration(fa: FloorAreas, suggested: Place | undefined, draft?: Draft | null): Calibration | null {
   const cal = fa.calibration
   const aspect = cal?.aspect ?? 16 / 9
-  const lens = { hfov: cal?.hfov ?? AUTO_FLOOR.hfov, k1: cal?.k1 ?? AUTO_FLOOR.k1 }
+  // the camera's own measured height travels with it (the default when not set)
+  const lens = { height: cal?.camera_height, hfov: cal?.hfov ?? AUTO_FLOOR.hfov, k1: cal?.k1 ?? AUTO_FLOOR.k1 }
   if (draft) return autoCalibration(aspect, { tilt: draft.tilt, ...lens, placed: true, place: draft.place })
   if (cal && cal.placed) return cal
   if (cal && cal.mode !== 'auto') return null // hand calibration not on the plan: cannot be moved here
