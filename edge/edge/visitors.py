@@ -83,6 +83,7 @@ from typing import Callable
 
 from .demographics import Estimate
 from .reid import MAX_DISTANCE, Look, appearance, attire_distance, comparable, compare, same_face
+from datetime import datetime, timezone
 
 # Older names, kept for other modules
 distance = attire_distance
@@ -128,6 +129,14 @@ GUARD_SECONDS = float(os.getenv("AREA_GUARD_SECONDS", "1.5"))
 # Fastest a shopper walks (metres per second): a visitor last seen at one spot of the shop plan
 # cannot be someone standing further away than this x the seconds since (plus SAME_PLACE_METRES)
 PERSON_SPEED_MPS = float(os.getenv("PERSON_SPEED_MPS", "1.5"))
+# Suspicious same person (listed on the Camera page, merged there by an admin): two
+# remembered track_ids whose looks are this alike (reid.compare, 0 = same, 1 = nothing
+# alike) although the live matching kept them apart (the floor spots disagreed, the
+# legs were hidden, another camera angle, ...). Looser than every live match.
+SUSPECT_DISTANCE = float(os.getenv("SUSPECT_DISTANCE", "0.80"))
+SUSPECT_GAP_SECONDS = float(os.getenv("SUSPECT_GAP_SECONDS", "60"))  # 2nd track_id started this soon after the 1st was last seen
+RETRACK_SECONDS = float(os.getenv("RETRACK_SECONDS", "120"))  # same camera: new number this soon after the old one was lost
+SAME_TIME_SECONDS = 1.0  # one camera followed both at once for longer than this = two people
 
 
 def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
@@ -178,6 +187,8 @@ class Visitor:
     sent_faces: int = 0  # samples already written to the visit row
     outside: bool = False  # counted Out (still remembered while seen, and OUTSIDE_KEEP_SECONDS after)
     left: bool = False  # ended: the track_id is finished for good
+    created_at: float = field(default_factory=time.time)  # when this track_id was made (suspicious pairs: the first is kept)
+    first_on: dict[str, float] = field(default_factory=dict)  # camera_id → first time seen there
 
     def add_look(self, look: Look | None, camera_id: str | None = None) -> None:
         """Keep a running average of how the visitor looks (several frames, several
@@ -401,6 +412,7 @@ class VisitorRegistry:
         now = time.time() if now is None else now
         with self._lock:
             visitor.seen_on[camera_id] = now
+            visitor.first_on.setdefault(camera_id, now)
             visitor.last_seen = now
             if conf is not None:
                 visitor.last_conf = conf
@@ -564,6 +576,28 @@ class VisitorRegistry:
                     best, best_s = v, s
         return best
 
+    # ---------- suspicious same person (Camera page) ----------
+    def suspects(self, now: float | None = None) -> list[dict]:
+        """Pairs of remembered track_ids that are probably ONE person: alike in
+        face / whole body / clothes, seen by two cameras around the same time,
+        or re-tracked with a new number on the same camera soon after the old
+        one was lost. Never two people one camera followed at the same time.
+        The earlier track_id (first camera) is the one to keep. Nothing is
+        merged here: an admin checks the list on the Camera page."""
+        now = time.time() if now is None else now
+        with self._lock:  # copy, then compare without blocking the cameras
+            snap = [(v, dict(v.seen_on), dict(v.first_on), {c: lk.copy() for c, lk in v.looks.items()}, v.look.copy(),
+                     v.floor, v.floor_at, v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown")
+                    for v in self._inside.values() if not v.left]
+        snap.sort(key=lambda s: s[0].created_at)
+        out: list[dict] = []
+        for i, a in enumerate(snap):
+            for b in snap[i + 1:]:
+                pair = _suspect_pair(a, b)
+                if pair is not None:
+                    out.append(pair)
+        return out
+
     def count(self) -> int:
         """People inside the shop (not those who went Out and are only remembered)."""
         with self._lock:
@@ -583,3 +617,78 @@ class VisitorRegistry:
                 out["all"] += 1
                 out[{"Male": "male", "Female": "female"}.get(gender, "unknown")] += 1
         return out
+
+
+def _first_on(v: Visitor, firsts: dict[str, float], camera_id: str) -> float | None:
+    return firsts.get(camera_id, v.created_at if camera_id == v.first_camera else None)
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat()
+
+
+def _suspect_pair(a: tuple, b: tuple) -> dict | None:
+    """One suspicious pair for VisitorRegistry.suspects (a made before b), or None."""
+    va, a_seen, a_first, a_looks, a_look, a_floor, a_floor_at, a_gender = a
+    vb, b_seen, b_first, b_looks, b_look, b_floor, b_floor_at, b_gender = b
+    if va.visit_id == vb.visit_id or va.track_id == vb.track_id:
+        return None
+    if {a_gender, b_gender} == {"Male", "Female"}:
+        return None  # both clearly seen, and not the same gender
+    # Followed by one camera at the same time: two people side by side
+    retrack = None
+    for c in a_seen.keys() & b_seen.keys():
+        fa, fb = _first_on(va, a_first, c), _first_on(vb, b_first, c)
+        if fa is None or fb is None:
+            continue
+        if min(a_seen[c], b_seen[c]) - max(fa, fb) > SAME_TIME_SECONDS:
+            return None
+        if 0 <= fb - a_seen[c] <= RETRACK_SECONDS:
+            retrack = c  # lost on this camera, then a new number there soon after
+    a_last = max([va.created_at, *a_seen.values()])
+    gap = vb.created_at - a_last  # < 0: both tracked at the same time (on different cameras)
+    if retrack is not None:
+        kind, cam_keep, cam_dup = "Same camera", retrack, retrack
+    elif gap <= SUSPECT_GAP_SECONDS and (set(b_seen) - set(a_seen) or set(a_seen) - set(b_seen)
+                                         or va.first_camera != vb.first_camera):
+        kind, cam_keep, cam_dup = "Another camera", va.first_camera, vb.first_camera
+    else:
+        return None
+    # How alike: every camera's look of one against every camera's look of the other
+    # (same camera: strict rules; other camera: cross-camera rules), the best one counts
+    la = list(a_looks.items()) or [(None, a_look)]
+    lb = list(b_looks.items()) or [(None, b_look)]
+    best = None
+    for ca, x in la:
+        for cb, y in lb:
+            cross = ca is None or cb is None or ca != cb
+            if not comparable(x, y, cross):
+                continue
+            d = compare(x, y, cross)
+            if d is not None and (best is None or d < best):
+                best = d
+    face = same_face(a_look, b_look)
+    if best is None or (best > SUSPECT_DISTANCE and not face):
+        return None
+    score = round(max(0.0, 1.0 - best) * 100, 1)
+    reasons = ["same face" if face else f"face / body / clothes {score:.0f}% alike"]
+    if face:
+        score = max(score, 90.0)
+    apart = None
+    if a_floor is not None and b_floor is not None and abs(a_floor_at - b_floor_at) <= 3.0:
+        apart = round(math.dist(a_floor, b_floor), 2)
+        reasons.append(f"floor spots {apart:.1f} m apart")
+    if kind == "Same camera":
+        reasons.append(f"new number {vb.created_at - a_seen[retrack]:.0f} s after the first was lost")
+    elif gap < 0:
+        reasons.append("both tracked at the same time on different cameras")
+    else:
+        reasons.append(f"second track_id started {gap:.0f} s after the first was last seen")
+    return {
+        "visit_keep": va.visit_id, "visit_dup": vb.visit_id,
+        "track_keep": va.track_id, "track_dup": vb.track_id,
+        "camera_keep": cam_keep or "", "camera_dup": cam_dup or "",
+        "kind": kind, "score": score, "floor_apart": "" if apart is None else apart,
+        "reason": "; ".join(reasons),
+        "seen_keep": _iso(va.created_at), "seen_dup": _iso(vb.created_at),
+    }

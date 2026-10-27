@@ -38,6 +38,7 @@ CAMERA_COLUMNS = (
 )
 OUT_OF_RANGE = "Out of Range"  # cctv_event.track_region of a visit closed by the box (person not seen any more)
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
+SUSPECT_SECONDS = 30  # look for suspicious same person pairs (Camera page)
 STATUS_SECONDS = 5  # check each camera's active_status (sent only when it changes)
 
 
@@ -247,7 +248,30 @@ def main() -> None:
         sys.exit("No cameras found for this EDGE_DEVICE_ID. Check the camera table (Step 4).")
     log.info("Running %d camera(s). Press Ctrl+C to stop.", len(workers))
 
-    next_refresh = next_status = next_close = 0.0
+    # Suspicious same person (Camera page): pairs of track_ids that look like one
+    # person, sent every SUSPECT_SECONDS; a pair is sent again only when its score rises
+    reported_suspects: dict[tuple[str, str], float] = {}
+
+    def report_suspects() -> None:
+        if supa is None:
+            return
+        if len(reported_suspects) > 5000:
+            reported_suspects.clear()
+        for s in visitors.suspects():
+            key = (s["visit_keep"], s["visit_dup"])
+            if key in reported_suspects and s["score"] < reported_suspects[key] + 5:
+                continue
+            try:
+                supa.rpc("report_suspect_match", {"p": s})
+            except Exception as exc:  # visit row not written yet, or internet down: next round
+                log.debug("Suspicious pair not sent yet: %s", exc)
+                continue
+            if key not in reported_suspects:
+                log.info("Suspicious same person: %s and %s (%s, %s%%)", s["track_keep"], s["track_dup"],
+                         s["kind"], s["score"])
+            reported_suspects[key] = s["score"]
+
+    next_refresh = next_status = next_close = next_suspect = 0.0
     open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
         while True:
@@ -261,6 +285,12 @@ def main() -> None:
             if time.time() >= next_close:
                 close_lost()  # people unseen for KEEP_SECONDS: track_id ended
                 next_close = time.time() + 1
+            if time.time() >= next_suspect:
+                try:
+                    report_suspects()
+                except Exception as exc:
+                    log.warning("Suspicious same person check failed: %s", exc)
+                next_suspect = time.time() + SUSPECT_SECONDS
             if time.time() >= next_status:
                 try:
                     report_status()

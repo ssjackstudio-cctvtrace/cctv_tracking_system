@@ -6,6 +6,7 @@ import type { Branch, Camera, EdgeDevice } from './types'
 import CameraDetails, { CameraScreen, canCapture, formatLongDate } from './Cameradetails'
 import NewCameraPage from './Newcamerapage'
 import EditCameraPage from './Editcamerapage'
+import SuspectPanel from './Suspects'
 import './Camera.css'
 
 // Branch selected when the page opens
@@ -195,6 +196,9 @@ export default function CameraPage() {
           ))}
         </div>
       )}
+
+      {/* Track_ids that look like the same person (edge box), to merge into the first one */}
+      {branchId && branchCams.length > 0 && <SuspectPanel branchId={branchId} />}
     </>
   )
 }
