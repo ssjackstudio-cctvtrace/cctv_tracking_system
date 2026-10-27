@@ -15,6 +15,7 @@ import StaffDetailsPage from './Staffdetails'
 import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
+import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './dashboard.css'
 
 // Each sidebar page has its own web address, e.g. /camera
@@ -138,6 +139,14 @@ const dayRange = (day: string): Range => {
   return [start.toISOString(), end.toISOString()]
 }
 const todayKey = () => dateKey(new Date().toISOString())
+// True when the event happened while the shop was open (shopHours.ts):
+// 10:00 AM – 10:00 PM Sun–Thu, 10:00 AM – 10:30 PM Fri–Sat (closing time itself excluded).
+// JackStudio OS counts Passed By / Walk-in with the same rule (src/lib/store-hours.ts there).
+const inOpenHours = (iso: string) => {
+  const d = new Date(iso)
+  const minutes = d.getHours() * 60 + d.getMinutes()
+  return minutes >= OPEN_MINUTES && minutes < closeMinutes(d)
+}
 
 // One row per cctv_event: the visit (person, track_id) it belongs to, its direction and time
 type PersonEvent = {
@@ -177,8 +186,8 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 
 // People, not events: one person (one track_id) can be seen going In by several
 // cameras and walk into several areas, so each number counts distinct track_ids.
-//   People Passed By = distinct track_ids with a Passed By event in track_region Traffic
-//   People Walk-in = distinct track_ids with an In event in track_region Counter or Purchasing
+//   People Passed By = distinct track_ids with a Passed By event in track_region Traffic, during opening hours
+//   People Walk-in = distinct track_ids with an In event in track_region Counter or Purchasing, during opening hours
 //     (one track_id with In rows in several areas / from several cameras is one person)
 //   (Male + Female + Unknown = the total)
 // Time in the shop, per track_id: from an In (Purchasing / Counter) until the
@@ -211,10 +220,11 @@ export function countPeople(events: PersonEvent[]) {
       seconds: 0,
       ended: false,
     }
-    if (e.direction === 'Passed By' && e.track_region === 'Traffic') p.passedBy = true
+    const open = inOpenHours(e.event_time)
+    if (open && e.direction === 'Passed By' && e.track_region === 'Traffic') p.passedBy = true
     const t = new Date(e.event_time).getTime()
     if (e.direction === 'In') {
-      if (e.track_region === 'Counter' || e.track_region === 'Purchasing') p.wentIn = true
+      if (open && (e.track_region === 'Counter' || e.track_region === 'Purchasing')) p.wentIn = true
       if (p.since === null) p.since = t // came into the shop (another In while inside = moved to another area)
     } else if ((e.direction === 'Passed By' || e.direction === 'Out') && p.since !== null) {
       p.seconds += Math.max(0, (t - p.since) / 1000)
