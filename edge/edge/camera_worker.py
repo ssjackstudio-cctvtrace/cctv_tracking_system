@@ -43,7 +43,8 @@ DARK_MEAN, DARK_STD = 12, 6  # "almost all black": low brightness and almost no 
 PHOTO_MIN_PIXELS = 60  # person at least this tall in the picture
 PHOTO_EVERY_SECONDS = float(os.getenv("PERSON_PHOTO_EVERY_SECONDS", "10"))  # a better photo at most this often
 PHOTO_BETTER = 1.2  # replaced only by a photo at least 20% better
-PHOTO_MAX_HEIGHT = 360  # pixels (small file, enough to recognise the person)
+PHOTO_MAX_WIDTH = 960  # whole camera picture, landscape, scaled down to this width (pixels)
+PHOTO_BOX = (0, 200, 255)  # BGR orange: the person's box and track_id label
 FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "8"))  # looks (face + whole body) averaged per visitor
 FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
 FACES_PER_FRAME = 1  # people looked at per frame (~0.15 s each on the CPU; keeps counting smooth)
@@ -1321,10 +1322,13 @@ class CameraWorker(threading.Thread):
 
     # ---------- Photo of each track_id (Camera page: Suspicious same person) ----------
     def _take_photos(self, frame: np.ndarray, people: list[Person], now: float) -> None:
-        """Keep the clearest picture of each visitor (bigger, sharper, face seen,
+        """Keep the clearest moment of each visitor (bigger, sharper, face seen,
         whole body) and send it to the PhotoUploader, so an admin can compare two
-        track_ids by eye before merging them. A visitor's photo is replaced only by
-        a clearly better one, at most every PHOTO_EVERY_SECONDS."""
+        track_ids by eye before merging them. The photo is the WHOLE camera picture
+        (landscape, as the camera sees it) with this person's box and track_id
+        drawn on it, so where they stand and who is around them is visible too.
+        A visitor's photo is replaced only by a clearly better one, at most every
+        PHOTO_EVERY_SECONDS."""
         h, w = frame.shape[:2]
         for p in people:
             v = self._link.get(p.tid)
@@ -1352,13 +1356,32 @@ class CameraWorker(threading.Thread):
                 if v.photo_q and q < v.photo_q * PHOTO_BETTER:
                     continue
                 v.photo_q, v.photo_at = q, now
-            if crop.shape[0] > PHOTO_MAX_HEIGHT:
-                scale = PHOTO_MAX_HEIGHT / crop.shape[0]
-                crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), PHOTO_MAX_HEIGHT),
-                                  interpolation=cv2.INTER_AREA)
-            ok, jpeg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            ok, jpeg = cv2.imencode(".jpg", self._labelled_picture(frame, p.box, v.track_id),
+                                    [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
                 self.offer_photo(v.visit_id, jpeg.tobytes())
+
+    def _labelled_picture(self, frame: np.ndarray, box: tuple[float, float, float, float],
+                          track_id: str) -> np.ndarray:
+        """The whole camera picture, scaled to PHOTO_MAX_WIDTH (landscape kept), with
+        the person's box and a "track_id · camera · time" label, like the live video."""
+        h, w = frame.shape[:2]
+        scale = min(1.0, PHOTO_MAX_WIDTH / w)
+        img = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) \
+            if scale < 1.0 else frame.copy()
+        x1, y1, x2, y2 = (int(round(c * scale)) for c in box)
+        ih, iw = img.shape[:2]
+        thick = max(2, iw // 320)
+        cv2.rectangle(img, (x1, y1), (x2, y2), PHOTO_BOX, thick)
+        text = f"{track_id}  {self.camera['camera_name']}  {datetime.now().strftime('%H:%M:%S')}"
+        font, fs = cv2.FONT_HERSHEY_SIMPLEX, max(0.45, iw / 1400)
+        (tw, th), base = cv2.getTextSize(text, font, fs, 1)
+        pad = 4
+        lx = min(max(0, x1), max(0, iw - tw - 2 * pad))
+        ly = y1 - th - base - 2 * pad if y1 - th - base - 2 * pad >= 0 else min(y2, ih - th - base - 2 * pad)
+        cv2.rectangle(img, (lx, ly), (lx + tw + 2 * pad, ly + th + base + 2 * pad), PHOTO_BOX, -1)
+        cv2.putText(img, text, (lx + pad, ly + pad + th), font, fs, (0, 0, 0), 1, cv2.LINE_AA)
+        return img
 
     # ---------- Gender / age (whole body) ----------
     def _look_at_people(self, demo: Demographics, frame: np.ndarray, people: list[Person], now: float) -> None:

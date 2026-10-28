@@ -48,10 +48,11 @@
   border-top: 0;
 }
 
+/* Landscape: the photo is the whole camera picture (16:9) with the person's box + track_id */
 .sp-photo {
   flex: none;
-  width: 84px;
-  height: 112px;
+  width: 224px;
+  height: 126px;
   border-radius: 8px;
   overflow: hidden;
   background: #e2e8f0;
@@ -61,7 +62,8 @@
 .sp-photo img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain; /* whole picture, nothing cut off */
+  background: #10202b;
   display: block;
 }
 
@@ -133,11 +135,15 @@
 }
 
 @media (max-width: 520px) {
+  .sp-first,
+  .sp-dup {
+    flex-wrap: wrap; /* photo above the details on a phone */
+  }
   .sp-dup {
     padding-left: 12px;
   }
   .sp-photo {
-    width: 64px;
-    height: 86px;
+    width: 160px;
+    height: 90px;
   }
 }
