@@ -193,6 +193,9 @@ class Visitor:
     left: bool = False  # ended: the track_id is finished for good
     created_at: float = field(default_factory=time.time)  # when this track_id was made (suspicious pairs: the first is kept)
     first_on: dict[str, float] = field(default_factory=dict)  # camera_id → first time seen there
+    # Photo of this track_id for the Camera page "Suspicious same person" (camera_worker._take_photos)
+    photo_q: float = 0.0  # how good the uploaded photo is (bigger, sharper, face visible = better)
+    photo_at: float = 0.0  # when it was last taken
 
     def add_look(self, look: Look | None, camera_id: str | None = None) -> None:
         """Keep a running average of how the visitor looks (several frames, several
@@ -223,6 +226,8 @@ class VisitorRegistry:
         self._inside: dict[str, Visitor] = {}  # visit_id → visitor (inside, or just went Out)
         # pairs of visit_ids one camera saw in the SAME picture: surely two people (never a suspicious pair)
         self._together: set[frozenset[str]] = set()
+        # pairs of visit_ids an admin marked "Not same" on the Camera page: never suggested again
+        self._apart: set[frozenset[str]] = set()
         self._lock = threading.RLock()
         self._day = time.localtime().tm_yday  # the list starts again every day
 
@@ -602,7 +607,7 @@ class VisitorRegistry:
                      v.floor, v.floor_at, v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown",
                      v.region_kind)
                     for v in self._inside.values() if not v.left]
-            together = set(self._together)
+            together = set(self._together) | self._apart
         snap.sort(key=lambda s: s[0].created_at)
         best: dict[str, dict] = {}  # visit_dup → its most likely first track_id (one row per duplicate)
         for i, a in enumerate(snap):
@@ -614,6 +619,13 @@ class VisitorRegistry:
                 if cur is None or _rank(pair) > _rank(cur):
                     best[pair["visit_dup"]] = pair
         return list(best.values())
+
+    def set_apart(self, pairs: set[frozenset[str]]) -> None:
+        """Pairs of visit_ids marked "Not same" on the Camera page (read from
+        suspect_match by main.py): they are two people, so suspects() never
+        lists them together again."""
+        with self._lock:
+            self._apart = set(pairs)
 
     def count(self) -> int:
         """People inside the shop (not those who went Out and are only remembered)."""

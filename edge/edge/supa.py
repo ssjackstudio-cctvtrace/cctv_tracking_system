@@ -99,6 +99,25 @@ class Supabase:
             raise SupabaseError(r.status_code, f"No signed URL in response: {r.text[:200]}")
         return signed if signed.startswith("http") else f"{self.url}/storage/v1{signed}"
 
+    def list_objects(self, bucket: str, prefix: str = "", limit: int = 1000, offset: int = 0) -> list[dict[str, Any]]:
+        """Files and folders directly under prefix (a folder has "id": null)."""
+        r = self.http.post(
+            f"{self.url}/storage/v1/object/list/{bucket}",
+            json={"prefix": prefix, "limit": limit, "offset": offset, "sortBy": {"column": "name", "order": "asc"}},
+            timeout=self.timeout,
+        )
+        self._check(r)
+        return r.json()
+
+    def remove(self, bucket: str, paths: list[str]) -> None:
+        """Delete these files from the bucket (Storage API: deleting storage.objects
+        rows with SQL is not allowed)."""
+        if not paths:
+            return
+        r = self.http.delete(f"{self.url}/storage/v1/object/{bucket}", json={"prefixes": paths},
+                             timeout=self.timeout)
+        self._check(r)
+
     @staticmethod
     def _check(r: requests.Response) -> None:
         if r.status_code >= 400:

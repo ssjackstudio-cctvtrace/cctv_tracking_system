@@ -26,7 +26,7 @@ from edge.camera_worker import CameraWorker  # noqa: E402
 from edge.config import load_settings, rtsp_url  # noqa: E402
 from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
-from edge.uploader import SnapshotUploader, Writer  # noqa: E402
+from edge.uploader import PhotoUploader, SnapshotUploader, Writer  # noqa: E402
 from edge.visitors import KEEP_SECONDS, VisitorRegistry  # noqa: E402
 
 log = logging.getLogger("main")
@@ -71,6 +71,13 @@ def main() -> None:
     if supa:
         snapshots = SnapshotUploader(supa, settings.snapshot_bucket, settings.snapshot_seconds)
         snapshots.start()
+    # Clearest photo of each track_id, for the Camera page "Suspicious same person"
+    # (supabase/person_photos.sql). PERSON_PHOTO_DAYS=0 switches it off.
+    photos = None
+    photo_days = int(os.getenv("PERSON_PHOTO_DAYS", "7"))
+    if supa and photo_days > 0:
+        photos = PhotoUploader(supa, os.getenv("PERSON_PHOTO_BUCKET", "person-photos"), photo_days, writer.update)
+        photos.start()
 
     workers: dict[str, CameraWorker] = {}
     # People the cameras see, shared by all cameras: one track_id per person
@@ -183,6 +190,7 @@ def main() -> None:
                     cam, source_for(cam), settings.model, settings.confidence, settings.image_size,
                     settings.anchor, writer.insert, snapshots.offer if snapshots else None,
                     settings.snapshot_seconds, show=args.show, update=writer.update, registry=visitors,
+                    offer_photo=photos.offer if photos else None,
                 )
                 workers[cam_id] = w
                 w.start()
@@ -274,6 +282,15 @@ def main() -> None:
                          s["kind"], s["score"])
             reported_suspects[key] = s["score"]
 
+    def load_not_same() -> None:
+        """Pairs an admin marked "Not same" today: the box never suggests them again."""
+        if supa is None:
+            return
+        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = supa.select("suspect_match", "visit_keep,visit_dup", status="eq.Not same",
+                           created_at=f"gte.{midnight.isoformat()}", limit="10000")
+        visitors.set_apart({frozenset((r["visit_keep"], r["visit_dup"])) for r in rows})
+
     next_refresh = next_status = next_close = next_suspect = 0.0
     open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
@@ -290,6 +307,7 @@ def main() -> None:
                 next_close = time.time() + 1
             if time.time() >= next_suspect:
                 try:
+                    load_not_same()
                     report_suspects()
                 except Exception as exc:
                     log.warning("Suspicious same person check failed: %s", exc)

@@ -39,6 +39,11 @@ DARK_SECONDS = 5  # picture almost all black for this long → camera closed →
 DARK_MEAN, DARK_STD = 12, 6  # "almost all black": low brightness and almost no detail (0–255 scale)
 
 # Gender / age: look at each full-body person a few times (all cameras together)
+# Photo of each track_id for the Suspicious same person list (Camera page)
+PHOTO_MIN_PIXELS = 60  # person at least this tall in the picture
+PHOTO_EVERY_SECONDS = float(os.getenv("PERSON_PHOTO_EVERY_SECONDS", "10"))  # a better photo at most this often
+PHOTO_BETTER = 1.2  # replaced only by a photo at least 20% better
+PHOTO_MAX_HEIGHT = 360  # pixels (small file, enough to recognise the person)
 FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "8"))  # looks (face + whole body) averaged per visitor
 FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
 FACES_PER_FRAME = 1  # people looked at per frame (~0.15 s each on the CPU; keeps counting smooth)
@@ -469,6 +474,7 @@ class CameraWorker(threading.Thread):
         show: bool = False,
         update: Callable[..., None] | None = None,
         registry: VisitorRegistry | None = None,
+        offer_photo: Callable[[str, bytes], None] | None = None,
     ):
         super().__init__(name=f"cam-{camera['camera_name']}", daemon=True)
         self.camera = camera
@@ -477,6 +483,7 @@ class CameraWorker(threading.Thread):
         self.insert, self.offer_snapshot, self.snapshot_seconds = insert, offer_snapshot, snapshot_seconds
         self.show = show
         self.update = update  # update(table, values, **filters), for a visit's gender / age
+        self.offer_photo = offer_photo  # offer_photo(visit_id, jpeg): photo of a track_id (Suspicious same person)
         self._estimates: dict[int, Estimate] = {}  # tracker id → gender / age seen BEFORE it is linked to a visitor
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
         # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
@@ -738,6 +745,8 @@ class CameraWorker(threading.Thread):
 
             if demo.enabled:
                 self._look_at_people(demo, frame, people, now)
+            if self.offer_photo:
+                self._take_photos(frame, people, now)
 
             # For the website's live video: where each person is in this frame, and who they are
             self.live_boxes = [self._live_box(p, w, h) for p in people + waiting]
@@ -1309,6 +1318,47 @@ class CameraWorker(threading.Thread):
             self.counts[key] += 1
         log.info("person %s (%s) %s → %s%s  (inside now %d)", tid, v.track_id, direction,
                  region, f" ({area})" if area else "", self.registry.count())
+
+    # ---------- Photo of each track_id (Camera page: Suspicious same person) ----------
+    def _take_photos(self, frame: np.ndarray, people: list[Person], now: float) -> None:
+        """Keep the clearest picture of each visitor (bigger, sharper, face seen,
+        whole body) and send it to the PhotoUploader, so an admin can compare two
+        track_ids by eye before merging them. A visitor's photo is replaced only by
+        a clearly better one, at most every PHOTO_EVERY_SECONDS."""
+        h, w = frame.shape[:2]
+        for p in people:
+            v = self._link.get(p.tid)
+            if v is None or v.left:
+                continue
+            x1, y1, x2, y2 = p.box
+            bh = y2 - y1
+            if bh < PHOTO_MIN_PIXELS:
+                continue  # too small to recognise anyone
+            look = self._look.get(p.tid)
+            q = bh * p.conf * (1.0 if p.full else 0.6) * (1.6 if look is not None and look.face is not None else 1.0)
+            with self.registry._lock:
+                if v.photo_q and (now - v.photo_at < PHOTO_EVERY_SECONDS or q < v.photo_q * PHOTO_BETTER):
+                    continue
+            mx, my = (x2 - x1) * 0.08, bh * 0.04
+            cx1, cy1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+            cx2, cy2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
+            crop = frame[cy1:cy2, cx1:cx2]
+            if crop.size == 0:
+                continue
+            # blurred (moving fast): count it less
+            sharp = cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
+            q *= 0.5 + 0.5 * min(1.0, sharp / 120.0)
+            with self.registry._lock:
+                if v.photo_q and q < v.photo_q * PHOTO_BETTER:
+                    continue
+                v.photo_q, v.photo_at = q, now
+            if crop.shape[0] > PHOTO_MAX_HEIGHT:
+                scale = PHOTO_MAX_HEIGHT / crop.shape[0]
+                crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), PHOTO_MAX_HEIGHT),
+                                  interpolation=cv2.INTER_AREA)
+            ok, jpeg = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                self.offer_photo(v.visit_id, jpeg.tobytes())
 
     # ---------- Gender / age (whole body) ----------
     def _look_at_people(self, demo: Demographics, frame: np.ndarray, people: list[Person], now: float) -> None:
