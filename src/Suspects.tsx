@@ -233,8 +233,9 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
     <section className="ds-panel">
       <h2>Suspicious same person</h2>
       <p className="cam-count-note">
-        One card per first track_id, earliest first. Below it: later track_ids that may be the same person (face, whole
-        body, clothes). Compare the photos. <b>Merge</b> gives the later track_id the first one, so the Dashboard counts
+        One card per first track_id, earliest first. Below it: later track_ids that may be the same person, judged by
+        their looks only: attire colour, face, whole body, and the texture of the head, chest and legs. Compare the
+        photos. <b>Merge</b> gives the later track_id the first one, so the Dashboard counts
         that person once. <b>Not same</b> makes it its own first track_id.
       </p>
       <div className="tabs">
@@ -253,7 +254,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
       <>
       <p className="cam-count-note">
         Guest: a first track_id only collects track_ids first seen within 10 minutes of it; a later one becomes a new
-        first track_id. People whose top or pants are clearly another colour are never paired.
+        first track_id. People whose top or pants are clearly another colour, or whose shirt or pants pattern is
+        clearly different, are never paired.
       </p>
       <div className="cam-toolbar">
         <label className="cam-filter">

@@ -11,6 +11,8 @@ is saved or sent):
             YoutuReID), whole body from head to feet, also from the side / back.
   - attire: colour histogram of the upper and lower body clothes.
   - height: body height in metres (cameras with a 3D floor).
+  - colours: named colour of the top and of the pants.
+  - texture: pattern of the head, chest and legs (stripes, prints, denim, hair).
 
 compare(a, b) says how alike two looks are: 0 = surely the same person,
 1 = nothing alike, None = CLEARLY a different person (other face, other body,
@@ -228,6 +230,87 @@ def attire_clash(a: np.ndarray | None, b: np.ndarray | None, cross: bool = False
     return any(_part_clash(a[i:i + N_COLOURS], b[i:i + N_COLOURS], overlap) for i in (0, N_COLOURS))
 
 
+def body_parts(frame: np.ndarray, box: tuple[float, float, float, float]) -> dict[str, np.ndarray] | None:
+    """The HEAD, CHEST and LEGS of one full-body person box (BGR crops, sides trimmed)."""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = (int(v) for v in box)
+    x1, x2 = max(0, x1), min(w, x2)
+    y1, y2 = max(0, y1), min(h, y2)
+    bh, bw = y2 - y1, x2 - x1
+    if bh < 60 or bw < 20:
+        return None  # too small to see any texture
+    out = {}
+    for name, (top, bottom, trim) in TEXTURE_PARTS.items():
+        t = int(bw * trim)
+        crop = frame[y1 + int(bh * top): y1 + int(bh * bottom), x1 + t: x2 - t]
+        if crop.shape[0] < 8 or crop.shape[1] < 8:
+            return None
+        out[name] = crop
+    return out
+
+
+# ---------- body texture (head, chest, legs) ----------
+# Colour alone cannot tell a striped / checked / printed shirt from a plain one of the
+# same colour, jeans from plain trousers, or long hair from short hair. Each part of
+# the body (head, chest, legs) gets a TEXTURE signature: local binary patterns (fine
+# pattern: stripes, checks, prints, denim, hair) + edge directions (coarse pattern:
+# vertical / horizontal stripes, collars, folds). Each crop is resized to a fixed size
+# first, so a person near and far from the camera give comparable numbers.
+TEXTURE_PARTS = {  # part: (top, bottom of the box as a share of its height, sides trimmed)
+    "head": (0.00, 0.17, 0.25),
+    "chest": (0.20, 0.50, 0.18),
+    "legs": (0.58, 0.92, 0.18),
+}
+TEXTURE_SIZE = {"head": (24, 24), "chest": (32, 40), "legs": (32, 48)}  # width, height
+LBP_BINS = 10  # rotation-invariant uniform patterns (0-8 bits on) + 1 for the rest
+EDGE_BINS = 8  # edge directions 0-180 degrees
+TEXTURE_LEN = LBP_BINS + EDGE_BINS
+_NEIGHBOURS = ((-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1))  # around the pixel
+
+
+def _texture(crop: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    g = cv2.cvtColor(cv2.resize(crop, size, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    g = cv2.GaussianBlur(g, (3, 3), 0)  # camera noise is not texture
+    c = g[1:-1, 1:-1]
+    hh, ww = g.shape
+    bits = np.stack([g[1 + dy: hh - 1 + dy, 1 + dx: ww - 1 + dx] >= c + 2.0 for dy, dx in _NEIGHBOURS])
+    ones = bits.sum(axis=0)
+    turns = (bits != np.roll(bits, 1, axis=0)).sum(axis=0)
+    labels = np.where(turns <= 2, ones, LBP_BINS - 1)
+    lbp = np.bincount(labels.ravel(), minlength=LBP_BINS).astype(np.float32)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
+    ang = np.mod(ang, 180.0)
+    edges = np.bincount(np.minimum((ang / (180.0 / EDGE_BINS)).astype(np.int32), EDGE_BINS - 1).ravel(),
+                        weights=mag.ravel(), minlength=EDGE_BINS).astype(np.float32)
+    lbp /= max(float(lbp.sum()), 1e-6)
+    edges /= max(float(edges.sum()), 1e-6)
+    return np.concatenate([lbp, edges])
+
+
+def body_texture(frame: np.ndarray, box: tuple[float, float, float, float]) -> np.ndarray | None:
+    """Texture signatures of the head, chest and legs, one after the other (TEXTURE_PARTS order)."""
+    parts = body_parts(frame, box)
+    if parts is None:
+        return None
+    return np.concatenate([_texture(_even_light(parts[n]), TEXTURE_SIZE[n]) for n in TEXTURE_PARTS]).astype(np.float32)
+
+
+def texture_distances(a: np.ndarray | None, b: np.ndarray | None) -> dict[str, float]:
+    """Per part (head, chest, legs): 0 = same texture, 1 = nothing alike. Empty when unknown."""
+    if a is None or b is None:
+        return {}
+    out = {}
+    for i, name in enumerate(TEXTURE_PARTS):
+        s = i * TEXTURE_LEN
+        lbp = cv2.compareHist(a[s:s + LBP_BINS], b[s:s + LBP_BINS], cv2.HISTCMP_BHATTACHARYYA)
+        edge = cv2.compareHist(a[s + LBP_BINS:s + TEXTURE_LEN], b[s + LBP_BINS:s + TEXTURE_LEN],
+                               cv2.HISTCMP_BHATTACHARYYA)
+        out[name] = float(min(1.0, max(0.0, (lbp + edge) / 2)))
+    return out
+
+
 def describe_colours(c: np.ndarray | None) -> str:
     """e.g. 'orange top, black pants' (for the log / reasons)."""
     if c is None:
@@ -244,7 +327,9 @@ class Look:
     body: np.ndarray | None = None  # unit vector
     height: float | None = None
     colours: np.ndarray | None = None  # named colours of the top and the pants (attire_colours)
-    counts: dict = field(default_factory=lambda: {"attire": 0, "face": 0, "body": 0, "height": 0, "colours": 0})
+    texture: np.ndarray | None = None  # head, chest and legs texture (body_texture)
+    counts: dict = field(default_factory=lambda: {"attire": 0, "face": 0, "body": 0, "height": 0, "colours": 0,
+                                                  "texture": 0})
 
     @property
     def empty(self) -> bool:
@@ -254,7 +339,7 @@ class Look:
         """Running average with another look at the same person (other frames, other cameras)."""
         if other is None:
             return
-        for name in ("attire", "face", "body", "colours"):
+        for name in ("attire", "face", "body", "colours", "texture"):
             new = getattr(other, name)
             if new is None:
                 continue
@@ -273,7 +358,7 @@ class Look:
 
     def copy(self) -> "Look":
         c = Look(counts=dict(self.counts), height=self.height)
-        for name in ("attire", "face", "body", "colours"):
+        for name in ("attire", "face", "body", "colours", "texture"):
             v = getattr(self, name)
             setattr(c, name, None if v is None else v.copy())
         return c
@@ -377,8 +462,9 @@ class Recognizer:
              heavy: bool = True) -> Look:
         """Attire always (cheap); face and whole body only when heavy=True (a
         few people per frame, so counting stays smooth on the edge box)."""
-        look = Look(attire=appearance(frame, box), height=height, colours=attire_colours(frame, box))
-        for name in ("attire", "height", "colours"):
+        look = Look(attire=appearance(frame, box), height=height, colours=attire_colours(frame, box),
+                    texture=body_texture(frame, box))
+        for name in ("attire", "height", "colours", "texture"):
             look.counts[name] = 1 if getattr(look, name) is not None else 0
         if not heavy or not self.enabled:
             return look

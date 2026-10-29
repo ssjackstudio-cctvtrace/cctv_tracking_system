@@ -116,6 +116,18 @@ type Tally = { all: number; male: number; female: number; unknown: number }
 // fullName: the member's / staff's name (null for a Guest)
 type Stay = { trackId: string; visitType: string; fullName: string | null; gender: string; seconds: number }
 
+// One stay in ONE track region (Top 5 Longest Stay for Track Region)
+// memberName: the member's full name (null unless visit_type is 'Member')
+type RegionStay = {
+  trackId: string
+  visitType: string
+  memberName: string | null
+  region: string
+  gender: string
+  seconds: number
+}
+const STAY_REGIONS = ['Purchasing', 'Counter'] // track regions inside the shop
+
 const pad = (n: number) => String(n).padStart(2, '0')
 // Local calendar day of a timestamp, e.g. 2026-09-30
 const dateKey = (iso: string) => {
@@ -207,6 +219,11 @@ export function countPeople(events: PersonEvent[]) {
       ended: boolean
     }
   >()
+  // Per track_id: the track region they are in now (since an In there) and their longest region stay
+  const regionStays = new Map<
+    string,
+    { region: string | null; since: number | null; best: RegionStay | null }
+  >()
   for (const e of events) {
     // events come oldest first
     const key = e.visit?.track_id ?? e.visit_id
@@ -232,6 +249,31 @@ export function countPeople(events: PersonEvent[]) {
       p.ended = true
     }
     people.set(key, p)
+
+    // Time in a track region = from the In record there until the NEXT record of the same
+    // track_id (an In to the other region, Passed By or Out). Another In to the same region
+    // (e.g. seen by another camera) continues the same stay. A stay not ended yet is left out.
+    const r = regionStays.get(key) ?? { region: null, since: null, best: null }
+    if (r.region !== null && r.since !== null && !(e.direction === 'In' && e.track_region === r.region)) {
+      const seconds = Math.round(Math.max(0, (t - r.since) / 1000))
+      if (seconds >= 1 && (!r.best || seconds > r.best.seconds)) {
+        r.best = {
+          trackId: key,
+          visitType: p.visitType,
+          memberName: p.visitType === 'Member' ? (e.visit?.member?.full_name ?? null) : null,
+          region: r.region,
+          gender: p.gender,
+          seconds,
+        }
+      }
+      r.region = null
+      r.since = null
+    }
+    if (e.direction === 'In' && e.track_region && STAY_REGIONS.includes(e.track_region) && r.region === null) {
+      r.region = e.track_region
+      r.since = t
+    }
+    regionStays.set(key, r)
   }
   const tally = (list: { gender: string }[]): Tally => {
     const male = list.filter((p) => p.gender === 'Male').length
@@ -253,7 +295,12 @@ export function countPeople(events: PersonEvent[]) {
   const longest = stays.slice(0, 5)
   // Average time in the shop of everyone with a finished stay on the day (null = no finished stays)
   const averageStay = stays.length ? Math.round(stays.reduce((sum, s) => sum + s.seconds, 0) / stays.length) : null
-  return { in: walkIn, passedBy, longest, averageStay, stayCount: stays.length }
+  // Each track_id once, with its longest stay in one track region
+  const regionLongest = [...regionStays.values()]
+    .flatMap((r) => (r.best ? [r.best] : []))
+    .sort((x, y) => y.seconds - x.seconds)
+    .slice(0, 5)
+  return { in: walkIn, passedBy, longest, averageStay, stayCount: stays.length, regionLongest }
 }
 
 // 4354 s → "1 hr 12 min 34 sec", 754 s → "12 min 34 sec", 45 s → "45 sec"
@@ -367,6 +414,82 @@ function LongestStay({ branchName, stays, loading }: { branchName: string; stays
   )
 }
 
+// Top 5 Longest Stay for Track Region: like Top 5 Longest Stay, one stay in ONE track region each
+function RegionLongestStay({
+  branchName,
+  stays,
+  loading,
+}: {
+  branchName: string
+  stays: RegionStay[] | null
+  loading: boolean
+}) {
+  const podium = stays ? [stays[1], stays[0], stays[2]] : []
+  const places = [2, 1, 3]
+  return (
+    <section className="ds-panel ds-stay">
+      <h2>Top 5 Longest Stay for Track Region in {branchName || '—'}</h2>
+      <p className="ds-stay-note">
+        Time in one track region (Purchasing / Counter): from the record there until the next record of the same
+        track_id.
+      </p>
+      {loading && !stays ? (
+        <p className="ds-empty">Loading…</p>
+      ) : !stays || stays.length === 0 ? (
+        <p className="ds-empty">No finished track region stays on this day yet.</p>
+      ) : (
+        <>
+          <div className="ds-podium">
+            {podium.map((s, i) =>
+              s ? (
+                <div className={`ds-podium-card ds-podium-card--${places[i]}`} key={s.trackId}>
+                  <span className="ds-podium-rank">{places[i]}</span>
+                  <dl>
+                    <dt>Track_Id</dt>
+                    <dd className="ds-podium-track">{s.trackId}</dd>
+                    <dt>Visit Type</dt>
+                    <dd>{s.visitType}</dd>
+                    <dt>Track Region</dt>
+                    <dd>{s.region}</dd>
+                    <dt>Gender</dt>
+                    <dd>{s.gender}</dd>
+                    <dt>Time Taken</dt>
+                    <dd className="ds-podium-time">{fmtStay(s.seconds)}</dd>
+                  </dl>
+                </div>
+              ) : (
+                <div className={`ds-podium-card ds-podium-card--${places[i]} ds-podium-card--empty`} key={`empty-${places[i]}`}>
+                  <span className="ds-podium-rank">{places[i]}</span>
+                  <p>—</p>
+                </div>
+              ),
+            )}
+          </div>
+          {stays.length > 3 && (
+            // 4th and 5th: rank, track_id, full name (members only), visit type, gender, time taken
+            <div className="ds-stay-rows">
+              <table>
+                <tbody>
+                  {stays.slice(3).map((s, i) => (
+                    <tr key={s.trackId}>
+                      <td className="ds-stay-rank">{i + 4}</td>
+                      <td className="ds-stay-track">{s.trackId}</td>
+                      <td>{s.visitType === 'Member' ? s.memberName ?? '-' : '-'}</td>
+                      <td>{s.visitType}</td>
+                      <td>{s.gender}</td>
+                      <td className="ds-stay-time">{fmtStay(s.seconds)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
 // Number of transactions with status 'Dealed' (branch = branch of the matched event's camera's edge box)
 function dealedCount(branch: string, range: Range) {
   let q = supabase
@@ -426,6 +549,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
     dealed: null,
   })
   const [longest, setLongest] = useState<Stay[] | null>(null)
+  const [regionLongest, setRegionLongest] = useState<RegionStay[] | null>(null)
   const [averageStay, setAverageStay] = useState<{ seconds: number | null; count: number } | null>(null)
   const [events, setEvents] = useState<LatestEvent[]>([])
   const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
@@ -494,6 +618,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
         dealed: dealRes.error ? null : dealRes.count,
       })
       setLongest(p ? p.longest : null)
+      setRegionLongest(p ? p.regionLongest : null)
       setAverageStay(p ? { seconds: p.averageStay, count: p.stayCount } : null)
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
       setRecognitions(recRes.error ? [] : ((recRes.data ?? []) as unknown as LatestRecognition[]))
@@ -607,6 +732,13 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
           loading={loading}
         />
       </div>
+
+      {/* Below both panels above (side by side when the sidebar is expanded, one under the other when collapsed) */}
+      <RegionLongestStay
+        branchName={branches.find((b) => b.branch_id === branch)?.branch_name ?? ''}
+        stays={regionLongest}
+        loading={loading}
+      />
 
       <section className="ds-panel">
         <h2>Latest events (top 50)</h2>

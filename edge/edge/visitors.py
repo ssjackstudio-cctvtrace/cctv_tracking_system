@@ -85,9 +85,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+import numpy as np
+
 from .demographics import Estimate
-from .reid import (BODY_SAME, CROSS_WEIGHTS, FACE_SAME, MAX_DISTANCE, WEIGHTS, Look, appearance,
-                   attire_clash, attire_distance, comparable, compare, describe_colours, same_face)
+from .reid import (BODY_DIFFERENT, BODY_DIFFERENT_CROSS, BODY_SAME, FACE_DIFFERENT, FACE_SAME, MAX_DISTANCE,
+                   N_COLOURS, Look, appearance, attire_clash, attire_distance, comparable, compare,
+                   describe_colours, same_face, texture_distances)
 from datetime import datetime, timezone
 
 # Older names, kept for other modules
@@ -139,20 +142,40 @@ GUARD_SECONDS = float(os.getenv("AREA_GUARD_SECONDS", "1.5"))
 # cannot be someone standing further away than this x the seconds since (plus SAME_PLACE_METRES)
 PERSON_SPEED_MPS = float(os.getenv("PERSON_SPEED_MPS", "1.5"))
 # Suspicious same person (listed on the Camera page, merged there by an admin): two
-# remembered track_ids whose looks are this alike (reid.compare, 0 = same, 1 = nothing
-# alike) although the live matching kept them apart (the floor spots disagreed, the
-# legs were hidden, another camera angle, ...). Looser than every live match.
-SUSPECT_DISTANCE = float(os.getenv("SUSPECT_DISTANCE", "0.80"))
-SUSPECT_GAP_SECONDS = float(os.getenv("SUSPECT_GAP_SECONDS", "60"))  # 2nd track_id started this soon after the 1st was last seen
-RETRACK_SECONDS = float(os.getenv("RETRACK_SECONDS", "120"))  # same camera: new number this soon after the old one was lost
-# Same place at the same time: two track_ids on DIFFERENT cameras at the same moment, in the
-# same kind of area, this close on the shop plan (cameras calibrated by hand can be 2-3 m off,
-# more when the legs are hidden) are listed even when their looks cannot be compared
-SUSPECT_PLACE_METRES = float(os.getenv("SUSPECT_PLACE_METRES", "3.0"))
+# remembered track_ids whose LOOKS match (attire colour, face, whole body, head / chest /
+# legs texture: see SUSPECT_MIN_SCORE below) although the live matching kept them apart.
+# 10 minutes (as TRACK_KEEP_SECONDS): one person walking around the shop can be seen by the 4
+# cameras one after the other, minutes apart, and get another track_id on each camera
+SUSPECT_GAP_SECONDS = float(os.getenv("SUSPECT_GAP_SECONDS", "600"))  # 2nd track_id started this soon after the 1st was last seen
+RETRACK_SECONDS = float(os.getenv("RETRACK_SECONDS", "600"))  # same camera: new number this soon after the old one was lost
+# One person with several track_ids (e.g. one per camera): each later track_id is listed under
+# the EARLIEST track_id it matches within this many score points of its best match, so all of
+# them land on ONE card (the first track_id), not in a chain A <- B <- C <- D
+SUSPECT_GROUP_MARGIN = float(os.getenv("SUSPECT_GROUP_MARGIN", "10"))
 # Guest: a first track_id collects suspicious same-person track_ids for 10 minutes only.
 # A later track_id first seen more than this after the first track_id was first seen is
 # never listed under it: it becomes a new first track_id of its own.
 SUSPECT_WINDOW_SECONDS = float(os.getenv("SUSPECT_WINDOW_SECONDS", "600"))
+# What makes two track_ids a suspicious same person: their LOOKS only (never the place alone):
+#   attire colour   named colour of the top and the pants (reid.attire_colours)    needed
+#   chest, legs     texture of the shirt and of the pants (reid.body_texture)       needed
+#   head            texture of the head / hair                                      when seen
+#   face            face recognition (SFace)                                        when seen
+#   body            whole-body recognition model (YoutuReID)                        when seen
+# Any of them CLEARLY different = two people (a surely-same face overrules the
+# whole-body and texture checks, never the attire colour). Then the weighted
+# similarity of all of them must reach SUSPECT_MIN_SCORE %.
+SUSPECT_MIN_SCORE = float(os.getenv("SUSPECT_MIN_SCORE", "60"))
+# ... and the attire colour on its own must be at least this % alike (the top and the pants
+# are judged separately, the less alike of the two counts)
+SUSPECT_MIN_ATTIRE = float(os.getenv("SUSPECT_MIN_ATTIRE", "55"))
+# Chest / legs texture distance (0 = same, 1 = nothing alike) above this = another
+# shirt / pants pattern: same camera (same light, same angle) / two cameras
+TEXTURE_DIFFERENT = float(os.getenv("TEXTURE_DIFFERENT", "0.30"))
+TEXTURE_DIFFERENT_CROSS = float(os.getenv("TEXTURE_DIFFERENT_CROSS", "0.40"))
+# How much each kind of evidence counts in the score: same camera / two cameras
+SUSPECT_WEIGHTS = {"face": 3.0, "body": 2.0, "clothes": 2.0, "head": 0.5, "chest": 1.0, "legs": 1.0}
+SUSPECT_WEIGHTS_CROSS = {"face": 3.0, "body": 2.0, "clothes": 1.5, "head": 0.3, "chest": 0.7, "legs": 0.7}
 
 
 def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
@@ -622,16 +645,18 @@ class VisitorRegistry:
                     for v in self._inside.values() if not v.left]
             together = set(self._together) | self._apart
         snap.sort(key=lambda s: s[0].created_at)
-        best: dict[str, dict] = {}  # visit_dup → its most likely first track_id (one row per duplicate)
+        found: dict[str, list[dict]] = {}  # visit_dup → every first track_id it may be
         for i, a in enumerate(snap):
             for b in snap[i + 1:]:
                 pair = _suspect_pair(a, b, together)
-                if pair is None:
-                    continue
-                cur = best.get(pair["visit_dup"])
-                if cur is None or _rank(pair) > _rank(cur):
-                    best[pair["visit_dup"]] = pair
-        return list(best.values())
+                if pair is not None:
+                    found.setdefault(pair["visit_dup"], []).append(pair)
+        out = []  # one row per duplicate: the earliest first track_id among its good matches
+        for pairs in found.values():
+            top = max(p["score"] for p in pairs)
+            good = [p for p in pairs if p["score"] >= top - SUSPECT_GROUP_MARGIN]
+            out.append(min(good, key=lambda p: (p["seen_keep"], [-x for x in _rank(p)])))
+        return out
 
     def set_apart(self, pairs: set[frozenset[str]]) -> None:
         """Pairs of visit_ids marked "Not same" on the Camera page (read from
@@ -677,22 +702,56 @@ def _rank(pair: dict) -> tuple:
     return (1, pair["score"], -apart) if pair["look_ok"] else (0, -apart, pair["score"])
 
 
-def _soft_distance(x: Look, y: Look, cross: bool) -> float | None:
-    """How alike two looks are (0 = same, 1 = nothing alike) like reid.compare, but WITHOUT
-    its "clearly another person" rules: a seated person, legs hidden, or seen from above on
-    one camera and from the side on another can fail those rules although it is one person."""
-    w = CROSS_WEIGHTS if cross else WEIGHTS
-    parts: list[tuple[float, float]] = []
+def _evidence(x: Look, y: Look, cross: bool) -> dict | None:
+    """How alike two looks of a person are, cue by cue (see SUSPECT_MIN_SCORE):
+    {"score": 0-100, "cues": {cue: % alike}, "face_sure": bool}.
+    None = clearly two people (another face / attire colour / body / chest or legs
+    pattern), or not enough to judge (attire colour, chest and legs are needed).
+    cross=True: the looks come from two different cameras (more tolerant)."""
+    weights = SUSPECT_WEIGHTS_CROSS if cross else SUSPECT_WEIGHTS
+    dist: dict[str, float] = {}  # cue -> 0 (same) .. 1 (nothing alike)
+    face_sure = False
     if x.face is not None and y.face is not None:
         s = float(x.face @ y.face)
-        parts.append((min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6))), w["face"]))
+        if s < FACE_DIFFERENT:
+            return None  # another face
+        face_sure = s >= FACE_SAME + 0.1
+        dist["face"] = min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - FACE_SAME, 1e-6)))
     if x.body is not None and y.body is not None:
         s = float(x.body @ y.body)
-        parts.append((min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6))), w["body"]))
-    if x.attire is not None and y.attire is not None and w["attire"] > 0:
-        parts.append((min(1.0, attire_distance(x.attire, y.attire)), w["attire"]))
-    total = sum(wt for _, wt in parts)
-    return sum(d * wt for d, wt in parts) / total if total else None
+        if s < (BODY_DIFFERENT_CROSS if cross else BODY_DIFFERENT) and not face_sure:
+            return None  # another body
+        dist["body"] = min(1.0, max(0.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6)))
+    if x.colours is None or y.colours is None:
+        return None  # attire colour not seen well: cannot judge
+    if attire_clash(x.colours, y.colours, cross):
+        return None  # top or pants clearly another colour
+    # top and pants separately: the less alike of the two counts
+    shared = [float(np.minimum(x.colours[i:i + N_COLOURS], y.colours[i:i + N_COLOURS]).sum())
+              for i in (0, N_COLOURS)]
+    dist["clothes"] = 1.0 - min(shared)
+    if x.attire is not None and y.attire is not None:  # finer colour shades too
+        dist["clothes"] = (2 * dist["clothes"] + min(1.0, attire_distance(x.attire, y.attire))) / 3
+    if (1.0 - dist["clothes"]) * 100 < SUSPECT_MIN_ATTIRE:
+        return None  # attire colour not alike enough
+    tex = texture_distances(x.texture, y.texture)
+    if "chest" not in tex or "legs" not in tex:
+        return None  # chest / legs not seen well: cannot judge
+    if not face_sure:
+        if cross:
+            # two cameras: one may see the front of the shirt (a print) and the other its back
+            # (plain), so only the legs (pants pattern, alike from every side) can say "two people"
+            if tex["legs"] > TEXTURE_DIFFERENT_CROSS:
+                return None  # another pants pattern
+        elif tex["chest"] > TEXTURE_DIFFERENT or tex["legs"] > TEXTURE_DIFFERENT:
+            return None  # another shirt / pants pattern
+    dist.update(tex)
+    total = sum(weights[c] for c in dist)
+    score = (1.0 - sum(d * weights[c] for c, d in dist.items()) / total) * 100
+    if face_sure:
+        score = max(score, 90.0)
+    return {"score": round(score, 1), "cues": {c: round((1.0 - d) * 100) for c, d in dist.items()},
+            "face_sure": face_sure}
 
 
 def _other_attire(a_looks: dict, a_look: Look, b_looks: dict, b_look: Look) -> bool:
@@ -734,49 +793,44 @@ def _suspect_pair(a: tuple, b: tuple, together: set) -> dict | None:
                                                 or va.first_camera != vb.first_camera)
     if retrack is None and not cross:
         return None
-    # How alike: every camera's look of one against every camera's look of the other
-    # (same camera: strict rules; other camera: cross-camera rules), the best one counts
+    # How alike, by the looks only: every camera's look of one against every camera's look
+    # of the other. A camera that saw both (same light, same angle) saying "two people" is
+    # final; seen only on different cameras, the best camera pair counts.
     la = list(a_looks.items()) or [(None, a_look)]
     lb = list(b_looks.items()) or [(None, b_look)]
-    strict = soft = None
+    best_ev, same_cam_veto = None, False
     for ca, x in la:
         for cb, y in lb:
             other = ca is None or cb is None or ca != cb
-            if not comparable(x, y, other):
+            ev = _evidence(x, y, other)
+            if ev is None:
+                if not other and x.colours is not None and y.colours is not None and \
+                        x.texture is not None and y.texture is not None:
+                    same_cam_veto = True  # both seen well on this camera, and they differ
                 continue
-            d = compare(x, y, other)
-            if d is not None and (strict is None or d < strict):
-                strict = d
-            d = _soft_distance(x, y, other)
-            if d is not None and (soft is None or d < soft):
-                soft = d
-    face = same_face(a_look, b_look)
+            if best_ev is None or ev["score"] > best_ev["score"]:
+                best_ev = ev
+    if same_cam_veto or best_ev is None or best_ev["score"] < SUSPECT_MIN_SCORE:
+        return None
+    face = best_ev["face_sure"]
     apart = None
     if a_floor is not None and b_floor is not None and abs(a_floor_at - b_floor_at) <= 3.0:
         apart = round(math.dist(a_floor, b_floor), 2)
-    look_ok = face or (strict is not None and strict <= SUSPECT_DISTANCE) or (soft is not None and soft <= SUSPECT_DISTANCE * 0.75)
-    # same place at the same time on different cameras (looks not needed: legs hidden, other angle)
-    place_ok = (cross and gap < 0 and apart is not None and apart <= SUSPECT_PLACE_METRES
-                and a_region is not None and a_region == b_region)
-    if not (look_ok or place_ok):
-        return None
+    look_ok = True
     if retrack is not None and look_ok:
         kind, cam_keep, cam_dup = "Same camera", retrack, retrack
     elif cross:
         kind, cam_keep, cam_dup = "Another camera", va.first_camera, vb.first_camera
     else:
         return None
-    d = strict if strict is not None else soft
-    score = round(max(0.0, 1.0 - d) * 100, 1) if d is not None else 50.0
-    if face:
-        score = max(score, 90.0)
-    reasons = ["same face" if face else (f"face / body / clothes {score:.0f}% alike" if d is not None
-                                          else "looks could not be compared")]
-    if a_look.colours is not None and b_look.colours is not None:
-        reasons.append(f"clothes: {describe_colours(a_look.colours)} / {describe_colours(b_look.colours)}")
-    if place_ok:
-        reasons.append(f"same place at the same time ({a_region}, {apart:.1f} m apart on the floor map)")
-    elif apart is not None:
+    score = best_ev["score"]
+    cues = best_ev["cues"]
+    names = {"face": "face", "body": "whole body", "clothes": "attire colour",
+             "head": "head", "chest": "chest", "legs": "legs"}
+    reasons = [("same face; " if face else "") + " · ".join(
+        f"{names[c]} {cues[c]}%" if c in cues else f"{names[c]} not seen" for c in names)]
+    reasons.append(f"clothes: {describe_colours(a_look.colours)} / {describe_colours(b_look.colours)}")
+    if apart is not None:
         reasons.append(f"floor spots {apart:.1f} m apart")
     if kind == "Same camera":
         lost_gap = (_first_on(vb, b_first, retrack) or vb.created_at) - a_seen[retrack]
