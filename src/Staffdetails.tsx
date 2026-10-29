@@ -311,7 +311,7 @@ export default function StaffDetailsPage({
 
           <div className="sf-footer">
             <button type="button" className="mc-btn sf-save" disabled={saving} onClick={handleSave}>
-              {saving ? 'Saving…' : isNew ? 'Add Staff' : 'Save Changes'}
+              {saving ? 'Saving…' : isNew ? 'Save Staff' : 'Update Staff'}
             </button>
           </div>
         </>
