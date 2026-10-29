@@ -30,6 +30,7 @@ const SUB_TITLES: { match: RegExp; title: string }[] = [
   { match: /^\/camera\/[^/]+\/edit$/, title: 'Edit Camera' },
   { match: /^\/edge-device\/new$/, title: 'New AI Edge Box' },
   { match: /^\/edge-device\/[^/]+\/edit$/, title: 'Edit AI Edge Box' },
+  { match: /^\/staff\/new$/, title: 'Add Staff' },
   { match: /^\/staff\/[^/]+$/, title: 'Staff Details' },
   { match: /^\/members\/[^/]+$/, title: 'Member Details' },
 ]
@@ -1045,7 +1046,19 @@ export default function Dashboard({ adminName, onSignOut }: DashboardProps) {
           <Route path="/edge-device/new" element={<NewEdgeDevicePage onBack={() => navigate('/edge-device')} />} />
           <Route path="/edge-device/:edgeDeviceId/edit" element={<EditEdgeDeviceRoute />} />
           <Route path="/eventhistory" element={<EventsRoute />} />
-          <Route path="/staff" element={<StaffPage onView={(id) => navigate(`/staff/${id}`)} />} />
+          <Route
+            path="/staff"
+            element={<StaffPage onView={(id) => navigate(`/staff/${id}`)} onAdd={() => navigate('/staff/new')} />}
+          />
+          <Route
+            path="/staff/new"
+            element={
+              <StaffDetailsPage
+                onBack={() => navigate('/staff')}
+                onCreated={(id) => navigate(`/staff/${id}`, { replace: true })}
+              />
+            }
+          />
           <Route path="/staff/:staffId" element={<StaffDetailsRoute />} />
           <Route path="/members" element={<MemberPage onView={(id) => navigate(`/members/${id}`)} />} />
           <Route path="/members/:memberId" element={<MemberDetailsRoute />} />

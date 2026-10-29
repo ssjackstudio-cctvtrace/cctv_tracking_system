@@ -4,7 +4,7 @@
 /* Toolbar: one row when expanded */
 .mp-toolbar { display: grid; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
 .mp-toolbar--member { grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)); }
-.mp-toolbar--staff { grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); }
+.mp-toolbar--staff { grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto; }
 .mp-toolbar input,
 .mp-toolbar select {
   width: 100%;
@@ -30,6 +30,14 @@
   .mp-toolbar--member,
   .mp-toolbar--staff { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mp-toolbar--member .mp-search { grid-column: 1 / -1; }
+}
+
+/* Add Staff: right of the status filter when expanded;
+   collapsed: its own row, at the bottom right under the filters */
+.mp-add { white-space: nowrap; padding: 0.6rem 1rem; }
+.ds--collapsed .mp-toolbar--staff .mp-add { grid-column: 2; justify-self: end; }
+@media (max-width: 760px) {
+  .mp-toolbar--staff .mp-add { grid-column: 2; justify-self: end; }
 }
 
 /* Cards: 4 per row expanded, 2 per row collapsed */
@@ -90,3 +98,31 @@
   .mp-grid .mc-label { font-size: 0.75rem; margin-top: 0.45rem; }
   .mp-grid .mc-btn { width: 100%; padding: 0.5rem; font-size: 0.8rem; }
 }
+
+/* Staff details: Add Staff (empty) / View & Edit (saved values) form */
+.sf-form { max-width: 820px; box-sizing: border-box; }
+.sf-title { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.sf-grid { display: grid; gap: 0.9rem 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 760px) { .sf-grid { grid-template-columns: minmax(0, 1fr); } }
+.sf-field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; font-size: 0.85rem; color: var(--ds-muted); }
+.sf-field input,
+.sf-field select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c9d3d0;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ds-text);
+  font: inherit;
+  font-size: 0.95rem;
+}
+.sf-field input:focus-visible,
+.sf-field select:focus-visible { outline: 2px solid var(--ds-lens); outline-offset: 1px; }
+.sf-field small { color: var(--ds-muted); font-size: 0.78rem; }
+.sf-footer { display: flex; justify-content: flex-end; max-width: 820px; margin-top: 1rem; }
+.sf-save { padding: 0.65rem 1.4rem; font-weight: 600; }
+.sf-save:disabled { opacity: 0.6; cursor: not-allowed; }
+.sf-notice { margin: 0 0 1rem; padding: 0.7rem 1rem; border-radius: 6px; }
+.sf-notice--ok { background: #d5f3ea; color: #12684f; }

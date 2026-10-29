@@ -49,14 +49,14 @@ function StaffCard({ staff, onView }: { staff: StaffRow; onView: () => void }) {
       />
       <div className="mc-actions">
         <button type="button" className="mc-btn" onClick={onView}>
-          View Staff Details
+          View &amp; Edit
         </button>
       </div>
     </div>
   )
 }
 
-export default function StaffPage({ onView }: { onView: (staffId: string) => void }) {
+export default function StaffPage({ onView, onAdd }: { onView: (staffId: string) => void; onAdd: () => void }) {
   const [staff, setStaff] = useState<StaffRow[]>([])
   const [branches, setBranches] = useState<Pick<Branch, 'branch_id' | 'branch_name'>[]>([])
   const [loading, setLoading] = useState(true)
@@ -140,6 +140,9 @@ export default function StaffPage({ onView }: { onView: (staffId: string) => voi
             </option>
           ))}
         </select>
+        <button type="button" className="mc-btn mp-add" onClick={onAdd}>
+          Add Staff
+        </button>
       </div>
 
       {loading && <p className="ds-empty">Loading…</p>}
