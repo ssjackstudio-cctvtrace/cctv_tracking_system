@@ -6,12 +6,13 @@
 #    but never starts a new person from them (new_track_thresh). Fewer new
 #    track_ids when a shopper walks behind a table, and fewer "people" made from
 #    bags, trolleys and mannequins.
-#  - track_buffer: a lost person keeps the same tracker number for 90 frames
-#    (about 6 s at 15 pictures a second on the NPU).
+#  - track_buffer: a lost person keeps the same tracker number for 150 frames
+#    (about 10 s at 15 pictures a second on the NPU). Hidden longer: the box gives
+#    them their track_id back when seen again, up to TRACK_KEEP_SECONDS (10 min).
 tracker_type: bytetrack
 track_high_thresh: 0.35 # first association: sure boxes
 track_low_thresh: 0.12 # second association: partly hidden people (keep existing numbers only)
 new_track_thresh: 0.45 # a new tracker number needs a fairly sure detection
-track_buffer: 90 # frames a lost person is kept before their number is dropped
+track_buffer: 150 # frames a lost person is kept before their number is dropped
 match_thresh: 0.8 # threshold for matching tracks
 fuse_score: True # fuse confidence scores with the iou distances before matching

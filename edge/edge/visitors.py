@@ -29,7 +29,11 @@ Rules
     moves the person in or out when no OTHER camera has just seen them on the
     other side (GUARD_SECONDS), so the events never flip back and forth.
   - A person is remembered while ANY camera sees them, and for KEEP_SECONDS
-    (TRACK_KEEP_SECONDS in .env, default 300 = 5 minutes) after the last camera saw them.
+    (TRACK_KEEP_SECONDS in .env, default 600 = 10 minutes) after the last camera saw them.
+    While they are still inside, a person the tracker lost (hidden behind a
+    display, crouching, out of every camera's picture) who shows up again
+    within those 10 minutes with the same look gets their SAME track_id back
+    (reclaim), wherever in the shop they reappear.
     Then the track_id is ended for good: it is never given to anyone again.
     If the person was still inside (no Out seen), the visit is closed with an
     Out event at the moment they were last seen (main.py), so every visit has
@@ -83,7 +87,7 @@ from typing import Callable
 
 from .demographics import Estimate
 from .reid import (BODY_SAME, CROSS_WEIGHTS, FACE_SAME, MAX_DISTANCE, WEIGHTS, Look, appearance,
-                   attire_distance, comparable, compare, same_face)
+                   attire_clash, attire_distance, comparable, compare, describe_colours, same_face)
 from datetime import datetime, timezone
 
 # Older names, kept for other modules
@@ -91,7 +95,9 @@ distance = attire_distance
 __all__ = ["MAX_DISTANCE", "KEEP_SECONDS", "OUTSIDE_KEEP_SECONDS", "Visitor", "VisitorRegistry", "appearance", "distance"]
 
 # Not seen by any camera for this long → the track_id ends (person gone)
-KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "300"))  # 5 minutes
+# 10 minutes: a person still inside the shop whom no camera sees for a while (hidden behind a
+# display, out of every picture) keeps their track_id this long, and gets it back when seen again
+KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "600"))  # 10 minutes
 # After Out: the track_id is kept this long after the last camera saw the person (outside the shop)
 OUTSIDE_KEEP_SECONDS = float(os.getenv("OUTSIDE_KEEP_SECONDS", "300"))
 HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this long is "hidden" (may come back)
@@ -101,7 +107,9 @@ HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this
 # overlap handoff (OVERLAP_SECONDS) and reclaim, and got a NEW track_id.
 RECLAIM_AFTER_SECONDS = min(float(os.getenv("RECLAIM_AFTER_SECONDS", "1.0")), KEEP_SECONDS)
 LOOSE_DISTANCE = min(0.9, MAX_DISTANCE * 1.5)  # look match for a hidden visitor coming back (within KEEP_SECONDS)
-HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have walked in KEEP_SECONDS (cameras on the shop plan)
+HIDDEN_MOVE_METRES = 4.0  # how far a hidden person may have moved right away (cameras on the shop plan) ...
+# ... plus this much per second hidden: after a long time (up to KEEP_SECONDS) they may be anywhere in the shop
+HIDDEN_MOVE_MPS = float(os.getenv("HIDDEN_MOVE_MPS", "0.5"))
 SAME_PLACE_METRES = float(os.getenv("SAME_PLACE_METRES", "0.9"))  # two cameras' floor spots this close = same person
 POSITION_FRESH_SECONDS = 1.5  # a visitor's floor spot is "now" for this long after it was seen
 # Cameras on the shop plan are calibrated by hand, so two cameras can put the SAME person
@@ -141,6 +149,10 @@ RETRACK_SECONDS = float(os.getenv("RETRACK_SECONDS", "120"))  # same camera: new
 # same kind of area, this close on the shop plan (cameras calibrated by hand can be 2-3 m off,
 # more when the legs are hidden) are listed even when their looks cannot be compared
 SUSPECT_PLACE_METRES = float(os.getenv("SUSPECT_PLACE_METRES", "3.0"))
+# Guest: a first track_id collects suspicious same-person track_ids for 10 minutes only.
+# A later track_id first seen more than this after the first track_id was first seen is
+# never listed under it: it becomes a new first track_id of its own.
+SUSPECT_WINDOW_SECONDS = float(os.getenv("SUSPECT_WINDOW_SECONDS", "600"))
 
 
 def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
@@ -414,7 +426,7 @@ class VisitorRegistry:
 
     def _keep(self, v: Visitor) -> float:
         """How long a visitor is remembered after the last camera saw them:
-        5 minutes after going Out (may come back in), TRACK_KEEP_SECONDS (5 minutes) while inside."""
+        5 minutes after going Out (may come back in), TRACK_KEEP_SECONDS (10 minutes) while inside."""
         return self.outside_keep_seconds if v.outside else self.keep_seconds
 
     # ---------- updates ----------
@@ -568,7 +580,8 @@ class VisitorRegistry:
                 now: float | None = None, camera_id: str | None = None) -> Visitor | None:
         """Someone appeared INSIDE the shop (not walking in from outside) and no
         visitor matched closely: they may be a visitor who was hidden behind an
-        obstacle for a few seconds (less than KEEP_SECONDS). Give them back the
+        obstacle, or out of every camera's picture, for less than KEEP_SECONDS
+        (10 minutes). Give them back the
         hidden visitor who looks most alike (looser match), so their track_id
         stays the same. None when nobody is hidden or nobody looks alike."""
         now = time.time() if now is None else now
@@ -586,8 +599,8 @@ class VisitorRegistry:
                 if app is None or app > LOOSE_DISTANCE:
                     continue  # another face / body / attire / height
                 moved = math.dist(floor, v.floor) if floor is not None and v.floor is not None else None
-                if moved is not None and moved > HIDDEN_MOVE_METRES:
-                    continue
+                if moved is not None and moved > HIDDEN_MOVE_METRES + HIDDEN_MOVE_MPS * (now - last):
+                    continue  # too far from where they were hidden, for the time they were hidden
                 s = app + (moved or 0.0) / 20 + (now - last) / 60
                 if best_s is None or s < best_s:
                     best, best_s = v, s
@@ -682,6 +695,22 @@ def _soft_distance(x: Look, y: Look, cross: bool) -> float | None:
     return sum(d * wt for d, wt in parts) / total if total else None
 
 
+def _other_attire(a_looks: dict, a_look: Look, b_looks: dict, b_look: Look) -> bool:
+    """Another attire style (reid.attire_clash: the top OR the pants clearly another
+    colour), so two people. On a camera that saw both (same light) one clash is enough.
+    Seen only on different cameras: a clash on every pair of cameras (other light)."""
+    la = [(c, lk) for c, lk in a_looks.items() if lk.colours is not None] or \
+        ([(None, a_look)] if a_look.colours is not None else [])
+    lb = [(c, lk) for c, lk in b_looks.items() if lk.colours is not None] or \
+        ([(None, b_look)] if b_look.colours is not None else [])
+    if not la or not lb:
+        return False  # clothes not seen well on one of them: cannot tell
+    same_cam = [(x, y) for ca, x in la for cb, y in lb if ca is not None and ca == cb]
+    if same_cam:
+        return any(attire_clash(x.colours, y.colours) for x, y in same_cam)
+    return all(attire_clash(x.colours, y.colours, cross=True) for _, x in la for _, y in lb)
+
+
 def _suspect_pair(a: tuple, b: tuple, together: set) -> dict | None:
     """One suspicious pair for VisitorRegistry.suspects (a made before b), or None."""
     va, a_seen, a_first, a_looks, a_look, a_floor, a_floor_at, a_gender, a_region = a
@@ -692,6 +721,10 @@ def _suspect_pair(a: tuple, b: tuple, together: set) -> dict | None:
         return None  # one camera saw both in the same picture: two people
     if {a_gender, b_gender} == {"Male", "Female"}:
         return None  # both clearly seen, and not the same gender
+    if vb.created_at - va.created_at > SUSPECT_WINDOW_SECONDS:
+        return None  # more than 10 minutes after the first track_id started: b is a new first track_id
+    if _other_attire(a_looks, a_look, b_looks, b_look):
+        return None  # top or pants clearly another colour: another person, never the same
     a_last = max([va.created_at, *a_seen.values()])
     gap = vb.created_at - a_last  # < 0: both tracked at the same time
     # lost on a camera, then a new number on that camera soon after
@@ -739,12 +772,15 @@ def _suspect_pair(a: tuple, b: tuple, together: set) -> dict | None:
         score = max(score, 90.0)
     reasons = ["same face" if face else (f"face / body / clothes {score:.0f}% alike" if d is not None
                                           else "looks could not be compared")]
+    if a_look.colours is not None and b_look.colours is not None:
+        reasons.append(f"clothes: {describe_colours(a_look.colours)} / {describe_colours(b_look.colours)}")
     if place_ok:
         reasons.append(f"same place at the same time ({a_region}, {apart:.1f} m apart on the floor map)")
     elif apart is not None:
         reasons.append(f"floor spots {apart:.1f} m apart")
     if kind == "Same camera":
-        reasons.append(f"new number {vb.created_at - a_seen[retrack]:.0f} s after the first was lost")
+        lost_gap = (_first_on(vb, b_first, retrack) or vb.created_at) - a_seen[retrack]
+        reasons.append(f"new number {max(0.0, lost_gap):.0f} s after the first was lost")
     elif gap < 0:
         reasons.append("both tracked at the same time on different cameras")
     else:

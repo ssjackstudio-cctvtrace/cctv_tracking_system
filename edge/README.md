@@ -222,10 +222,11 @@ remembers (`edge/edge/visitors.py`):
 - Every other camera that sees the same person — at the same moment (views
   that overlap) or later (another part of the shop) — is **linked** to that
   visitor, always with the **same visit_id / track_id**.
-- **5-minute memory.** A person is remembered while any camera sees them,
-  and for `TRACK_KEEP_SECONDS` (default **300 = 5 minutes**) after the last camera saw
-  them. Hidden for less than that (behind a shelf): same track_id when they
-  appear again. After that the track_id **ends**: if they never went Out,
+- **10-minute memory.** A person is remembered while any camera sees them,
+  and for `TRACK_KEEP_SECONDS` (default **600 = 10 minutes**) after the last camera saw
+  them. Hidden for less than that (behind a shelf, out of every camera's picture):
+  same track_id when they appear again anywhere in the shop with the same look.
+  Top or pants clearly another colour = another person (`REID_ATTIRE_STYLE`). After that the track_id **ends**: if they never went Out,
   their visit is closed with an Out event (at the moment they were last
   seen), so every visit has an In and an Out.
 - **Tracker mix-ups.** If a tracker number suddenly looks like another person
@@ -279,14 +280,14 @@ How the box knows it is the same person:
    straight out (less than `NEW_VISITOR_HOLD_SECONDS`) gets nothing recorded.
 
 **People inside right now** (`edge_device.people_inside`, no longer shown on
-the dashboard) is what the cameras see right now: every visitor seen by any camera in the last 5 minutes (TRACK_KEEP_SECONDS), each person once
+the dashboard) is what the cameras see right now: every visitor seen by any camera in the last 10 minutes (TRACK_KEEP_SECONDS), each person once
 (someone in the overlap of 2 cameras is one visitor). The box writes it to
 `edge_device.people_inside` — run `supabase/people_inside.sql` once. For a
 past day (the shop is closed) it is 0.
 
 Only numbers are kept in memory; no picture is saved.
 
-The tracker keeps a hidden person's number for 90 frames
+The tracker keeps a hidden person's number for 150 frames (about 10 s)
 (`trackers/bytetrack_cctv.yaml`; set `TRACKER=` to use another file).
 
 ### Keeping one track_id (what the 4 live videos showed)

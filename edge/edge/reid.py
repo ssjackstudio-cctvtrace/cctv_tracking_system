@@ -144,6 +144,98 @@ def attire_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(sum(d) / 2)
 
 
+# ---------- attire style (named colour of the top and of the pants) ----------
+# The colour histogram above is averaged over top + pants, so an orange top with black
+# pants and a black-and-white outfit could still come out "45% alike". Here each part
+# (top, pants) gets the share of its pixels in a few NAMED colours. Two looks whose top
+# OR pants are clearly another colour (e.g. orange top vs black top) are another
+# person: never the same track_id, never a "Suspicious same person" pair.
+COLOUR_NAMES = ("black", "grey", "white", "red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink")
+N_COLOURS = len(COLOUR_NAMES)
+_HUES = ("red", "orange", "yellow", "green", "cyan", "blue", "purple", "pink")  # around the colour wheel
+# Neighbour colours look alike under other light / white balance: not "clearly different"
+_NEAR = {frozenset(p) for p in (("black", "grey"), ("grey", "white"))} | \
+    {frozenset((_HUES[i], _HUES[(i + 1) % len(_HUES)])) for i in range(len(_HUES))}
+# A part's main colour must cover at least this share of it to count
+COLOUR_MAIN_SHARE = float(os.getenv("REID_COLOUR_MAIN_SHARE", "0.40"))
+# ... and the two parts may share at most this much colour (0-1) to be "clearly different":
+# same camera (same light) / two cameras (other light: a little more tolerant)
+COLOUR_OVERLAP_SAME = float(os.getenv("REID_COLOUR_OVERLAP", "0.30"))
+COLOUR_OVERLAP_CROSS = float(os.getenv("REID_COLOUR_OVERLAP_CROSS", "0.20"))
+ATTIRE_STYLE_CHECK = os.getenv("REID_ATTIRE_STYLE", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _colour_shares(crop: np.ndarray) -> np.ndarray | None:
+    """Share of the crop's pixels in each of COLOUR_NAMES."""
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.int16)
+    if len(hsv) < 50:
+        return None
+    h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+    dark = v < 50
+    pale = (~dark) & (s < 45)
+    hue = (~dark) & (~pale)
+    out = np.zeros(N_COLOURS, dtype=np.float32)
+    out[0] = dark.sum()
+    out[1] = (pale & (v <= 175)).sum()
+    out[2] = (pale & (v > 175)).sum()
+    hh = h[hue]
+    for name, lo, hi in (("red", 0, 8), ("orange", 8, 20), ("yellow", 20, 35), ("green", 35, 85),
+                         ("cyan", 85, 100), ("blue", 100, 130), ("purple", 130, 150), ("pink", 150, 165),
+                         ("red", 165, 181)):
+        out[COLOUR_NAMES.index(name)] += ((hh >= lo) & (hh < hi)).sum()
+    total = out.sum()
+    return out / total if total > 0 else None
+
+
+def attire_colours(frame: np.ndarray, box: tuple[float, float, float, float]) -> np.ndarray | None:
+    """Named colour shares of the top (upper body) and the pants (lower body), one after the other."""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = (int(v) for v in box)
+    x1, x2 = max(0, x1), min(w, x2)
+    y1, y2 = max(0, y1), min(h, y2)
+    bh, bw = y2 - y1, x2 - x1
+    if bh < 40 or bw < 16:
+        return None
+    x1, x2 = x1 + bw // 6, x2 - bw // 6  # the middle of the body: less background
+    person = _even_light(frame[y1:y2, x1:x2])
+    parts = []
+    for top, bottom in ((0.20, 0.50), (0.60, 0.90)):  # top, pants (a gap at the belt)
+        crop = person[int(bh * top): int(bh * bottom)]
+        if crop.size == 0:
+            return None
+        shares = _colour_shares(crop)
+        if shares is None:
+            return None
+        parts.append(shares)
+    return np.concatenate(parts).astype(np.float32)
+
+
+def _part_clash(a: np.ndarray, b: np.ndarray, overlap_max: float) -> bool:
+    ia, ib = int(np.argmax(a)), int(np.argmax(b))
+    if a[ia] < COLOUR_MAIN_SHARE or b[ib] < COLOUR_MAIN_SHARE:
+        return False  # mixed / patterned colours: not sure enough to say "other clothes"
+    if ia == ib or frozenset((COLOUR_NAMES[ia], COLOUR_NAMES[ib])) in _NEAR:
+        return False
+    return float(np.minimum(a, b).sum()) <= overlap_max  # little colour in common
+
+
+def attire_clash(a: np.ndarray | None, b: np.ndarray | None, cross: bool = False) -> bool:
+    """True when the top OR the pants are clearly another colour: another attire
+    style, so another person. cross=True: the two looks come from different cameras."""
+    if not ATTIRE_STYLE_CHECK or a is None or b is None:
+        return False
+    overlap = COLOUR_OVERLAP_CROSS if cross else COLOUR_OVERLAP_SAME
+    return any(_part_clash(a[i:i + N_COLOURS], b[i:i + N_COLOURS], overlap) for i in (0, N_COLOURS))
+
+
+def describe_colours(c: np.ndarray | None) -> str:
+    """e.g. 'orange top, black pants' (for the log / reasons)."""
+    if c is None:
+        return "unknown clothes"
+    top, pants = c[:N_COLOURS], c[N_COLOURS:]
+    return f"{COLOUR_NAMES[int(np.argmax(top))]} top, {COLOUR_NAMES[int(np.argmax(pants))]} pants"
+
+
 # ---------- one person's look ----------
 @dataclass
 class Look:
@@ -151,7 +243,8 @@ class Look:
     face: np.ndarray | None = None  # unit vector
     body: np.ndarray | None = None  # unit vector
     height: float | None = None
-    counts: dict = field(default_factory=lambda: {"attire": 0, "face": 0, "body": 0, "height": 0})
+    colours: np.ndarray | None = None  # named colours of the top and the pants (attire_colours)
+    counts: dict = field(default_factory=lambda: {"attire": 0, "face": 0, "body": 0, "height": 0, "colours": 0})
 
     @property
     def empty(self) -> bool:
@@ -161,17 +254,17 @@ class Look:
         """Running average with another look at the same person (other frames, other cameras)."""
         if other is None:
             return
-        for name in ("attire", "face", "body"):
+        for name in ("attire", "face", "body", "colours"):
             new = getattr(other, name)
             if new is None:
                 continue
-            cur, n = getattr(self, name), self.counts[name]
+            cur, n = getattr(self, name), self.counts.get(name, 0)
             if cur is None:
                 val = new.copy()
             else:
                 k = min(n, KEEP)
                 val = (cur * k + new) / (k + 1)
-            setattr(self, name, _unit(val) if name != "attire" else val.astype(np.float32))
+            setattr(self, name, _unit(val) if name in ("face", "body") else val.astype(np.float32))
             self.counts[name] = n + max(1, other.counts.get(name, 1))
         if other.height is not None:
             n = self.counts["height"]
@@ -180,7 +273,7 @@ class Look:
 
     def copy(self) -> "Look":
         c = Look(counts=dict(self.counts), height=self.height)
-        for name in ("attire", "face", "body"):
+        for name in ("attire", "face", "body", "colours"):
             v = getattr(self, name)
             setattr(c, name, None if v is None else v.copy())
         return c
@@ -228,6 +321,10 @@ def compare(a: Look | None, b: Look | None, cross: bool = False) -> float | None
             return None  # another body
         body_sure = s >= BODY_SAME
         parts.append((min(1.0, MAX_DISTANCE * (1 - s) / max(1 - BODY_SAME, 1e-6)), weights["body"]))
+    # Another attire style (top or pants clearly another colour): another person, unless
+    # the face is surely the same (e.g. put a jacket on)
+    if not face_sure and attire_clash(a.colours, b.colours, cross):
+        return None
     if a.attire is not None and b.attire is not None:
         d = attire_distance(a.attire, b.attire)
         # Clothes colours alone never veto when the face or the whole-body model says
@@ -280,8 +377,8 @@ class Recognizer:
              heavy: bool = True) -> Look:
         """Attire always (cheap); face and whole body only when heavy=True (a
         few people per frame, so counting stays smooth on the edge box)."""
-        look = Look(attire=appearance(frame, box), height=height)
-        for name in ("attire", "height"):
+        look = Look(attire=appearance(frame, box), height=height, colours=attire_colours(frame, box))
+        for name in ("attire", "height", "colours"):
             look.counts[name] = 1 if getattr(look, name) is not None else 0
         if not heavy or not self.enabled:
             return look

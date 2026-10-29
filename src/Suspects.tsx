@@ -15,6 +15,14 @@ import './Suspects.css'
 //   Not same  the later track_id is another person: it leaves this card and is
 //             its own first track_id from now on (the edge box never pairs these
 //             two again; later lookalikes of it get their own card).
+//
+// Three tabs, one per visit_type of the first track_id: Guest, Staff, Member.
+//   Guest   a first track_id only collects later track_ids first seen within
+//           10 minutes of it (GUEST_WINDOW_MS); a later one is a new first
+//           track_id of its own. The edge box also never pairs two people whose
+//           top or pants are clearly another colour (another attire style).
+//   Staff / Member  not used yet: they need face recognition of enrolled staff
+//           and members first (face_template, recognition_event).
 
 const SUSPECT_TABLE = 'suspect_match'
 const REFRESH_MS = 30_000
@@ -22,6 +30,9 @@ const SURE_SCORE = 90 // "Merge all sure": only pairs at least this alike
 const PAGE = 1000 // Supabase's most rows per request
 const MAX_ROWS = 10_000 // today's pairs read at most
 type Status = 'Open' | 'Merged' | 'Not same'
+type VisitTab = 'Guest' | 'Staff' | 'Member'
+const VISIT_TABS: VisitTab[] = ['Guest', 'Staff', 'Member']
+const GUEST_WINDOW_MS = 10 * 60_000 // Guest: later track_ids within 10 minutes of the first one
 
 type VisitInfo = {
   track_id: string
@@ -86,6 +97,7 @@ function Photo({ url, label }: { url: string | null | undefined; label: string }
 }
 
 export default function SuspectPanel({ branchId }: { branchId: string }) {
+  const [tab, setTab] = useState<VisitTab>('Guest')
   const [status, setStatus] = useState<Status>('Open')
   const [rows, setRows] = useState<SuspectRow[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -131,16 +143,29 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   }, [branchId, status])
 
   useEffect(() => {
+    if (tab !== 'Guest') return // Staff / Member: nothing to load yet
     setLoaded(false)
     load()
     const timer = window.setInterval(load, REFRESH_MS)
     return () => window.clearInterval(timer)
-  }, [load])
+  }, [load, tab])
+
+  // Guest tab: first track_id is a Guest, and the later track_id was first seen
+  // within 10 minutes of it (older pairs made before this rule are left out too)
+  const tabRows = useMemo(
+    () =>
+      rows.filter((r) => {
+        if ((r.keep?.visit_type ?? 'Guest') !== tab) return false
+        if (tab !== 'Guest' || !r.seen_keep || !r.seen_dup) return true
+        return new Date(r.seen_dup).getTime() - new Date(r.seen_keep).getTime() <= GUEST_WINDOW_MS
+      }),
+    [rows, tab],
+  )
 
   // One card per first track_id, earliest first; its later track_ids earliest first
   const groups = useMemo(() => {
     const byTrack = new Map<string, Group>()
-    for (const r of rows) {
+    for (const r of tabRows) {
       const track = r.keep?.track_id ?? r.track_keep
       let g = byTrack.get(track)
       if (!g) {
@@ -157,7 +182,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
     const list = [...byTrack.values()]
     for (const g of list) g.rows.sort((a, b) => (a.seen_dup ?? '').localeCompare(b.seen_dup ?? ''))
     return list.sort((a, b) => (a.seen ?? '').localeCompare(b.seen ?? ''))
-  }, [rows])
+  }, [tabRows])
 
   const sureIds = useMemo(
     () =>
@@ -212,6 +237,24 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         body, clothes). Compare the photos. <b>Merge</b> gives the later track_id the first one, so the Dashboard counts
         that person once. <b>Not same</b> makes it its own first track_id.
       </p>
+      <div className="tabs">
+        {VISIT_TABS.map((t) => (
+          <button key={t} type="button" className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {tab !== 'Guest' ? (
+        <p className="ds-empty">
+          {tab} recognition is not set up yet. Suspicious same person for {tab.toLowerCase()}s will be listed here once
+          the cameras can recognise enrolled {tab.toLowerCase()}s by face.
+        </p>
+      ) : (
+      <>
+      <p className="cam-count-note">
+        Guest: a first track_id only collects track_ids first seen within 10 minutes of it; a later one becomes a new
+        first track_id. People whose top or pants are clearly another colour are never paired.
+      </p>
       <div className="cam-toolbar">
         <label className="cam-filter">
           Show
@@ -224,7 +267,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         {status === 'Open' && (
           <div className="cam-toolbar-actions">
             <span className="sp-total">
-              {groups.length} first track_id{groups.length === 1 ? '' : 's'} · {rows.length} pair{rows.length === 1 ? '' : 's'}
+              {groups.length} first track_id{groups.length === 1 ? '' : 's'} · {tabRows.length} pair{tabRows.length === 1 ? '' : 's'}
             </span>
             <button type="button" className="cam-add" disabled={busy || sureIds.length === 0} onClick={mergeSure}>
               Merge all sure ≥{SURE_SCORE}% ({sureIds.length})
@@ -312,6 +355,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
             </article>
           ))}
         </div>
+      )}
+      </>
       )}
     </section>
   )
