@@ -466,7 +466,7 @@ function RegionLongestStay({
             )}
           </div>
           {stays.length > 3 && (
-            // 4th and 5th: rank, track_id, full name (members only), visit type, gender, time taken
+            // 4th and 5th: rank, track_id, full name (members only), visit type, track region, gender, time taken
             <div className="ds-stay-rows">
               <table>
                 <tbody>
@@ -476,6 +476,7 @@ function RegionLongestStay({
                       <td className="ds-stay-track">{s.trackId}</td>
                       <td>{s.visitType === 'Member' ? s.memberName ?? '-' : '-'}</td>
                       <td>{s.visitType}</td>
+                      <td>{s.region}</td>
                       <td>{s.gender}</td>
                       <td className="ds-stay-time">{fmtStay(s.seconds)}</td>
                     </tr>
