@@ -126,3 +126,32 @@
 .sf-save:disabled { opacity: 0.6; cursor: not-allowed; }
 .sf-notice { margin: 0 0 1rem; padding: 0.7rem 1rem; border-radius: 6px; }
 .sf-notice--ok { background: #d5f3ea; color: #12684f; }
+
+/* Staff details: photos under PDPA consent (Staffphotos.tsx) */
+.sf-field--wide { grid-column: 1 / -1; }
+.sp-box { padding: 0.8rem; border: 1px dashed #c9d3d0; border-radius: 6px; }
+.sp-actions { display: flex; gap: 0.5rem; }
+.sp-add { padding: 0.45rem 1rem; }
+.sp-add:disabled { opacity: 0.6; cursor: not-allowed; }
+.sp-msg { margin: 0; }
+.sp-grid { list-style: none; margin: 0.3rem 0 0; padding: 0; display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+.sp-item { position: relative; display: flex; flex-direction: column; gap: 0.25rem; padding: 0.35rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; }
+.sp-item img, .sp-noimg { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 4px; background: #eef2f1; }
+.sp-item--rejected { border-color: #e3a3a3; }
+.sp-item--rejected img { opacity: 0.45; }
+.sp-item--ok { border-color: #7fc8b2; }
+.sp-tag { font-size: 0.75rem; line-height: 1.25; color: var(--ds-muted); }
+.sp-tag--ok { color: #12684f; font-weight: 600; }
+.sp-tag--bad { color: #b42318; }
+.sp-state { font-size: 0.7rem; color: var(--ds-muted); }
+.sp-remove { position: absolute; top: 0.2rem; right: 0.2rem; width: 1.6rem; height: 1.6rem; border: none; border-radius: 50%; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 1rem; line-height: 1; cursor: pointer; }
+.sp-remove:disabled { opacity: 0.5; cursor: not-allowed; }
+.sp-item--failed { border-color: #e3a3a3; }
+.sp-cover { width: 100%; border-collapse: collapse; font-size: 0.78rem; table-layout: fixed; }
+.sp-cover th, .sp-cover td { padding: 0.3rem 0.35rem; border: 1px solid #dfe5e3; text-align: center; overflow-wrap: anywhere; }
+.sp-cover thead th, .sp-cover tbody th { background: #f3f6f5; color: var(--ds-text); font-weight: 600; }
+.sp-cover tbody th { text-align: left; }
+.sp-cell { color: var(--ds-muted); }
+.sp-cell--enrolled { background: #d5f3ea; color: #12684f; font-weight: 600; }
+.sp-cell--saved { background: #eef6f3; color: #12684f; }
+.sp-cell--new { background: #fff7e0; color: #8a6100; }

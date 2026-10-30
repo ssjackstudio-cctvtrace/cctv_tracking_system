@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 # Read RTSP over TCP (steadier than UDP over Wi-Fi). Must be set before cv2 opens a stream.
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
+from edge.biometrics import ENABLED as BODY_RECOGNITION, BodyMatcher, Enroller  # noqa: E402
 from edge.camera_worker import CameraWorker  # noqa: E402
 from edge.config import load_settings, rtsp_url  # noqa: E402
 from edge.live_server import LiveServer  # noqa: E402
@@ -78,6 +79,15 @@ def main() -> None:
     if supa and photo_days > 0:
         photos = PhotoUploader(supa, os.getenv("PERSON_PHOTO_BUCKET", "person-photos"), photo_days, writer.update)
         photos.start()
+
+    # Staff / members recognised by body parts from any side (360°), learnt from the
+    # biometric photos uploaded on the website (supabase/biometric_photo.sql).
+    # BODY_RECOGNITION=off switches it off.
+    body_matcher = None
+    if supa and BODY_RECOGNITION:
+        body_matcher = BodyMatcher(supa, writer.insert, writer.update)
+        body_matcher.start()
+        Enroller(supa, on_enrolled=body_matcher.reload_now.set).start()
 
     workers: dict[str, CameraWorker] = {}
     # People the cameras see, shared by all cameras: one track_id per person
@@ -141,6 +151,8 @@ def main() -> None:
                 "track_region": OUT_OF_RANGE, "confidence": round(v.last_conf * 100, 2),
                 "event_time": stamp(last),
             })
+            if body_matcher is not None:
+                body_matcher.forget(v.visit_id)
             if v.estimate.samples > v.sent_faces:  # newest gender / age
                 writer.update("visit", v.estimate.visit_fields(), camera_id=cam_id, visit_id=f"eq.{v.visit_id}")
             log.info("%s not seen by any camera for %.0f s: track_id ended, visit closed (Out)",
@@ -190,7 +202,7 @@ def main() -> None:
                     cam, source_for(cam), settings.model, settings.confidence, settings.image_size,
                     settings.anchor, writer.insert, snapshots.offer if snapshots else None,
                     settings.snapshot_seconds, show=args.show, update=writer.update, registry=visitors,
-                    offer_photo=photos.offer if photos else None,
+                    offer_photo=photos.offer if photos else None, body_matcher=body_matcher,
                 )
                 workers[cam_id] = w
                 w.start()

@@ -5,7 +5,8 @@ import type {
   Camera,
   CctvEvent,
   EdgeDevice,
-  FaceTemplate,
+  BiometricPhoto,
+  BodyTemplate,
   Member,
   Staff,
   RecognitionEvent,
@@ -20,7 +21,8 @@ export const TABLES = {
   camera: 'camera',
   member: 'member',
   staff: 'staff',
-  faceTemplate: 'face_template',
+  biometricPhoto: 'biometric_photo',
+  bodyTemplate: 'body_template',
   visit: 'visit',
   cctvEvent: 'cctv_event',
   recognitionEvent: 'recognition_event',
@@ -36,7 +38,8 @@ export type RowOf = {
   camera: Camera
   member: Member
   staff: Staff
-  face_template: FaceTemplate
+  biometric_photo: BiometricPhoto
+  body_template: BodyTemplate
   visit: Visit
   cctv_event: CctvEvent
   recognition_event: RecognitionEvent
@@ -50,7 +53,8 @@ export const PRIMARY_KEY: { [K in TableName]: keyof RowOf[K] & string } = {
   camera: 'camera_id',
   member: 'member_id',
   staff: 'staff_id',
-  face_template: 'face_template_id',
+  biometric_photo: 'biometric_photo_id',
+  body_template: 'body_template_id',
   visit: 'visit_id',
   cctv_event: 'cctv_event_id',
   recognition_event: 'recognition_event_id',
@@ -65,7 +69,8 @@ export const DEFAULT_ORDER: { [K in TableName]: keyof RowOf[K] & string } = {
   camera: 'created_at',
   member: 'joined_at',
   staff: 'designed_at',
-  face_template: 'created_at',
+  biometric_photo: 'created_at',
+  body_template: 'created_at',
   visit: 'visit_id',
   cctv_event: 'event_time',
   recognition_event: 'event_time',

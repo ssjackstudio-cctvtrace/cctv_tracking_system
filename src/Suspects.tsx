@@ -22,7 +22,7 @@ import './Suspects.css'
 //           track_id of its own. The edge box also never pairs two people whose
 //           top or pants are clearly another colour (another attire style).
 //   Staff / Member  not used yet: they need face recognition of enrolled staff
-//           and members first (face_template, recognition_event).
+//           and members first (biometric_photo / body_template, recognition_event).
 
 const SUSPECT_TABLE = 'suspect_match'
 const REFRESH_MS = 30_000

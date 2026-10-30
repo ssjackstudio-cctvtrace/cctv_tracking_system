@@ -11,6 +11,7 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, X
 import DataTable, { Badge } from './Datatable'
 import { supabase } from './lib/supabase'
 import { TABLES, edgeStatusNow, isOnline } from './Usetable'
+import { MATCH_SELECT_FULL, matchedName, matchedNo, recognisedBy, type RecognitionMatch } from './Recognition'
 import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { AreasEditor, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
@@ -463,12 +464,7 @@ type RecognitionEventRow = {
   event_time: string
   camera: { camera_name: string; tapo_model: string | null } | null
   visit: RecordVisit | null
-  // the matched face belongs to a member OR a staff
-  face_template: {
-    member: { member_no: string; full_name: string } | null
-    staff: { staff_no: string; full_name: string } | null
-  } | null
-}
+} & RecognitionMatch // matched by body parts (body_template), a member OR a staff
 
 const DAY_LIMIT = 10 // latest records shown for one day
 const pad2 = (n: number) => String(n).padStart(2, '0')
@@ -576,13 +572,13 @@ function CameraCctvEvents({ cameraId, day, reloadKey }: { cameraId: string; day:
 // select ca.camera_name, v.track_id, ca.tapo_model, v.visit_type, v.est_gender, v.est_age, v.demographic_score,
 //        coalesce(m.member_no, s.staff_no), coalesce(m.full_name, s.full_name), re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id join visit v on re.visit_id = v.visit_id
-// join face_template ft on re.face_template_id = ft.face_template_id
-// left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
+// left join body_template bt on re.body_template_id = bt.body_template_id
+// left join member m on bt.member_id = m.member_id left join staff s on bt.staff_id = s.staff_id
 // where re.camera_id = <this camera> and re.event_time on <day>
 function CameraRecognitionEvents({ cameraId, day, reloadKey }: { cameraId: string; day: string; reloadKey: number }) {
   const t = useCameraEvents<RecognitionEventRow>(
     TABLES.recognitionEvent,
-    'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), face_template!inner(member(member_no, full_name), staff(staff_no, full_name))',
+    'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, tapo_model), visit!inner(track_id, visit_type, est_gender, est_age, demographic_score), ' + MATCH_SELECT_FULL,
     cameraId,
     day,
     reloadKey,
@@ -602,14 +598,9 @@ function CameraRecognitionEvents({ cameraId, day, reloadKey }: { cameraId: strin
         { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
         { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
         { header: 'Demographic score', render: (r) => fmt2(r.visit?.demographic_score) },
-        {
-          header: 'Member / Staff no.',
-          render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
-        },
-        {
-          header: 'Full name',
-          render: (r) => r.face_template?.member?.full_name ?? r.face_template?.staff?.full_name ?? '—',
-        },
+        { header: 'Member / Staff no.', render: (r) => matchedNo(r) },
+        { header: 'Full name', render: (r) => matchedName(r) },
+        { header: 'Matched body', render: (r) => recognisedBy(r) },
         { header: 'Match score', render: (r) => fmt2(r.match_score) },
         { header: 'Result', render: (r) => <Badge text={r.result} /> },
         { header: 'Event time', render: (r) => formatEventTime(r.event_time) },

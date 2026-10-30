@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type UIEv
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { TABLES } from './Usetable'
+import { MATCH_SELECT_NO, matchedNo, type RecognitionMatch } from './Recognition'
 import BranchesPage from './BranchesPage'
 import EditBranchPage from './Editbranch'
 import CameraPage from './Camerapage'
@@ -94,10 +95,8 @@ type LatestRecognition = {
   result: string
   event_time: string
   camera: { camera_name: string } | null
-  // the matched face belongs to a member OR a staff
-  face_template: { member: { member_no: string } | null; staff: { staff_no: string } | null } | null
   visit: { est_gender: string; est_age: number | null; branch: { branch_name: string } | null } | null
-}
+} & RecognitionMatch // matched by body parts (body_template), a member OR a staff
 
 type Counts = {
   passedCount: number | null
@@ -519,14 +518,14 @@ function latestEvents(branch: string, range: Range) {
 
 // select ca.camera_name, b.branch_name, coalesce(m.member_no, s.staff_no), v.est_gender, v.est_age, re.match_score, re.result, re.event_time
 // from recognition_event re join camera ca on re.camera_id = ca.camera_id
-// join face_template ft on re.face_template_id = ft.face_template_id
-// left join member m on ft.member_id = m.member_id left join staff s on ft.staff_id = s.staff_id
+// left join body_template bt on re.body_template_id = bt.body_template_id
+// left join member m on bt.member_id = m.member_id left join staff s on bt.staff_id = s.staff_id
 // join visit v on re.visit_id = v.visit_id join branch b on v.branch_id = b.branch_id  (latest 50)
 function latestRecognitions(branch: string, range: Range) {
   let q = supabase
     .from(TABLES.recognitionEvent)
     .select(
-      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), face_template!inner(member(member_no), staff(staff_no)), visit!inner(est_gender, est_age, branch(branch_name))',
+      'recognition_event_id, match_score, result, event_time, camera!inner(camera_name, edge_device!inner(branch_id)), visit!inner(est_gender, est_age, branch(branch_name)), ' + MATCH_SELECT_NO,
     )
   if (branch) q = q.eq('camera.edge_device.branch_id', branch)
   if (range) q = q.gte('event_time', range[0]).lt('event_time', range[1])
@@ -788,10 +787,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
               columns={[
                 { header: 'Camera', render: (r) => r.camera?.camera_name ?? '—' },
                 { header: 'Branch', render: (r) => r.visit?.branch?.branch_name ?? '—' },
-                {
-                  header: 'Member / Staff no.',
-                  render: (r) => r.face_template?.member?.member_no ?? r.face_template?.staff?.staff_no ?? '—',
-                },
+                { header: 'Member / Staff no.', render: (r) => matchedNo(r) },
                 { header: 'Gender (est.)', render: (r) => r.visit?.est_gender ?? '—' },
                 { header: 'Age (est.)', render: (r) => r.visit?.est_age ?? '—' },
                 { header: 'Match score', render: (r) => `${Number(r.match_score).toFixed(2)}%` },

@@ -121,7 +121,9 @@ export type RecognitionEvent = {
   recognition_event_id: string
   camera_id: string
   visit_id: string
-  face_template_id: string | null
+  body_template_id: string | null // body part template that matched best (360°)
+  body_view: BodyView | null // side of the person the camera saw
+  matched_parts: BodyPart[] | null
   match_score: number // 0–100
   result: 'Matched' | 'Not Matched'
   event_time: string
@@ -190,16 +192,36 @@ export type StaffEditable = Pick<
   | 'position'
 >
 
-// ---------- FACE_TEMPLATE ----------
-// A face of a member OR a staff: exactly one of member_id / staff_id is set.
-export type FaceTemplate = {
-  face_template_id: string
-  member_id: string | null
+// ---------- BIOMETRIC_PHOTO ----------
+// Photo of a staff OR a member for 360° body recognition (PDPA consent), max 15 per person.
+// File: bucket biometric-photos/<storage_path>. The edge box makes body_template rows from it.
+export type BodyView = 'Front' | 'Back' | 'Left side' | 'Right side'
+export type BodyPart = 'Head' | 'Upper body' | 'Lower body' | 'Feet'
+export type BiometricPhoto = {
+  biometric_photo_id: string
   staff_id: string | null
-  embedding: string | number[] // pgvector column; PostgREST returns it as text like "[0.1,0.2,...]"
-  model_name: string | null
-  consent_biometric: true // database only accepts TRUE
-  consent_at: string
-  revoked_at: string | null
+  member_id: string | null
+  storage_path: string
+  body_view: BodyView
+  whole_body: boolean
+  body_parts: BodyPart[]
+  part_boxes: Partial<Record<BodyPart, [number, number, number, number]>> | null // 0-1
+  enrol_status: 'Pending' | 'Enrolled' | 'Failed'
+  enrol_note: string | null
+  enrolled_at: string | null
+  created_at: string
+}
+
+// ---------- BODY_TEMPLATE ----------
+// Numbers of ONE body part of ONE photo: up to 4 views x 4 parts = 16 kinds per person.
+export type BodyTemplate = {
+  body_template_id: string
+  biometric_photo_id: string
+  staff_id: string | null
+  member_id: string | null
+  body_view: BodyView
+  body_part: BodyPart
+  embedding: string | number[] // pgvector (914), returned as text "[0.1,...]"
+  model_name: string
   created_at: string
 }

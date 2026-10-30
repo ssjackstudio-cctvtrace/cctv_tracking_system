@@ -27,6 +27,7 @@ import numpy as np
 from .demographics import Demographics, Estimate
 from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
+from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, PER_FRAME as BODY_PER_FRAME, PartEncoder
 from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry, look_distance
 
 log = logging.getLogger("camera")
@@ -476,6 +477,7 @@ class CameraWorker(threading.Thread):
         update: Callable[..., None] | None = None,
         registry: VisitorRegistry | None = None,
         offer_photo: Callable[[str, bytes], None] | None = None,
+        body_matcher: Any = None,
     ):
         super().__init__(name=f"cam-{camera['camera_name']}", daemon=True)
         self.camera = camera
@@ -485,6 +487,10 @@ class CameraWorker(threading.Thread):
         self.show = show
         self.update = update  # update(table, values, **filters), for a visit's gender / age
         self.offer_photo = offer_photo  # offer_photo(visit_id, jpeg): photo of a track_id (Suspicious same person)
+        # Staff / members recognised by body parts from any side (biometrics.py); None = off
+        self.body_matcher = body_matcher
+        self._parts: PartEncoder | None = None  # made in run() (its model belongs to this thread)
+        self._body_at: dict[int, float] = {}  # tracker id → last time its body parts were compared
         self._estimates: dict[int, Estimate] = {}  # tracker id → gender / age seen BEFORE it is linked to a visitor
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
         # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
@@ -657,6 +663,8 @@ class CameraWorker(threading.Thread):
         model = YOLO(self.model_path)
         demo = Demographics()  # gender / age models (off if the model files are missing)
         self._recog = Recognizer()  # face / whole-body recognition models (attire only if missing)
+        if self.body_matcher is not None:
+            self._parts = PartEncoder(self._recog.body_net)
         tracker = TRACKER if os.path.isfile(TRACKER) else "bytetrack.yaml"
         self.grabber.start()
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
@@ -943,6 +951,8 @@ class CameraWorker(threading.Thread):
                 busy.add(v.visit_id)
                 self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
 
+        self._recognise_body(frame, people, now)
+
         # Forget tracker numbers gone for a long time (the visitor ends KEEP_SECONDS after no camera sees them)
         for tid in [t for t, seen in self._seen_at.items() if now - seen > FORGET_TRACK_SECONDS]:
             v = self._link.get(tid)
@@ -951,8 +961,28 @@ class CameraWorker(threading.Thread):
             self._from_outside.discard(tid)
             for d in (self._seen_at, self._spot, self._link, self._look, self._look_n, self._look_at,
                       self._tried_at, self._pending, self._regions, self._estimates, self._last_look,
-                      self._mismatch, self._passing):
+                      self._mismatch, self._passing, self._body_at):
                 d.pop(tid, None)
+
+    def _recognise_body(self, frame: np.ndarray, people: list[Person], now: float) -> None:
+        """Staff / members by body parts, from any side (biometrics.py): people with a
+        track_id who are not recognised yet, a few per frame, each every BODY_EVERY_SECONDS."""
+        m = self.body_matcher
+        if m is None or self._parts is None or not m.ready:
+            return
+        h = frame.shape[0]
+        done = 0
+        for p in sorted(people, key=lambda q: self._body_at.get(q.tid, 0.0)):  # longest waiting first
+            if done >= BODY_PER_FRAME:
+                break
+            v = self._link.get(p.tid)
+            if v is None or m.known(v.visit_id) or now - self._body_at.get(p.tid, 0.0) < BODY_EVERY_SECONDS:
+                continue
+            self._body_at[p.tid] = now
+            feats = self._parts.live_features(frame, p.box, p.full and not p.est_feet, cut_head(p.box[1], h))
+            done += 1
+            if feats:
+                m.observe(v, self.camera["camera_id"], feats, self._parts.model_name)
 
     def _check_look(self, tid: int, look: Look | None, now: float) -> None:
         """Add a new look of this tracker number. If it is linked to a visitor

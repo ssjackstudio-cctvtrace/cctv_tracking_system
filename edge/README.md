@@ -461,10 +461,35 @@ share one floor and a person seen by 2 cameras lands on one spot).
 worked out from their head. The live video shows Store metrics (Passed By,
 Walk-in, Inside now) in its corner instead of the small floor map.
 
+## Staff recognition by body (360°)
+
+The cameras hang high up, so faces are rarely clear. Staff (and members) are
+recognised by their BODY instead, from any side (`edge/biometrics.py`,
+`supabase/biometric_photo.sql`):
+
+1. Website → Staff Details → PDPA consent **Yes** → add up to 15 photos. Each
+   photo is checked in the browser: one person, and a clear **Front / Back /
+   Left side / Right side** view. The website also finds which parts are in
+   it (**Head, Upper body, Lower body, Feet**). Table `biometric_photo`,
+   private bucket `biometric-photos`.
+2. The box downloads each new photo (`enrol_status` Pending) and makes one
+   `body_template` row per part: 914 numbers (body re-identification model
+   + colours + texture), no picture. 4 views x 4 parts = up to 16 kinds per
+   person; the coverage grid on Staff Details shows which ones are learnt.
+3. Live, each visible part of a person with a track_id is compared with that
+   part from ALL views of every staff, so a staff seen from behind or from
+   the side is still found. After `BODY_VOTES` sure matches the visit becomes
+   `visit_type = Staff` (with `staff_id`) and a `recognition_event` row is
+   written (`body_template_id`, `body_view`,
+   `matched_parts`, `match_score`).
+
+Only Active staff with PDPA consent (not resigned) are matched; deleting a
+photo deletes its templates. Best results: photos from all 4 sides, in the
+clothes worn at work (uniform), and the body model installed
+(`python download_models.py`). The thresholds in `.env` (`BODY_*`) are
+starting values: run with `BODY_LOG=on` to see each score, then tune.
+
 ## Not in this version yet (phase 2)
 
-- Face recognition → `recognition_event`. The SQL function `match_face`
-  (members and staff, from `face_template`) is ready for it;
-  `match_member_face` still works for members only.
 - Rows waiting while the internet is down are kept in memory, so a power cut
   during an outage loses them.

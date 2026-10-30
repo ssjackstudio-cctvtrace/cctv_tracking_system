@@ -4,6 +4,7 @@ import { TABLES } from './Usetable'
 import type { Branch, Staff, StaffEditable } from './types'
 import { STAFF_COLUMNS, type StaffRow } from './Staffpage'
 import { BackButton, GENDERS, StatusBadge } from './Peoplecards'
+import { StaffPhotos, uploadStaffPhotos, type PendingPhoto } from './Staffphotos'
 import './Members.css'
 
 type BranchOption = Pick<Branch, 'branch_id' | 'branch_name'>
@@ -94,6 +95,27 @@ export default function StaffDetailsPage({
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
+  // Photos chosen under PDPA consent (uploaded on save), and the reload signal for the saved ones
+  const [photos, setPhotos] = useState<PendingPhoto[]>([])
+  const [photosReload, setPhotosReload] = useState(0)
+  // Add Staff: the staff row was created but some photos failed; Save again only retries the photos
+  const [createdId, setCreatedId] = useState<string | null>(null)
+
+  // Upload the photos that passed the check; keep the failed ones on the page.
+  // Returns the error text, or '' when all are uploaded.
+  async function savePhotos(id: string): Promise<string> {
+    if (form.consent_pdpa !== 'Yes') return ''
+    const failed = await uploadStaffPhotos(id, photos)
+    const failedKeys = new Set(failed.map((f) => f.key))
+    photos.forEach((p) => p.status === 'ok' && !failedKeys.has(p.key) && URL.revokeObjectURL(p.preview))
+    setPhotos((prev) =>
+      prev
+        .filter((p) => p.status !== 'ok' || failedKeys.has(p.key))
+        .map((p) => failed.find((f) => f.key === p.key) ?? p),
+    )
+    setPhotosReload((n) => n + 1)
+    return failed.length ? `${failed.length} photo(s) could not be uploaded: ${failed[0].reason}` : ''
+  }
 
   const set = (key: keyof Form) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, [key]: e.target.value }))
@@ -157,6 +179,8 @@ export default function StaffDetailsPage({
     if (!form.branch_id) return fail('Choose the branch.')
     if (!form.status) return fail('Choose the status.')
     if (!form.consent_pdpa) return fail('Choose whether the staff gave PDPA consent.')
+    if (form.consent_pdpa === 'Yes' && photos.some((p) => p.status === 'checking'))
+      return fail('Wait until every photo has been checked.')
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Enter a valid email, or leave it empty.')
     if (form.dob && (form.dob < '1900-01-01' || form.dob > new Date().toISOString().slice(0, 10)))
       return fail('Enter a valid date of birth.')
@@ -183,11 +207,23 @@ export default function StaffDetailsPage({
 
     setSaving(true)
     if (isNew) {
-      const { data, error } = await supabase.from(TABLES.staff).insert(values).select('staff_id').single()
+      // Staff already added on an earlier try: only the photos are left
+      let newId = createdId
+      if (!newId) {
+        const { data, error } = await supabase.from(TABLES.staff).insert(values).select('staff_id').single()
+        if (error || !data) {
+          setSaving(false)
+          return fail(`Failed to add the staff ${staff_no}: ${saveError(error?.message ?? 'no row returned', error?.code)}`)
+        }
+        newId = (data as { staff_id: string }).staff_id
+        setCreatedId(newId)
+      }
+      const photoError = await savePhotos(newId)
       setSaving(false)
-      if (error || !data) return fail(`Failed to add the staff ${staff_no}: ${saveError(error?.message ?? 'no row returned', error?.code)}`)
+      if (photoError)
+        return fail(`The staff ${staff_no} is added, but ${photoError}. Click Save Staff to try the photos again.`)
       setNotice({ type: 'success', text: `The staff ${staff_no} is added successfully` })
-      onCreated?.((data as { staff_id: string }).staff_id)
+      onCreated?.(newId)
       return
     }
     const { data, error } = await supabase
@@ -195,13 +231,16 @@ export default function StaffDetailsPage({
       .update(values)
       .eq('staff_id', staffId)
       .select(STAFF_COLUMNS)
-    setSaving(false)
+    if (error || !data || data.length === 0) setSaving(false)
     if (error) return fail(`Failed to update the staff ${staff_no}: ${saveError(error.message, error.code)}`)
     // RLS can block silently: no error, but zero rows come back
     if (!data || data.length === 0) return fail(`Failed to update the staff ${staff_no}: permission denied`)
     const row = data[0] as unknown as StaffRow
+    const photoError = await savePhotos(staffId)
+    setSaving(false)
     setStaff(row)
     setForm(fromRow(row))
+    if (photoError) return fail(`The staff ${staff_no} is updated, but ${photoError}`)
     setNotice({ type: 'success', text: `The staff ${staff_no} is updated successfully` })
   }
 
@@ -296,6 +335,15 @@ export default function StaffDetailsPage({
                   ))}
                 </select>
               </label>
+              {form.consent_pdpa === 'Yes' && (
+                <StaffPhotos
+                  staffId={staffId ?? createdId ?? undefined}
+                  pending={photos}
+                  setPending={setPhotos}
+                  reloadKey={photosReload}
+                  disabled={saving}
+                />
+              )}
               <label className="sf-field">
                 <span>Designed at</span>
                 <input type="datetime-local" value={form.designed_at} onChange={set('designed_at')} />

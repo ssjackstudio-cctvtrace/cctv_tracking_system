@@ -53,6 +53,14 @@ class Supabase:
         )
         self._check(r)
 
+    def delete(self, table: str, **filters: str) -> None:
+        """delete("body_template", biometric_photo_id="eq.<id>") — always pass a filter."""
+        if not filters:
+            raise ValueError("delete() needs a filter")
+        r = self.http.delete(f"{self.url}/rest/v1/{table}", params=filters,
+                             headers={"Prefer": "return=minimal"}, timeout=self.timeout)
+        self._check(r)
+
     def rpc(self, function: str, args: dict[str, Any]) -> Any:
         r = self.http.post(f"{self.url}/rest/v1/rpc/{function}", json=args, timeout=self.timeout)
         self._check(r)
@@ -86,6 +94,13 @@ class Supabase:
             timeout=self.timeout,
         )
         self._check(r)
+
+    def download(self, bucket: str, path: str) -> bytes:
+        """A file from a private bucket (e.g. a biometric photo)."""
+        r = self.http.get(f"{self.url}/storage/v1/object/authenticated/{bucket}/{quote(path)}",
+                          timeout=self.timeout)
+        self._check(r)
+        return r.content
 
     def signed_url(self, bucket: str, path: str, expires_in: int) -> str:
         r = self.http.post(
