@@ -295,6 +295,7 @@ The tracker keeps a hidden person's number for 150 frames (about 10 s)
 | Seen on the videos | Cause | Fix |
 |---|---|---|
 | Boxes trail behind people; live video freezes for seconds | `MODEL=yolo11n.pt` runs on the box CPU (1–3 pictures/s for 4 cameras), and the live video sent the NEWEST picture with OLDER boxes | NPU model used automatically when `yolo11n_rknn_model` is in `edge/`; live video sends the picture the AI looked at with its own boxes (`LIVE_SYNC`) |
+| Live video jumps back a moment (flash back) | While the AI was more than `LIVE_SYNC_MAX_AGE` behind, the newest picture was sent; the next AI picture (older) was sent after it | Only pictures NEWER than the last one sent are sent (`live_server.py`); the body model runs in its own thread so the AI falls behind less |
 | People bent over the counter / partly behind a table not detected | `CONFIDENCE=0.40` threw their boxes away before the tracker saw them | `CONFIDENCE=0.15` + ByteTrack second round keeps existing people; new people still need 0.45 |
 | Same person gets a new ID on the next camera | clothes colours change with the light, and the colour check vetoed the match; a 2–3 s gap between cameras fell between handoff and reclaim | gray-world colour balance (`REID_EVEN_LIGHT`), colours never veto when face/body agree, `OVERLAP_SECONDS=3`, `RECLAIM_AFTER_SECONDS=1` |
 | A trolley / bag pushed by someone becomes a "person" | it moves, so the move check passed | `PERSON_CONF_PEAK`, `MAX_BODY_WIDTH` |
@@ -484,7 +485,9 @@ recognised by their BODY instead, from any angle (`edge/biometrics.py`,
    part from ALL angles of every staff. Parts by posture (box shape):
    standing / walking: all 4; sitting, crouching, carrying luggage or things:
    head + upper body; lying down (desk-napping, sleeping): kept by tracking
-   only. After `BODY_VOTES` sure matches the visit becomes `visit_type = Staff`
+   only. The camera threads only cut the parts out; the body model runs in ONE
+   background thread (body-worker), so tracking and the live video never wait
+   for it, and several people are recognised at the same time. After `BODY_VOTES` sure matches the visit becomes `visit_type = Staff`
    (with `staff_id`), its **track_id becomes the staff_no** (every visit of
    that staff counts as one person), and a `recognition_event` row is written
    (`body_template_id`, `body_view_angle`, `matched_parts`, `match_score`).

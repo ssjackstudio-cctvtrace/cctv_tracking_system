@@ -194,6 +194,7 @@ class LiveServer(threading.Thread):
 
     async def _stream(self, writer, camera_id, width, fps, queue, closed, token: str) -> None:
         last_no, last_status = -1, None
+        last_grabber = None  # picture numbers start again at 0 when a camera reconnects (new grabber)
         loop = asyncio.get_running_loop()
         next_token_check = time.monotonic() + TOKEN_OK_SECONDS
         while not closed.is_set():
@@ -209,6 +210,8 @@ class LiveServer(threading.Thread):
                 await self._send_text(writer, queue.get_nowait())
 
             worker = self.workers().get(camera_id)
+            if worker is not None and worker.grabber is not last_grabber:
+                last_grabber, last_no = worker.grabber, -1
             frame_no, frame = worker.grabber.latest() if worker else (0, None)
             live = worker is not None and frame is not None and worker.active_status() == "Active"
             boxes = worker.live_boxes if worker else []
@@ -226,7 +229,10 @@ class LiveServer(threading.Thread):
                 if last_status != msg:
                     await self._send_text(writer, {"type": "status", "live": False, "msg": msg})
                     last_status = msg
-            elif frame_no != last_no:
+            elif frame_no > last_no:
+                # Only NEWER pictures: the AI's picture (with boxes) can be older than the newest
+                # picture already sent while the AI was behind; sending it would make the video
+                # jump back in time (flash back). It is skipped; the next AI picture is newer.
                 if last_status is not None:
                     await self._send_text(writer, {"type": "status", "live": True, "msg": ""})
                     last_status = None

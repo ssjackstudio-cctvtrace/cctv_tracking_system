@@ -28,7 +28,7 @@ from .demographics import Demographics, Estimate
 from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
 from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, LEARN_SECONDS as BODY_LEARN_SECONDS, \
-    PER_FRAME as BODY_PER_FRAME, PartEncoder
+    PER_FRAME as BODY_PER_FRAME, live_crops
 from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry, look_distance
 
 log = logging.getLogger("camera")
@@ -496,7 +496,6 @@ class CameraWorker(threading.Thread):
         self.offer_photo = offer_photo  # offer_photo(visit_id, jpeg): photo of a track_id (Suspicious same person)
         # Staff / members recognised by body parts from any side (biometrics.py); None = off
         self.body_matcher = body_matcher
-        self._parts: PartEncoder | None = None  # made in run() (its model belongs to this thread)
         self._body_at: dict[int, float] = {}  # tracker id → last time its body parts were compared
         self._estimates: dict[int, Estimate] = {}  # tracker id → gender / age seen BEFORE it is linked to a visitor
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
@@ -670,8 +669,6 @@ class CameraWorker(threading.Thread):
         model = YOLO(self.model_path)
         demo = Demographics()  # gender / age models (off if the model files are missing)
         self._recog = Recognizer()  # face / whole-body recognition models (attire only if missing)
-        if self.body_matcher is not None:
-            self._parts = PartEncoder(self._recog.body_net)
         tracker = TRACKER if os.path.isfile(TRACKER) else "bytetrack.yaml"
         self.grabber.start()
         log.info("started (model %s, tracker %s)", self.model_path, os.path.basename(tracker))
@@ -981,9 +978,10 @@ class CameraWorker(threading.Thread):
         track_id who are not recognised yet, every BODY_EVERY_SECONDS; people already
         recognised keep being sampled every BODY_LEARN_SECONDS while followed (turning,
         sitting, crouching, carrying things), so every camera learns how they look from
-        all sides. A few people per frame."""
+        all sides. Here the parts are only cut out (cheap); the body model runs in the
+        body-worker thread (biometrics.BodyMatcher), so this camera never waits for it."""
         m = self.body_matcher
-        if m is None or self._parts is None or not m.ready:
+        if m is None or not m.ready:
             return
         h = frame.shape[0]
         done = 0
@@ -997,14 +995,9 @@ class CameraWorker(threading.Thread):
             if now - self._body_at.get(p.tid, 0.0) < (BODY_LEARN_SECONDS if known else BODY_EVERY_SECONDS):
                 continue
             self._body_at[p.tid] = now
-            feats = self._parts.live_features(frame, p.box, p.full and not p.est_feet, cut_head(p.box[1], h))
-            done += 1
-            if not feats:
-                continue
-            if known:
-                m.learn(v, feats, self._parts.model_name)
-            else:
-                m.observe(v, self.camera["camera_id"], feats, self._parts.model_name)
+            crops = live_crops(frame, p.box, p.full and not p.est_feet, cut_head(p.box[1], h))
+            if m.submit(v, self.camera["camera_id"], crops, learn=known):
+                done += 1
 
     def _check_look(self, tid: int, look: Look | None, now: float) -> None:
         """Add a new look of this tracker number. If it is linked to a visitor

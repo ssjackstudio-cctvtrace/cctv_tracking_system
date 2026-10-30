@@ -1,19 +1,19 @@
 // Biometric photo check (Add Staff / Staff Details → PDPA consent → photos).
-// Three models, all run in the browser (the photo is not sent away to be checked;
+// Two models, run in the browser (the photo is not sent away to be checked;
 // the libraries and models are loaded from their CDN the first time):
 //   1. Person detector (EfficientDet-Lite0, COCO "person"): finds the person, also
-//      in close-ups (only the head, from the side or the back). One person only:
-//      another real person in the photo = refused.
-//   2. Person segmentation (DeepLab v3, "person"): only the person is kept, the
-//      background is blacked out, and the photo is cropped to the person. So the
-//      edge box learns the PERSON, not the shop behind them.
-//   3. Body landmarks (Pose Landmarker, 33 points): the direction the person faces,
+//      in close-ups (only the head, from the side or the back).
+//   2. Body landmarks (Pose Landmarker, 33 points): the direction the person faces,
 //      body_view_angle in degrees, turning from the front to their left side:
 //         0° (= 360°) Front    90° Left side    180° Back    270° Right side
-//      and which PARTS are in the photo: Head, Upper body, Lower body, Feet.
+//      and where each body PART is: Head, Upper body, Lower body, Feet (a box each).
 //      ONE part is enough (e.g. a close-up of the head).
-// When the landmarks cannot tell the angle (e.g. the back of the head, very close),
-// the photo is NOT refused: the admin picks the angle and the parts (status 'needs').
+// The photo is NOT cropped: it is uploaded whole, with the box of each part
+// (part_boxes); the edge box learns each part from inside its box. The admin can
+// move / resize the boxes, add or remove parts and set the angle (Photoeditor.tsx),
+// before the upload and afterwards (the edge box then learns the photo again).
+// Nothing found automatically (no person, two people, angle not clear, checker not
+// loaded): the photo is still kept, and the admin draws the boxes (status 'needs').
 // supabase/body_view_angle_staff_track.sql
 
 import type { BodyPart } from './types'
@@ -26,16 +26,14 @@ const POSE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task'
 const DETECTOR_MODEL =
   'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite'
-const SEGMENTER_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite'
 
 // Tuning
 const PERSON_SCORE = 0.35 // the detector must be this sure the main person is a person
 const OTHER_PERSON_SCORE = 0.5 // another person this sure ...
 const OTHER_PERSON_AREA = 0.25 // ... and at least this big (share of the main person's box) = 2 people
 const VISIBLE = 0.5 // a body point counts as seen at this visibility (0-1)
-const MIN_PERSON_HEIGHT = 0.2 // the person must fill at least 20% of the photo height
-const CROP_PAD = 0.06 // room kept around the person when cropping
-const MAX_SIZE = 1280 // longest side used for the check and for the uploaded JPEG
+const MIN_PERSON_HEIGHT = 0.2 // smaller than this share of the photo height: the admin checks the boxes
+const MAX_SIZE = 1600 // longest side used for the check and for the uploaded JPEG (whole photo, not cropped)
 const MAX_FILE_MB = 15
 
 export const BODY_PARTS: BodyPart[] = ['Head', 'Upper body', 'Lower body', 'Feet']
@@ -72,12 +70,13 @@ export function bodyLabel(angle: number | null, parts: BodyPart[]): string {
 export type BodyCheck =
   | {
       ok: true
-      needs: boolean // the admin must pick the angle / parts (landmarks not clear)
+      needs: boolean // the admin must draw / check the boxes or pick the angle
+      note?: string // why (shown on the photo)
       angle: number | null // detected body_view_angle (null: not known)
-      parts: BodyPart[] // detected (or guessed when needs) parts
-      partBoxes: PartBoxes // where each part is in the cropped photo
-      personBox: [number, number, number, number] // person in the cropped photo (0-1)
-      jpeg: Blob // cropped photo, person only (background blacked out)
+      parts: BodyPart[] // detected parts
+      partBoxes: PartBoxes // where each part is in the photo (0-1)
+      personBox: [number, number, number, number] // the person in the photo (0-1); whole photo when not found
+      jpeg: Blob // the whole photo (not cropped)
       preview: string // object URL of jpeg
     }
   | { ok: false; reason: string }
@@ -85,11 +84,9 @@ export type BodyCheck =
 // ---------------------------------------------------------------- models
 type Landmark = { x: number; y: number; z: number; visibility?: number }
 type Detection = { boundingBox?: { originX: number; originY: number; width: number; height: number }; categories: { score: number; categoryName: string }[] }
-type Mask = { width: number; height: number; getAsUint8Array(): Uint8Array }
 type Models = {
   pose: { detect(img: HTMLCanvasElement): { landmarks: Landmark[][]; worldLandmarks?: Landmark[][] } }
   detector: { detect(img: HTMLCanvasElement): { detections: Detection[] } }
-  segmenter: { segment(img: HTMLCanvasElement): { categoryMask?: Mask; close?: () => void }; getLabels(): string[] } | null
 }
 
 let models: Promise<Models> | null = null
@@ -104,7 +101,7 @@ function loadModels(): Promise<Models> {
         return await make('CPU')
       }
     }
-    const [pose, detector, segmenter] = await Promise.all([
+    const [pose, detector] = await Promise.all([
       withFallback((delegate) =>
         mp.PoseLandmarker.createFromOptions(vision, {
           baseOptions: { modelAssetPath: POSE_MODEL, delegate },
@@ -123,15 +120,8 @@ function loadModels(): Promise<Models> {
           categoryAllowlist: ['person'],
         }),
       ),
-      // Optional: without it the background is cut away by the person's box only
-      mp.ImageSegmenter.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: SEGMENTER_MODEL, delegate: 'CPU' },
-        runningMode: 'IMAGE',
-        outputCategoryMask: true,
-        outputConfidenceMasks: false,
-      }).catch(() => null),
     ])
-    return { pose, detector, segmenter } as Models
+    return { pose, detector } as Models
   })().catch((e) => {
     models = null // try again next time
     throw e
@@ -159,29 +149,6 @@ const area = (b: Box) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1])
 const iou = (a: Box, b: Box) => {
   const i = area([Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])])
   return i / Math.max(1, area(a) + area(b) - i)
-}
-
-// Person pixels (1) of the segmentation, at canvas size; null when not available
-function personMask(m: Models, canvas: HTMLCanvasElement): Uint8Array | null {
-  if (!m.segmenter) return null
-  try {
-    const person = m.segmenter.getLabels().findIndex((l) => l.toLowerCase() === 'person')
-    const res = m.segmenter.segment(canvas)
-    const mask = res.categoryMask
-    if (!mask || person < 0) return null
-    const src = mask.getAsUint8Array()
-    const out = new Uint8Array(canvas.width * canvas.height)
-    const sx = mask.width / canvas.width
-    const sy = mask.height / canvas.height
-    for (let y = 0; y < canvas.height; y++) {
-      const row = Math.min(mask.height - 1, Math.floor(y * sy)) * mask.width
-      for (let x = 0; x < canvas.width; x++) out[y * canvas.width + x] = src[row + Math.min(mask.width - 1, Math.floor(x * sx))] === person ? 1 : 0
-    }
-    res.close?.()
-    return out
-  } catch {
-    return null
-  }
 }
 
 // ---------------------------------------------------------------- angle and parts (exported for tests)
@@ -301,19 +268,31 @@ export async function checkStaffPhoto(file: File): Promise<BodyCheck> {
   } catch {
     return { ok: false, reason: 'This photo cannot be opened. Use a JPG or PNG photo.' }
   }
-  let m: Models
-  try {
-    m = await loadModels()
-  } catch {
-    bitmap.close()
-    return { ok: false, reason: 'The person checker could not be loaded. Check the internet connection and try again.' }
-  }
   try {
     if (Math.min(bitmap.width, bitmap.height) < 200)
       return { ok: false, reason: 'The photo is too small (at least 200 × 200 pixels).' }
     const canvas = drawScaled(bitmap, MAX_SIZE)
     const w = canvas.width
     const h = canvas.height
+    const jpeg = await toJpeg(canvas) // the whole photo: not cropped
+    const base = { ok: true as const, jpeg, preview: URL.createObjectURL(jpeg) }
+    // nothing usable found: keep the photo, the admin draws the boxes and picks the angle
+    const manual = (note: string): BodyCheck => ({
+      ...base,
+      needs: true,
+      note,
+      angle: null,
+      parts: [],
+      partBoxes: {},
+      personBox: [0, 0, 1, 1],
+    })
+
+    let m: Models
+    try {
+      m = await loadModels()
+    } catch {
+      return manual('The person checker could not be loaded: draw the body part boxes and choose the angle.')
+    }
 
     // 1. People in the photo
     const people = (m.detector.detect(canvas).detections ?? [])
@@ -328,12 +307,13 @@ export async function checkStaffPhoto(file: File): Promise<BodyCheck> {
     const world = pose.worldLandmarks?.[0]
 
     let person: Box | null = people[0]?.box ?? null
-    if (people.length > 1) {
-      const other = people
+    if (
+      person &&
+      people
         .slice(1)
         .some((p) => p.score >= OTHER_PERSON_SCORE && area(p.box) >= OTHER_PERSON_AREA * area(person!) && iou(p.box, person!) < 0.3)
-      if (other) return { ok: false, reason: 'More than one person in the photo. Upload a photo of this staff only.' }
-    }
+    )
+      return manual('More than one person found: draw the boxes on this staff only, and choose the angle.')
     if (!person && lm) {
       // the detector missed them but the landmarks found a body: their box
       const pts = lm.filter((p) => (p.visibility ?? 0) >= 0.3 && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1)
@@ -344,63 +324,10 @@ export async function checkStaffPhoto(file: File): Promise<BodyCheck> {
         person = [Math.max(0, Math.min(...xs) - pad), Math.max(0, Math.min(...ys) - 2 * pad), Math.min(w, Math.max(...xs) + pad), Math.min(h, Math.max(...ys) + pad)]
       }
     }
-    if (!person) return { ok: false, reason: 'No person found in the photo.' }
+    if (!person) return manual('No person found automatically: draw the body part boxes and choose the angle.')
     person = [Math.max(0, person[0]), Math.max(0, person[1]), Math.min(w, person[2]), Math.min(h, person[3])]
-    if ((person[3] - person[1]) / h < MIN_PERSON_HEIGHT)
-      return { ok: false, reason: 'The person is too small in the photo. Take the photo closer or crop it.' }
 
-    // 2. Only the person: segmentation inside their (padded) box; the box alone if none
-    const padX = CROP_PAD * (person[2] - person[0])
-    const padY = CROP_PAD * (person[3] - person[1])
-    const crop: Box = [
-      Math.max(0, Math.floor(person[0] - padX)),
-      Math.max(0, Math.floor(person[1] - padY)),
-      Math.min(w, Math.ceil(person[2] + padX)),
-      Math.min(h, Math.ceil(person[3] + padY)),
-    ]
-    let mask = personMask(m, canvas)
-    if (mask) {
-      let inBox = 0
-      for (let y = crop[1]; y < crop[3]; y++) for (let x = crop[0]; x < crop[2]; x++) inBox += mask[y * w + x]
-      if (inBox < 0.1 * area(person)) mask = null // segmentation missed the person: use the box
-    }
-    const cw = crop[2] - crop[0]
-    const ch = crop[3] - crop[1]
-    const out = document.createElement('canvas')
-    out.width = cw
-    out.height = ch
-    const ctx = out.getContext('2d')!
-    ctx.drawImage(canvas, crop[0], crop[1], cw, ch, 0, 0, cw, ch)
-    // keep: person pixels (a little wider, so hair / edges are not cut), else the person's box
-    const keep = document.createElement('canvas')
-    keep.width = cw
-    keep.height = ch
-    const kctx = keep.getContext('2d')!
-    if (mask) {
-      const img = kctx.createImageData(cw, ch)
-      for (let y = 0; y < ch; y++)
-        for (let x = 0; x < cw; x++) if (mask[(y + crop[1]) * w + x + crop[0]]) img.data[(y * cw + x) * 4 + 3] = 255
-      kctx.putImageData(img, 0, 0)
-      const soft = document.createElement('canvas')
-      soft.width = cw
-      soft.height = ch
-      const sctx = soft.getContext('2d')!
-      sctx.filter = `blur(${Math.max(2, Math.round(Math.min(cw, ch) / 120))}px)`
-      sctx.drawImage(keep, 0, 0)
-      sctx.drawImage(keep, 0, 0) // twice: the soft edge reaches a bit further out
-      ctx.globalCompositeOperation = 'destination-in'
-      ctx.drawImage(soft, 0, 0)
-    } else {
-      kctx.fillRect(person[0] - crop[0], person[1] - crop[1], person[2] - person[0], person[3] - person[1])
-      ctx.globalCompositeOperation = 'destination-in'
-      ctx.drawImage(keep, 0, 0)
-    }
-    ctx.globalCompositeOperation = 'destination-over'
-    ctx.fillStyle = '#000'
-    ctx.fillRect(0, 0, cw, ch) // background → black (the edge box ignores black pixels' colour)
-    ctx.globalCompositeOperation = 'source-over'
-
-    // 3. Angle and parts (landmarks of the person found above only)
+    // 2. Angle and parts (landmarks of the person found above only)
     const centre = lm
       ? (() => {
           const pts = [L_SHOULDER, R_SHOULDER, NOSE, L_EAR, R_EAR].filter((i) => (lm[i].visibility ?? 0) >= 0.3)
@@ -418,22 +345,17 @@ export async function checkStaffPhoto(file: File): Promise<BodyCheck> {
     }
     const rel = (b: Box): [number, number, number, number] => {
       const r = (v: number, max: number) => Math.round(Math.min(1, Math.max(0, v / max)) * 1000) / 1000
-      return [r(b[0] - crop[0], cw), r(b[1] - crop[1], ch), r(b[2] - crop[0], cw), r(b[3] - crop[1], ch)]
+      return [r(b[0], w), r(b[1], h), r(b[2], w), r(b[3], h)]
     }
     const partBoxes: PartBoxes = {}
     for (const p of parts) if (boxes[p]) partBoxes[p] = rel(boxes[p]!)
-
-    const jpeg = await toJpeg(out)
-    return {
-      ok: true,
-      needs,
-      angle,
-      parts,
-      partBoxes,
-      personBox: rel(person),
-      jpeg,
-      preview: URL.createObjectURL(jpeg),
-    }
+    const small = (person[3] - person[1]) / h < MIN_PERSON_HEIGHT
+    const note = needs
+      ? 'Body points not clear: check the boxes and choose the angle.'
+      : small
+        ? 'The person is small in this photo: check the boxes.'
+        : undefined
+    return { ...base, needs: needs || small, note, angle, parts, partBoxes, personBox: rel(person) }
   } finally {
     bitmap.close()
   }

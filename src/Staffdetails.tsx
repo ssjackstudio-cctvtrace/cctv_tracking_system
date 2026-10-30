@@ -182,7 +182,7 @@ export default function StaffDetailsPage({
     if (form.consent_pdpa === 'Yes' && photos.some((p) => p.status === 'checking'))
       return fail('Wait until every photo has been checked.')
     if (form.consent_pdpa === 'Yes' && photos.some((p) => p.status === 'ok' && !photoReady(p)))
-      return fail('Choose the angle (and the body parts) of every photo marked "choose the angle", or remove it.')
+      return fail('Adjust every photo marked "Draw the boxes and choose the angle" (or remove it) before saving.')
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Enter a valid email, or leave it empty.')
     if (form.dob && (form.dob < '1900-01-01' || form.dob > new Date().toISOString().slice(0, 10)))
       return fail('Enter a valid date of birth.')

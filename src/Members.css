@@ -162,3 +162,46 @@
 .sp-parts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.1rem 0.3rem; font-size: 0.72rem; color: var(--ds-text); }
 .sp-parts label { display: flex; align-items: center; gap: 0.2rem; }
 .sp-item img { background: #000; }
+.sp-note { color: var(--ds-text); font-size: 0.82rem; }
+/* the box overlay is in % of the photo: the frame is exactly the photo's size */
+.sp-thumb { position: relative; display: inline-block; align-self: center; max-width: 100%; line-height: 0; }
+.sp-thumb img { display: block; width: auto; max-width: 100%; height: auto; max-height: 220px; aspect-ratio: auto; object-fit: fill; border-radius: 4px; }
+.sp-thumb .sp-noimg { width: 120px; height: 160px; }
+.sp-adjust { align-self: flex-start; padding: 0.2rem 0.6rem; border: 1px solid #c9d3d0; border-radius: 4px; background: #fff; color: var(--ds-text); font: inherit; font-size: 0.75rem; cursor: pointer; }
+.sp-adjust--todo { border-color: #e6c35c; background: #fff7e0; font-weight: 600; }
+.sp-adjust:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Photo editor (Photoeditor.tsx): body part boxes + body view angle */
+.pe-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(10, 20, 25, 0.6); }
+.pe-dialog { display: flex; flex-direction: column; width: min(1100px, 100%); max-height: 100%; border-radius: 8px; background: #fff; color: var(--ds-text); overflow: hidden; }
+.pe-head { display: flex; flex-direction: column; gap: 0.15rem; padding: 0.8rem 1rem; border-bottom: 1px solid #dfe5e3; }
+.pe-hint { font-size: 0.8rem; color: var(--ds-muted); }
+.pe-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; min-height: 0; flex: 1; }
+@media (max-width: 760px) { .pe-body { grid-template-columns: minmax(0, 1fr); overflow: auto; } }
+.pe-stage { display: flex; align-items: center; justify-content: center; min-height: 0; padding: 0.8rem; background: #1b2428; overflow: auto; }
+.pe-area { position: relative; display: inline-block; touch-action: none; user-select: none; line-height: 0; }
+.pe-area img { display: block; max-width: 100%; max-height: 72vh; width: auto; height: auto; pointer-events: none; }
+.pe-box { position: absolute; box-sizing: border-box; border: 3px dashed; cursor: move; }
+.pe-box--on { border-style: solid; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7); }
+.pe-box--static { border-width: 2px; cursor: default; pointer-events: none; }
+.pe-label { position: absolute; left: -3px; top: -1.35rem; padding: 0.05rem 0.35rem; border-radius: 3px; color: #fff; font-size: 0.72rem; line-height: 1.2rem; white-space: nowrap; text-shadow: 0 0 2px rgba(0, 0, 0, 0.6); }
+.pe-handle { position: absolute; width: 14px; height: 14px; border: 2px solid #fff; border-radius: 50%; box-sizing: border-box; }
+.pe-handle--nw { left: -8px; top: -8px; cursor: nwse-resize; }
+.pe-handle--ne { right: -8px; top: -8px; cursor: nesw-resize; }
+.pe-handle--sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.pe-handle--se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.pe-side { display: flex; flex-direction: column; gap: 0.8rem; padding: 0.9rem; overflow-y: auto; }
+.pe-group { margin: 0; padding: 0.6rem 0.7rem; border: 1px solid #dfe5e3; border-radius: 6px; }
+.pe-group legend { padding: 0 0.3rem; font-size: 0.82rem; font-weight: 600; }
+.pe-part { display: flex; align-items: center; gap: 0.45rem; padding: 0.15rem 0; font-size: 0.88rem; }
+.pe-swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; }
+.pe-angle { display: flex; align-items: center; gap: 0.4rem; }
+.pe-angle input[type='range'] { flex: 1; min-width: 0; }
+.pe-angle input[type='number'] { width: 4rem; padding: 0.25rem 0.35rem; border: 1px solid #c9d3d0; border-radius: 4px; font: inherit; }
+.pe-side-note { margin: 0.35rem 0 0.45rem; font-size: 0.8rem; color: var(--ds-muted); }
+.pe-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem; }
+.pe-preset { padding: 0.25rem 0.3rem; border: 1px solid #c9d3d0; border-radius: 4px; background: #fff; color: var(--ds-text); font: inherit; font-size: 0.74rem; cursor: pointer; }
+.pe-preset--on { border-color: var(--ds-ink, #10202b); background: var(--ds-ink, #10202b); color: #fff; }
+.pe-error { margin: 0; }
+.pe-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: auto; }
+.pe-cancel { padding: 0.5rem 0.9rem; border: 1px solid #c9d3d0; border-radius: 6px; background: #fff; color: var(--ds-text); font: inherit; font-size: 0.88rem; cursor: pointer; }

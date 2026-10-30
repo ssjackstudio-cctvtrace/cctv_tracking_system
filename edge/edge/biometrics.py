@@ -17,10 +17,13 @@ and which body PARTS are in the photo: Head, Upper body, Lower body, Feet.
    person is the photo's (body_template → biometric_photo → staff / member).
 2. BodyMatcher (thread): keeps the body_template numbers of every Active staff
    / member with PDPA consent in memory (reloaded every BODY_RELOAD_SECONDS).
-3. Camera threads: for a person with a track_id who is not recognised yet, a
-   few times a second (BODY_EVERY_SECONDS), each visible part of their box is
-   turned into the same 914 numbers and compared with that part from ALL angles
-   of every person. Which parts are used depends on the POSTURE (box shape):
+3. Camera threads: for a person with a track_id who is not recognised yet, every
+   BODY_EVERY_SECONDS, the visible parts of their box are only CUT OUT (cheap) and
+   handed to ONE background thread (body-worker, BODY_QUEUE jobs at most), which
+   turns them into the same 914 numbers and compares each part with that part from
+   ALL angles of every person. So the camera threads (tracking, In / Out, live
+   video) never wait for the body model, and several people (BODY_PER_FRAME per
+   picture and camera) are recognised at the same time. Which parts are used depends on the POSTURE (box shape):
      standing / walking          head, upper body, lower body, feet
      sitting, crouching, carrying luggage / things (wider box)
                                  head, upper body (the rest is hidden or mixed
@@ -53,6 +56,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from datetime import date, datetime, timezone
@@ -99,7 +103,8 @@ VOTES = int(os.getenv("BODY_VOTES", "3"))  # votes for the same person before th
 VOTE_SHARE = float(os.getenv("BODY_VOTE_SHARE", "0.6"))  # ... and at least this share of all votes
 EVERY_SECONDS = float(os.getenv("BODY_EVERY_SECONDS", "1.0"))  # per tracked person, not recognised yet
 LEARN_SECONDS = float(os.getenv("BODY_LEARN_SECONDS", "2.0"))  # per tracked person, recognised: live samples
-PER_FRAME = int(os.getenv("BODY_PER_FRAME", "1"))  # people checked per frame and camera
+PER_FRAME = int(os.getenv("BODY_PER_FRAME", "3"))  # people cut out per picture and camera (cheap)
+QUEUE_MAX = int(os.getenv("BODY_QUEUE", "24"))  # jobs waiting for the body-worker thread at most
 LIVE_SAMPLES = int(os.getenv("BODY_LIVE_SAMPLES", "40"))  # live samples kept per person and part (0 = off)
 LEARN_SAME = float(os.getenv("BODY_LEARN_SAME", "0.62"))  # a live sample must still look this alike to be kept
 RELOAD_SECONDS = float(os.getenv("BODY_RELOAD_SECONDS", "120"))
@@ -174,33 +179,14 @@ class PartEncoder:
             return None
         return np.sqrt(hist / total).astype(np.float32)  # Hellinger: cosine ~ Bhattacharyya similarity
 
-    # ---- live camera: parts of a person box, by posture
+    # ---- live camera: numbers of the parts of a person box
     def live_features(self, frame: np.ndarray, box: tuple[float, float, float, float], full: bool,
                       head_cut: bool) -> dict[str, np.ndarray]:
-        """Numbers of each part visible in a person box. Standing with the whole
-        body seen: all 4 parts; sitting / crouching / carrying things, or legs
-        hidden (full=False): head and upper body; lying down: nothing."""
-        h, w = frame.shape[:2]
-        x1, y1, x2, y2 = (int(v) for v in box)
-        x1, x2, y1, y2 = max(0, x1), min(w, x2), max(0, y1), min(h, y2)
-        bh, bw = y2 - y1, x2 - x1
-        if bh < 48 or bw < 20:
-            return {}
-        pose = posture(box)
-        if pose == "lying":
-            return {}
-        if pose == "upright" and full:
-            bands = UPRIGHT_BANDS
-        elif pose == "upright":
-            bands = {k: UPRIGHT_BANDS[k] for k in ("Head", "Upper body")}
-        else:
-            bands = BENT_BANDS
+        return self.encode_crops(live_crops(frame, box, full, head_cut))
+
+    def encode_crops(self, crops: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         out = {}
-        for part, (top, bottom) in bands.items():
-            if part == "Head" and head_cut:
-                continue
-            t = int(bw * LIVE_TRIM[part])
-            crop = frame[y1 + int(bh * top): y1 + int(bh * bottom), x1 + t: x2 - t]
+        for part, crop in crops.items():
             vec = self.encode(crop, part)
             if vec is not None:
                 out[part] = vec
@@ -224,6 +210,38 @@ class PartEncoder:
             if vec is not None:
                 out[part] = vec
         return out
+
+
+def live_crops(frame: np.ndarray, box: tuple[float, float, float, float], full: bool,
+               head_cut: bool) -> dict[str, np.ndarray]:
+    """The parts visible in a person box, cut out (copies: the camera thread keeps
+    using its picture). Standing with the whole body seen: all 4 parts; sitting /
+    crouching / carrying things, or legs hidden (full=False): head and upper body;
+    lying down: nothing. Cheap: no model runs here."""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = (int(v) for v in box)
+    x1, x2, y1, y2 = max(0, x1), min(w, x2), max(0, y1), min(h, y2)
+    bh, bw = y2 - y1, x2 - x1
+    if bh < 48 or bw < 20:
+        return {}
+    pose = posture(box)
+    if pose == "lying":
+        return {}
+    if pose == "upright" and full:
+        bands = UPRIGHT_BANDS
+    elif pose == "upright":
+        bands = {k: UPRIGHT_BANDS[k] for k in ("Head", "Upper body")}
+    else:
+        bands = BENT_BANDS
+    out = {}
+    for part, (top, bottom) in bands.items():
+        if part == "Head" and head_cut:
+            continue
+        t = int(bw * LIVE_TRIM[part])
+        crop = frame[y1 + int(bh * top): y1 + int(bh * bottom), x1 + t: x2 - t]
+        if crop.shape[0] >= MIN_PART_PIXELS and crop.shape[1] >= MIN_PART_PIXELS:
+            out[part] = crop.copy()
+    return out
 
 
 def _trim_black(crop: np.ndarray) -> np.ndarray:
@@ -357,6 +375,51 @@ class BodyMatcher(threading.Thread):
         self._live_day = date.today()
         self._visits: dict[str, dict] = {}  # visit_id → {"votes": {key: [n, score sum]}, "best": {...}, "done": key|None}
         self._warned = ""
+        # Body model work, off the camera threads: (visitor, camera_id, part crops, learn?)
+        self.jobs: "queue.Queue[tuple[Any, str, dict[str, np.ndarray], bool]]" = queue.Queue(maxsize=QUEUE_MAX)
+        self._queued: set[str] = set()  # visit_ids with a job waiting (one at a time per visit)
+        self._worker = threading.Thread(target=self._work, name="body-worker", daemon=True)
+
+    def start(self) -> None:
+        super().start()
+        self._worker.start()
+
+    def submit(self, visitor: Any, camera_id: str, crops: dict[str, np.ndarray], learn: bool) -> bool:
+        """Camera thread: hand cut-out parts to the body-worker. Never waits: when this
+        visit already has a job waiting, or the queue is full, the look is skipped
+        (the camera offers a newer one a moment later)."""
+        if not crops:
+            return False
+        with self._lock:
+            if visitor.visit_id in self._queued:
+                return False
+            self._queued.add(visitor.visit_id)
+        try:
+            self.jobs.put_nowait((visitor, camera_id, crops, learn))
+            return True
+        except queue.Full:
+            with self._lock:
+                self._queued.discard(visitor.visit_id)
+            return False
+
+    def _work(self) -> None:
+        encoder = PartEncoder(Recognizer().body_net)  # own model copy for this thread
+        while not self.stop_event.is_set():
+            try:
+                visitor, camera_id, crops, learn = self.jobs.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                feats = encoder.encode_crops(crops)
+                if learn:
+                    self.learn(visitor, feats, encoder.model_name)
+                else:
+                    self.observe(visitor, camera_id, feats, encoder.model_name)
+            except Exception as exc:  # one bad look never stops recognition
+                log.warning("Body recognition of %s failed: %s", getattr(visitor, "track_id", "?"), exc)
+            finally:
+                with self._lock:
+                    self._queued.discard(visitor.visit_id)
 
     @property
     def ready(self) -> bool:

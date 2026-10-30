@@ -22,6 +22,13 @@ from datetime import datetime, timezone
 # Read RTSP over TCP (steadier than UDP over Wi-Fi). Must be set before cv2 opens a stream.
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
+# Read edge/.env BEFORE the edge modules below: they read their settings (os.getenv)
+# when they are imported (e.g. BODY_LOG, BODY_MATCH, RECOGNIZE_PER_FRAME, DECODE_MAX_WIDTH).
+# Read only in load_settings() (later), those lines in .env were never used.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 from edge.biometrics import ENABLED as BODY_RECOGNITION, BodyMatcher, Enroller  # noqa: E402
 from edge.camera_worker import CameraWorker  # noqa: E402
 from edge.config import load_settings, rtsp_url  # noqa: E402
