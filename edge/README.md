@@ -464,24 +464,45 @@ Walk-in, Inside now) in its corner instead of the small floor map.
 ## Staff recognition by body (360°)
 
 The cameras hang high up, so faces are rarely clear. Staff (and members) are
-recognised by their BODY instead, from any side (`edge/biometrics.py`,
-`supabase/biometric_photo.sql`):
+recognised by their BODY instead, from any angle (`edge/biometrics.py`,
+`supabase/biometric_photo.sql` + `supabase/body_view_angle_staff_track.sql`):
 
 1. Website → Staff Details → PDPA consent **Yes** → add up to 15 photos. Each
-   photo is checked in the browser: one person, and a clear **Front / Back /
-   Left side / Right side** view. The website also finds which parts are in
-   it (**Head, Upper body, Lower body, Feet**). Table `biometric_photo`,
-   private bucket `biometric-photos`.
+   photo is checked in the browser: the person is found (also a close-up of
+   the head, from the side or the back), only ONE person, the background is
+   blacked out, and the direction the person faces is worked out as
+   `body_view_angle`: **0° Front, 90° Left side, 180° Back, 270° Right side**
+   (and anything in between). The parts in it (**Head, Upper body, Lower
+   body, Feet**) are found too; one part is enough. When the angle cannot be
+   worked out, the admin picks it. Table `biometric_photo`, private bucket
+   `biometric-photos`.
 2. The box downloads each new photo (`enrol_status` Pending) and makes one
    `body_template` row per part: 914 numbers (body re-identification model
-   + colours + texture), no picture. 4 views x 4 parts = up to 16 kinds per
-   person; the coverage grid on Staff Details shows which ones are learnt.
+   + colours + texture), no picture, with the photo's angle. The person comes
+   from the photo (`body_template → biometric_photo → staff / member`).
 3. Live, each visible part of a person with a track_id is compared with that
-   part from ALL views of every staff, so a staff seen from behind or from
-   the side is still found. After `BODY_VOTES` sure matches the visit becomes
-   `visit_type = Staff` (with `staff_id`) and a `recognition_event` row is
-   written (`body_template_id`, `body_view`,
-   `matched_parts`, `match_score`).
+   part from ALL angles of every staff. Parts by posture (box shape):
+   standing / walking: all 4; sitting, crouching, carrying luggage or things:
+   head + upper body; lying down (desk-napping, sleeping): kept by tracking
+   only. After `BODY_VOTES` sure matches the visit becomes `visit_type = Staff`
+   (with `staff_id`), its **track_id becomes the staff_no** (every visit of
+   that staff counts as one person), and a `recognition_event` row is written
+   (`body_template_id`, `body_view_angle`, `matched_parts`, `match_score`).
+4. While a recognised staff is followed (turning 0° → 90° → 180° → 270°,
+   sitting, crouching, carrying things), the box keeps sampling them every
+   `BODY_LEARN_SECONDS` until they leave every camera's picture, and keeps the
+   samples for the day (`BODY_LIVE_SAMPLES` per part): the other cameras then
+   recognise them from sides and poses the photos never showed.
+5. Suspicious same person pairs where one of the two is a staff and at least
+   70% alike are merged at once by the database: the other visit also gets
+   the staff_no (Camera page → Staff tab; lower scores wait there for an admin).
+
+Keeping the track through posture changes: when a followed person sits down,
+crouches, lies down or picks up luggage, the tracker often gives them a new
+number on the same spot. A new number whose box overlaps where a followed
+person was lost in the last `POSTURE_RELINK_SECONDS` (box overlap
+`POSTURE_OVERLAP`) is that same person: it skips the "has it moved?" check
+(people who sit or sleep do not move) and keeps the track_id.
 
 Only Active staff with PDPA consent (not resigned) are matched; deleting a
 photo deletes its templates. Best results: photos from all 4 sides, in the

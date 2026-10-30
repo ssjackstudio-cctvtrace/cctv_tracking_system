@@ -27,7 +27,8 @@ import numpy as np
 from .demographics import Demographics, Estimate
 from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
-from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, PER_FRAME as BODY_PER_FRAME, PartEncoder
+from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, LEARN_SECONDS as BODY_LEARN_SECONDS, \
+    PER_FRAME as BODY_PER_FRAME, PartEncoder
 from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry, look_distance
 
 log = logging.getLogger("camera")
@@ -149,6 +150,12 @@ LINK_EVERY_SECONDS = 0.25  # how often an unlinked person is compared with the v
 LOST_RELINK_SECONDS = min(10.0, KEEP_SECONDS)  # a linked person lost this recently ...
 RELINK_PICTURE_DISTANCE = 0.15  # ... and a new number this close (share of the picture), with the same look = same person
 RELINK_BLIND_SECONDS = 1.5  # no look yet: only a number that appears right where they were lost, this soon
+# A followed person who sits down, crouches, lies down (desk-napping, sleeping) or picks up luggage gets a
+# very different box, and the tracker often gives them a NEW number on the same spot. A new number whose box
+# overlaps the box where a followed person was lost this recently is that person: no move check (people who
+# sit or sleep do not move, and would be taken for an object), and their track_id is kept.
+POSTURE_RELINK_SECONDS = float(os.getenv("POSTURE_RELINK_SECONDS", "5.0"))
+POSTURE_OVERLAP = float(os.getenv("POSTURE_OVERLAP", "0.4"))  # share of the smaller box covered by the other
 # A new person's visit is only made after this long, so a camera whose view
 # overlaps another camera's has time to see that it is someone already inside
 NEW_VISITOR_HOLD_SECONDS = float(os.getenv("NEW_VISITOR_HOLD_SECONDS", "1.0"))
@@ -786,12 +793,17 @@ class CameraWorker(threading.Thread):
         waits: things pushed or carried by people move too."""
         moving: list[Person] = []
         waiting: list[Person] = []
+        present = {p.tid for p in people}
         for p in people:
             x1, y1, x2, y2 = p.box
             cx, cy, bh = (x1 + x2) / 2, (y1 + y2) / 2, max(y2 - y1, 1.0)
             m = self._motion.get(p.tid)
             if m is None:
                 m = self._motion[p.tid] = _Motion(now, (cx, cy, bh))
+                if self._on_lost_person(p.tid, p.box, now, present) is not None:
+                    # a followed person with a new tracker number (sat down, lay down, crouched):
+                    # a person already, whether they move or not
+                    m.moving, m.peak = True, PERSON_CONF_PEAK
             m.seen, m.box = now, p.box
             m.peak = max(m.peak, p.conf)
             if m.peak < PERSON_CONF_PEAK:
@@ -965,8 +977,11 @@ class CameraWorker(threading.Thread):
                 d.pop(tid, None)
 
     def _recognise_body(self, frame: np.ndarray, people: list[Person], now: float) -> None:
-        """Staff / members by body parts, from any side (biometrics.py): people with a
-        track_id who are not recognised yet, a few per frame, each every BODY_EVERY_SECONDS."""
+        """Staff / members by body parts, from any angle (biometrics.py): people with a
+        track_id who are not recognised yet, every BODY_EVERY_SECONDS; people already
+        recognised keep being sampled every BODY_LEARN_SECONDS while followed (turning,
+        sitting, crouching, carrying things), so every camera learns how they look from
+        all sides. A few people per frame."""
         m = self.body_matcher
         if m is None or self._parts is None or not m.ready:
             return
@@ -976,12 +991,19 @@ class CameraWorker(threading.Thread):
             if done >= BODY_PER_FRAME:
                 break
             v = self._link.get(p.tid)
-            if v is None or m.known(v.visit_id) or now - self._body_at.get(p.tid, 0.0) < BODY_EVERY_SECONDS:
+            if v is None:
+                continue
+            known = m.known(v.visit_id)
+            if now - self._body_at.get(p.tid, 0.0) < (BODY_LEARN_SECONDS if known else BODY_EVERY_SECONDS):
                 continue
             self._body_at[p.tid] = now
             feats = self._parts.live_features(frame, p.box, p.full and not p.est_feet, cut_head(p.box[1], h))
             done += 1
-            if feats:
+            if not feats:
+                continue
+            if known:
+                m.learn(v, feats, self._parts.model_name)
+            else:
                 m.observe(v, self.camera["camera_id"], feats, self._parts.model_name)
 
     def _check_look(self, tid: int, look: Look | None, now: float) -> None:
@@ -1060,9 +1082,36 @@ class CameraWorker(threading.Thread):
                 continue  # nothing to recognise them by yet: too far / too late to be sure
             best, best_d = (old, v), d
         if best is None:
+            # posture change (sat / lay down, crouched, picked something up): the new box covers the old one
+            old = self._on_lost_person(p.tid, p.box, now, present)
+            if old is not None and self._link[old].visit_id not in busy and not self._link[old].left:
+                best = (old, self._link[old])
+        if best is None:
             return None
         del self._link[best[0]]
         return best[1]
+
+    def _on_lost_person(self, tid: int, box: tuple[float, float, float, float], now: float,
+                        present: set[int]) -> int | None:
+        """Tracker number of a followed person lost in the last POSTURE_RELINK_SECONDS
+        whose last box overlaps this box (POSTURE_OVERLAP), best overlap first."""
+        best, best_share = None, POSTURE_OVERLAP
+        for old in self._link:
+            if old == tid or old in present:  # still in the picture: not lost
+                continue
+            if now - self._seen_at.get(old, 0.0) > POSTURE_RELINK_SECONDS:
+                continue
+            mo = self._motion.get(old)
+            if mo is None or mo.box is None:
+                continue
+            ax1, ay1, ax2, ay2 = mo.box
+            bx1, by1, bx2, by2 = box
+            inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+            smaller = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
+            share = inter / smaller if smaller > 0 else 0.0
+            if share >= best_share:
+                best, best_share = old, share
+        return best
 
     def _attach(self, tid: int, v: Visitor, now: float, how: str) -> None:
         self._link[tid] = v

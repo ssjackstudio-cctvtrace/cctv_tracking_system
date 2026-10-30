@@ -1,38 +1,49 @@
-"""Recognise STAFF (and members) by their BODY, from any side: 360°.
+"""Recognise STAFF (and members) by their BODY, from any angle: 360°.
 
 The cameras hang high up and mostly see the top of people's heads, so the face
 is rarely clear enough to recognise. Instead each person is learnt from the
 photos uploaded on the website (Staff Details → PDPA consent → biometric
-photos, table biometric_photo), split into 4 body PARTS, each seen from one
-of 4 VIEWS:
+photos, table biometric_photo): the website keeps only the person (background
+blacked out) and works out the direction they face, body_view_angle in degrees,
+turning from the front to their left side:
 
-             Head   Upper body   Lower body   Feet
-  Front       x         x            x          x
-  Left side   x         x            x          x
-  Right side  x         x            x          x
-  Back        x         x            x          x      = up to 16 kinds per person
+      0° (= 360°) Front    90° Left side    180° Back    270° Right side
+
+and which body PARTS are in the photo: Head, Upper body, Lower body, Feet.
 
 1. Enroller (thread): photos with enrol_status = Pending are downloaded from
-   the private bucket biometric-photos. Each part in the photo (the website
-   found where each part is: part_boxes) becomes one body_template row: 914
-   numbers, no picture. The photo becomes Enrolled (or Failed + enrol_note).
+   the private bucket biometric-photos. Each part in the photo becomes one
+   body_template row (914 numbers, no picture) with the photo's angle. The
+   person is the photo's (body_template → biometric_photo → staff / member).
 2. BodyMatcher (thread): keeps the body_template numbers of every Active staff
    / member with PDPA consent in memory (reloaded every BODY_RELOAD_SECONDS).
 3. Camera threads: for a person with a track_id who is not recognised yet, a
-   few times a second (BODY_EVERY_SECONDS), each visible part of their box
-   is turned into the same 914 numbers and compared with that part from ALL
-   4 views of every person (so a staff seen from behind or from the side is
-   still found). Score = weighted average of the parts. When the same person
-   wins BODY_VOTES times (and clearly ahead of anyone else), the visit
-   becomes a Staff (or Member) visit and a recognition_event row is written:
-   body_template_id = the best matching template,
-   body_view = the side the camera saw, matched_parts = parts that matched.
+   few times a second (BODY_EVERY_SECONDS), each visible part of their box is
+   turned into the same 914 numbers and compared with that part from ALL angles
+   of every person. Which parts are used depends on the POSTURE (box shape):
+     standing / walking          head, upper body, lower body, feet
+     sitting, crouching, carrying luggage / things (wider box)
+                                 head, upper body (the rest is hidden or mixed
+                                 with the chair, the desk, the luggage)
+     lying down (desk-napping, sleeping: box wider than tall)
+                                 not compared (kept by tracking only)
+   When the same person wins BODY_VOTES times (clearly ahead of anyone else),
+   the visit becomes a Staff (or Member) visit, a STAFF's visit gets the staff's
+   staff_no as its track_id (supabase/body_view_angle_staff_track.sql), and a
+   recognition_event row is written: body_template_id = the best matching
+   template, body_view_angle = its angle, matched_parts = parts that matched.
+4. Movement (360° while tracked): once recognised, the person keeps being
+   sampled (BODY_LEARN_SECONDS) while ANY camera follows them, until they leave
+   every camera's picture. These live samples (turning 0° → 90° → 180° → 270°,
+   sitting, crouching, carrying things) are added to that person's numbers for
+   the day (BODY_LIVE_SAMPLES per part), so the other cameras recognise them
+   again from sides and poses the photos never showed. A sample is only kept
+   when it still looks like that person (no drift onto someone else).
 
 The 914 numbers of one part = body re-identification model on the part (768,
 OpenCV Zoo YoutuReID; zeros when the model is missing) + clothes / skin / hair
-colours (hue-saturation histogram, 128) + texture (patterns, 18). Each block is
-scaled to length 1 and weighted, so the cosine of two parts is close to a
-weighted average of the three similarities.
+colours (hue-saturation histogram, 128; black / very dark pixels ignored, so the
+blacked-out background of the photos does not count) + texture (18).
 
 The thresholds below are starting values: check the log ("Body match ...",
 BODY_LOG=on) with your own staff and cameras, and tune them in edge/.env.
@@ -44,7 +55,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 import cv2
@@ -55,14 +66,16 @@ from .supa import Supabase, SupabaseError
 
 log = logging.getLogger("biometrics")
 
-VIEWS = ("Front", "Left side", "Right side", "Back")
 PARTS = ("Head", "Upper body", "Lower body", "Feet")
 
-# Live: share of the person box height that each part takes (whole body in the box)
-LIVE_BANDS = {"Head": (0.00, 0.17), "Upper body": (0.15, 0.53), "Lower body": (0.50, 0.90), "Feet": (0.86, 1.00)}
+# Live: share of the person box height that each part takes
+UPRIGHT_BANDS = {"Head": (0.00, 0.17), "Upper body": (0.15, 0.53), "Lower body": (0.50, 0.90), "Feet": (0.86, 1.00)}
+BENT_BANDS = {"Head": (0.00, 0.24), "Upper body": (0.20, 0.62)}  # sitting / crouching / carrying
 LIVE_TRIM = {"Head": 0.22, "Upper body": 0.08, "Lower body": 0.12, "Feet": 0.05}  # sides trimmed (background)
 TEXTURE_SIZE = {"Head": (24, 24), "Upper body": (32, 40), "Lower body": (32, 48), "Feet": (32, 16)}
 MIN_PART_PIXELS = 12
+UPRIGHT_RATIO = float(os.getenv("BODY_UPRIGHT_RATIO", "1.7"))  # box height / width: standing or walking
+LYING_RATIO = float(os.getenv("BODY_LYING_RATIO", "1.0"))  # below: lying down (not compared)
 
 H_BINS, S_BINS = 16, 8
 REID_DIM, COLOUR_DIM, TEXTURE_DIM = 768, H_BINS * S_BINS, 18
@@ -84,11 +97,24 @@ MARGIN = float(os.getenv("BODY_MARGIN", "0.04"))  # the best person must beat th
 MIN_PARTS = int(os.getenv("BODY_MIN_PARTS", "2"))  # parts that must match for a vote
 VOTES = int(os.getenv("BODY_VOTES", "3"))  # votes for the same person before the visit is recognised
 VOTE_SHARE = float(os.getenv("BODY_VOTE_SHARE", "0.6"))  # ... and at least this share of all votes
-EVERY_SECONDS = float(os.getenv("BODY_EVERY_SECONDS", "1.0"))  # per tracked person
+EVERY_SECONDS = float(os.getenv("BODY_EVERY_SECONDS", "1.0"))  # per tracked person, not recognised yet
+LEARN_SECONDS = float(os.getenv("BODY_LEARN_SECONDS", "2.0"))  # per tracked person, recognised: live samples
 PER_FRAME = int(os.getenv("BODY_PER_FRAME", "1"))  # people checked per frame and camera
+LIVE_SAMPLES = int(os.getenv("BODY_LIVE_SAMPLES", "40"))  # live samples kept per person and part (0 = off)
+LEARN_SAME = float(os.getenv("BODY_LEARN_SAME", "0.62"))  # a live sample must still look this alike to be kept
 RELOAD_SECONDS = float(os.getenv("BODY_RELOAD_SECONDS", "120"))
 ENROL_SECONDS = float(os.getenv("BODY_ENROL_SECONDS", "30"))
 LOG_MATCHES = _flag("BODY_LOG", "off")
+
+
+def posture(box: tuple[float, float, float, float]) -> str:
+    """'upright' (standing, walking), 'bent' (sitting, crouching, carrying luggage
+    or things: a wider box) or 'lying' (desk-napping, sleeping), from the box shape."""
+    x1, y1, x2, y2 = box
+    ratio = (y2 - y1) / max(x2 - x1, 1.0)
+    if ratio >= UPRIGHT_RATIO:
+        return "upright"
+    return "bent" if ratio >= LYING_RATIO else "lying"
 
 
 # ---------------------------------------------------------------- numbers of one part
@@ -141,30 +167,38 @@ class PartEncoder:
     @staticmethod
     def _colour(crop: np.ndarray) -> np.ndarray | None:
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, (0, 0, 30), (180, 255, 245))  # shadows / blown-out light carry no colour
+        mask = cv2.inRange(hsv, (0, 0, 30), (180, 255, 245))  # black background / shadows / glare: no colour
         hist = cv2.calcHist([hsv], [0, 1], mask, [H_BINS, S_BINS], [0, 180, 0, 256]).flatten()
         total = float(hist.sum())
         if total <= 0:
             return None
         return np.sqrt(hist / total).astype(np.float32)  # Hellinger: cosine ~ Bhattacharyya similarity
 
-    # ---- live camera: parts of a person box
+    # ---- live camera: parts of a person box, by posture
     def live_features(self, frame: np.ndarray, box: tuple[float, float, float, float], full: bool,
                       head_cut: bool) -> dict[str, np.ndarray]:
-        """Numbers of each part visible in a person box. full=False (feet hidden,
-        e.g. behind a counter): only the head and upper body."""
+        """Numbers of each part visible in a person box. Standing with the whole
+        body seen: all 4 parts; sitting / crouching / carrying things, or legs
+        hidden (full=False): head and upper body; lying down: nothing."""
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = (int(v) for v in box)
         x1, x2, y1, y2 = max(0, x1), min(w, x2), max(0, y1), min(h, y2)
         bh, bw = y2 - y1, x2 - x1
-        if bh < 60 or bw < 20:
+        if bh < 48 or bw < 20:
             return {}
-        parts = ["Head", "Upper body", "Lower body", "Feet"] if full else ["Head", "Upper body"]
-        if head_cut:
-            parts.remove("Head")
+        pose = posture(box)
+        if pose == "lying":
+            return {}
+        if pose == "upright" and full:
+            bands = UPRIGHT_BANDS
+        elif pose == "upright":
+            bands = {k: UPRIGHT_BANDS[k] for k in ("Head", "Upper body")}
+        else:
+            bands = BENT_BANDS
         out = {}
-        for part in parts:
-            top, bottom = LIVE_BANDS[part]
+        for part, (top, bottom) in bands.items():
+            if part == "Head" and head_cut:
+                continue
             t = int(bw * LIVE_TRIM[part])
             crop = frame[y1 + int(bh * top): y1 + int(bh * bottom), x1 + t: x2 - t]
             vec = self.encode(crop, part)
@@ -183,12 +217,24 @@ class PartEncoder:
             if b and len(b) == 4:
                 x1, y1, x2, y2 = int(b[0] * w), int(b[1] * h), int(b[2] * w), int(b[3] * h)
             else:  # no box: the part's band of the whole photo
-                top, bottom = LIVE_BANDS[part]
+                top, bottom = UPRIGHT_BANDS[part]
                 x1, y1, x2, y2 = 0, int(top * h), w, int(bottom * h)
-            vec = self.encode(img[max(0, y1):min(h, y2), max(0, x1):min(w, x2)], part)
+            crop = _trim_black(img[max(0, y1):min(h, y2), max(0, x1):min(w, x2)])
+            vec = self.encode(crop, part)
             if vec is not None:
                 out[part] = vec
         return out
+
+
+def _trim_black(crop: np.ndarray) -> np.ndarray:
+    """Cut away the blacked-out background around the person (website photos)."""
+    if crop.size == 0:
+        return crop
+    lit = crop.max(axis=2) > 20
+    rows, cols = np.where(lit.any(axis=1))[0], np.where(lit.any(axis=0))[0]
+    if len(rows) < MIN_PART_PIXELS or len(cols) < MIN_PART_PIXELS:
+        return crop
+    return crop[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
 
 
 def _vector_text(v: np.ndarray) -> str:
@@ -231,7 +277,7 @@ class Enroller(threading.Thread):
                 if self.enrol_pending(encoder) and self.on_enrolled:
                     self.on_enrolled()
                 self._warned = ""
-            except Exception as exc:  # internet down, or biometric_photo.sql not run yet
+            except Exception as exc:  # internet down, or the SQL not run yet
                 if str(exc) != self._warned:
                     log.warning("Biometric photos not enrolled yet: %s", exc)
                     self._warned = str(exc)
@@ -239,8 +285,7 @@ class Enroller(threading.Thread):
 
     def enrol_pending(self, encoder: PartEncoder) -> int:
         rows = self.supa.select(
-            "biometric_photo",
-            "biometric_photo_id,staff_id,member_id,storage_path,body_view,body_parts,part_boxes",
+            "biometric_photo", "biometric_photo_id,storage_path,body_view_angle,body_parts,part_boxes",
             enrol_status="eq.Pending", order="created_at.asc", limit="20",
         )
         done = 0
@@ -265,9 +310,7 @@ class Enroller(threading.Thread):
             self.supa.delete("body_template", biometric_photo_id=f"eq.{pid}")
             self.supa.insert("body_template", [{
                 "biometric_photo_id": pid,
-                "staff_id": r.get("staff_id"),
-                "member_id": r.get("member_id"),
-                "body_view": r["body_view"],
+                "body_view_angle": r["body_view_angle"],
                 "body_part": part,
                 "embedding": _vector_text(vec),
                 "model_name": encoder.model_name,
@@ -275,7 +318,8 @@ class Enroller(threading.Thread):
             self.supa.update("biometric_photo", {"enrol_status": "Enrolled", "enrol_note": None,
                                                  "enrolled_at": _now()},
                              biometric_photo_id=f"eq.{pid}")
-            log.info("Biometric photo enrolled: %s %s (%s)", r["body_view"], ", ".join(feats), r["storage_path"])
+            log.info("Biometric photo enrolled: %s° %s (%s)", r["body_view_angle"], ", ".join(feats),
+                     r["storage_path"])
             done += 1
         return done
 
@@ -285,18 +329,21 @@ class Enroller(threading.Thread):
                          biometric_photo_id=f"eq.{pid}")
 
 
-# ---------------------------------------------------------------- 2. + 3. matching
+# ---------------------------------------------------------------- 2. - 4. matching
 class _Person:
-    __slots__ = ("kind", "person_id", "label", "parts")
+    __slots__ = ("kind", "person_id", "number", "label", "parts", "live")
 
-    def __init__(self, kind: str, person_id: str, label: str) -> None:
-        self.kind, self.person_id, self.label = kind, person_id, label  # kind: "Staff" or "Member"
-        # part → (template ids, views, model names, matrix of unit vectors)
-        self.parts: dict[str, tuple[list[str], list[str], list[str], np.ndarray]] = {}
+    def __init__(self, kind: str, person_id: str, number: str, label: str) -> None:
+        self.kind, self.person_id, self.number, self.label = kind, person_id, number, label  # kind: Staff / Member
+        # photo templates, per part → (template ids, angles, model names, matrix of unit vectors)
+        self.parts: dict[str, tuple[list[str], list[int], list[str], np.ndarray]] = {}
+        # live samples while tracked (movement, other angles / poses), per part → [(model name, vector)]
+        self.live: dict[str, list[tuple[str, np.ndarray]]] = {}
 
 
 class BodyMatcher(threading.Thread):
-    """Body templates of the people who may be recognised, and the votes per visit."""
+    """Body templates of the people who may be recognised, the votes per visit,
+    and the live samples of recognised people."""
 
     def __init__(self, supa: Supabase, insert: Callable[..., None], update: Callable[..., None]) -> None:
         super().__init__(name="body-matcher", daemon=True)
@@ -306,7 +353,9 @@ class BodyMatcher(threading.Thread):
         self._lock = threading.Lock()
         self._people: list[_Person] = []
         self._vectors: dict[str, np.ndarray] = {}  # body_template_id → numbers (kept between reloads)
-        self._visits: dict[str, dict] = {}  # visit_id → {"votes": {key: [n, score sum]}, "best": {...}, "done": bool}
+        self._live: dict[tuple[str, str], dict[str, list[tuple[str, np.ndarray]]]] = {}  # (kind, id) → live samples
+        self._live_day = date.today()
+        self._visits: dict[str, dict] = {}  # visit_id → {"votes": {key: [n, score sum]}, "best": {...}, "done": key|None}
         self._warned = ""
 
     @property
@@ -342,8 +391,14 @@ class BodyMatcher(threading.Thread):
             if not s.get("resigned_at")}
         members = {m["member_id"]: m for m in self._select_all(
             "member", "member_id,member_no,full_name", status="eq.Active", consent_pdpa="is.true")}
-        rows = self._select_all("body_template", "body_template_id,staff_id,member_id,body_view,body_part,model_name",
-                                order="body_template_id.asc")
+        # the person of a template comes from its photo
+        rows = self._select_all(
+            "body_template",
+            "body_template_id,body_view_angle,body_part,model_name,biometric_photo!inner(staff_id,member_id)",
+            order="body_template_id.asc")
+        for r in rows:
+            photo = r.pop("biometric_photo", None) or {}
+            r["staff_id"], r["member_id"] = photo.get("staff_id"), photo.get("member_id")
         rows = [r for r in rows if (r.get("staff_id") in staff) or (r.get("member_id") in members)]
         wanted = {r["body_template_id"] for r in rows}
         missing = [i for i in wanted if i not in self._vectors]
@@ -365,57 +420,64 @@ class BodyMatcher(threading.Thread):
             if r.get("staff_id"):
                 s = staff[r["staff_id"]]
                 key = ("Staff", r["staff_id"])
-                people.setdefault(key, _Person("Staff", r["staff_id"], f"{s['staff_no']} {s['full_name']}"))
+                people.setdefault(key, _Person("Staff", r["staff_id"], s["staff_no"], f"{s['staff_no']} {s['full_name']}"))
             else:
                 m = members[r["member_id"]]
                 key = ("Member", r["member_id"])
-                people.setdefault(key, _Person("Member", r["member_id"], f"{m['member_no']} {m['full_name']}"))
+                people.setdefault(key, _Person("Member", r["member_id"], m["member_no"], f"{m['member_no']} {m['full_name']}"))
             grouped.setdefault((key, r["body_part"]), []).append(r)
         for (key, part), rs in grouped.items():
             people[key].parts[part] = (
-                [r["body_template_id"] for r in rs], [r["body_view"] for r in rs], [r["model_name"] for r in rs],
-                np.stack([self._vectors[r["body_template_id"]] for r in rs]),
+                [r["body_template_id"] for r in rs], [int(r["body_view_angle"]) for r in rs],
+                [r["model_name"] for r in rs], np.stack([self._vectors[r["body_template_id"]] for r in rs]),
             )
         with self._lock:
+            if date.today() != self._live_day:  # live samples are for one day (clothes change)
+                self._live, self._live_day = {}, date.today()
+            for key, p in people.items():
+                p.live = self._live.setdefault(key, {})
             before = len(self._people)
             self._people = list(people.values())
         if len(self._people) != before:
-            kinds = sum(len(p.parts) for p in self._people)
-            log.info("Body recognition: %d person(s), %d template(s), %d person-part(s) loaded",
-                     len(self._people), len(rows), kinds)
+            log.info("Body recognition: %d person(s), %d template(s) loaded", len(self._people), len(rows))
 
     # ---- one look at one person
-    def best_match(self, feats: dict[str, np.ndarray], model_name: str) -> tuple[dict | None, float]:
-        """Best person for these part numbers (any view: 360°), and the 2nd best score."""
-        with self._lock:
-            people = self._people
-        results = []
-        for person in people:
-            total = weight = 0.0
-            matched, best_sim, best_tpl, best_view = [], -1.0, None, None
-            for part, vec in feats.items():
-                entry = person.parts.get(part)
-                if entry is None:
-                    continue
-                ids, views, models, mat = entry
+    def _score(self, person: _Person, feats: dict[str, np.ndarray], model_name: str) -> dict | None:
+        """How alike these part numbers are to a person: per part the best of their
+        photo templates (any angle) and live samples (movement)."""
+        total = weight = 0.0
+        matched, best_sim, best_tpl, best_angle = [], -1.0, None, None
+        for part, vec in feats.items():
+            s_part = -1.0
+            entry = person.parts.get(part)
+            if entry is not None:
+                ids, angles, models, mat = entry
                 sims = mat @ vec
                 for j, m in enumerate(models):  # numbers made another way are not comparable
                     if m != model_name:
                         sims[j] = -1.0
                 j = int(np.argmax(sims))
-                s = float(sims[j])
-                if s < -0.5:
-                    continue
-                total += PART_WEIGHTS[part] * s
-                weight += PART_WEIGHTS[part]
-                if s >= PART_SAME:
-                    matched.append(part)
-                if s > best_sim:
-                    best_sim, best_tpl, best_view = s, ids[j], views[j]
-            if weight <= 0:
+                s_part = float(sims[j])
+                if s_part > best_sim and s_part > -0.5:
+                    best_sim, best_tpl, best_angle = s_part, ids[j], angles[j]
+            for m, lv in person.live.get(part, ()):
+                if m == model_name:
+                    s_part = max(s_part, float(lv @ vec))
+            if s_part < -0.5:
                 continue
-            results.append({"person": person, "score": total / weight, "parts": matched,
-                            "template": best_tpl, "view": best_view})
+            total += PART_WEIGHTS[part] * s_part
+            weight += PART_WEIGHTS[part]
+            if s_part >= PART_SAME:
+                matched.append(part)
+        if weight <= 0:
+            return None
+        return {"person": person, "score": total / weight, "parts": matched, "template": best_tpl, "angle": best_angle}
+
+    def best_match(self, feats: dict[str, np.ndarray], model_name: str) -> tuple[dict | None, float]:
+        """Best person for these part numbers (any angle: 360°), and the 2nd best score."""
+        with self._lock:
+            people = self._people
+        results = [r for r in (self._score(p, feats, model_name) for p in people) if r is not None]
         if not results:
             return None, 0.0
         results.sort(key=lambda r: r["score"], reverse=True)
@@ -436,13 +498,13 @@ class BodyMatcher(threading.Thread):
         p = best["person"]
         ok = best["score"] >= MATCH and best["score"] - second >= MARGIN and len(best["parts"]) >= MIN_PARTS
         if LOG_MATCHES:
-            log.info("Body match %s → %s: %.2f (2nd %.2f), parts %s, view %s%s", visitor.track_id, p.label,
-                     best["score"], second, ",".join(best["parts"]) or "-", best["view"], "" if ok else " (no vote)")
+            log.info("Body match %s → %s: %.2f (2nd %.2f), parts %s, angle %s%s", visitor.track_id, p.label,
+                     best["score"], second, ",".join(best["parts"]) or "-", best["angle"], "" if ok else " (no vote)")
         if not ok:
             return
         key = (p.kind, p.person_id)
         with self._lock:
-            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": False})
+            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
             if st["done"]:
                 return
             n_sum = st["votes"].setdefault(key, [0, 0.0])
@@ -454,14 +516,42 @@ class BodyMatcher(threading.Thread):
             total = sum(n for n, _ in st["votes"].values())
             if n_sum[0] < VOTES or n_sum[0] < VOTE_SHARE * total:
                 return
-            st["done"] = True
+            st["done"] = key
             top = st["best"][key]
             score = n_sum[1] / n_sum[0]
         self._recognised(visitor, p, top, score)
 
+    def learn(self, visitor: Any, feats: dict[str, np.ndarray], model_name: str) -> None:
+        """A recognised visitor seen again (turning, sitting, crouching, carrying
+        things, on another camera): keep these numbers as live samples of that
+        person, when they still look like them."""
+        if LIVE_SAMPLES <= 0 or not feats:
+            return
+        st = self._visits.get(visitor.visit_id)
+        key = st["done"] if st else None
+        if not key:
+            return
+        with self._lock:
+            person = next((p for p in self._people if (p.kind, p.person_id) == key), None)
+        if person is None:
+            return
+        mine = self._score(person, feats, model_name)
+        best, _ = self.best_match(feats, model_name)
+        # still this person (the tracker did not switch to someone else), and nobody fits better
+        if mine is None or mine["score"] < LEARN_SAME or (best is not None and best["person"] is not person):
+            return
+        with self._lock:
+            for part, vec in feats.items():
+                samples = person.live.setdefault(part, [])
+                samples.append((model_name, vec))
+                del samples[:-LIVE_SAMPLES]
+
     def _recognised(self, visitor: Any, person: _Person, top: dict, score: float) -> None:
         if person.kind == "Staff":
-            values = {"visit_type": "Staff", "staff_id": person.person_id, "member_id": None}
+            # the staff's staff_no is the track_id of every visit of this staff
+            values = {"visit_type": "Staff", "staff_id": person.person_id, "member_id": None,
+                      "track_id": person.number}
+            visitor.track_id = person.number  # live video label and suspicious pairs use it from now on
         else:
             values = {"visit_type": "Member", "member_id": person.person_id, "staff_id": None}
         self.update("visit", values, camera_id=top["camera_id"], visit_id=f"eq.{visitor.visit_id}")
@@ -471,12 +561,12 @@ class BodyMatcher(threading.Thread):
             "match_score": round(min(1.0, max(0.0, score)) * 100, 2),
             "result": "Matched",
             "body_template_id": top["template"],
-            "body_view": top["view"],
+            "body_view_angle": top["angle"],
             "matched_parts": top["parts"],
             "event_time": _now(),
         })
-        log.info("%s recognised as %s %s by body (%s view, %s, score %.0f%%)", visitor.track_id, person.kind,
-                 person.label, top["view"], ", ".join(top["parts"]), score * 100)
+        log.info("%s recognised as %s %s by body (%s°, %s, score %.0f%%)", visitor.track_id, person.kind,
+                 person.label, top["angle"], ", ".join(top["parts"]), score * 100)
 
     def forget(self, visit_id: str) -> None:
         with self._lock:

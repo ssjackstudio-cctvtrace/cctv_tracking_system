@@ -122,7 +122,7 @@ export type RecognitionEvent = {
   camera_id: string
   visit_id: string
   body_template_id: string | null // body part template that matched best (360°)
-  body_view: BodyView | null // side of the person the camera saw
+  body_view_angle: number | null // direction the person faced the camera, degrees 0-360 (0 Front, 90 Left side, 180 Back, 270 Right side)
   matched_parts: BodyPart[] | null
   match_score: number // 0–100
   result: 'Matched' | 'Not Matched'
@@ -195,14 +195,13 @@ export type StaffEditable = Pick<
 // ---------- BIOMETRIC_PHOTO ----------
 // Photo of a staff OR a member for 360° body recognition (PDPA consent), max 15 per person.
 // File: bucket biometric-photos/<storage_path>. The edge box makes body_template rows from it.
-export type BodyView = 'Front' | 'Back' | 'Left side' | 'Right side'
 export type BodyPart = 'Head' | 'Upper body' | 'Lower body' | 'Feet'
 export type BiometricPhoto = {
   biometric_photo_id: string
   staff_id: string | null
   member_id: string | null
   storage_path: string
-  body_view: BodyView
+  body_view_angle: number // direction the person faces, degrees 0-360 (0 Front, 90 Left side, 180 Back, 270 Right side)
   whole_body: boolean
   body_parts: BodyPart[]
   part_boxes: Partial<Record<BodyPart, [number, number, number, number]>> | null // 0-1
@@ -213,13 +212,11 @@ export type BiometricPhoto = {
 }
 
 // ---------- BODY_TEMPLATE ----------
-// Numbers of ONE body part of ONE photo: up to 4 views x 4 parts = 16 kinds per person.
+// Numbers of ONE body part of ONE photo. The person: biometric_photo_id → biometric_photo.staff_id / member_id.
 export type BodyTemplate = {
   body_template_id: string
   biometric_photo_id: string
-  staff_id: string | null
-  member_id: string | null
-  body_view: BodyView
+  body_view_angle: number // from biometric_photo, degrees 0-360
   body_part: BodyPart
   embedding: string | number[] // pgvector (914), returned as text "[0.1,...]"
   model_name: string

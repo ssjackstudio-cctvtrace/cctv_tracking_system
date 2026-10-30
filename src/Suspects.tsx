@@ -16,13 +16,17 @@ import './Suspects.css'
 //             its own first track_id from now on (the edge box never pairs these
 //             two again; later lookalikes of it get their own card).
 //
-// Three tabs, one per visit_type of the first track_id: Guest, Staff, Member.
+// Three tabs: Staff (one of the two visits is a staff), Member (a member), else Guest.
 //   Guest   a first track_id only collects later track_ids first seen within
 //           10 minutes of it (GUEST_WINDOW_MS); a later one is a new first
 //           track_id of its own. The edge box also never pairs two people whose
 //           top or pants are clearly another colour (another attire style).
-//   Staff / Member  not used yet: they need face recognition of enrolled staff
-//           and members first (biometric_photo / body_template, recognition_event).
+//   Staff   a visit the edge box recognised as a staff (by body, any angle) has the
+//           staff's staff_no as its track_id, shown as the FIRST track_id of the card.
+//           Pairs at least 70% alike are merged at once by the database (Merged);
+//           lower ones wait here: Merge gives the other visit the staff_no
+//           (supabase/body_view_angle_staff_track.sql).
+//   Member  a visit recognised as a member.
 
 const SUSPECT_TABLE = 'suspect_match'
 const REFRESH_MS = 30_000
@@ -80,6 +84,24 @@ const todayStart = () => {
   const d = new Date()
   return new Date(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T00:00:00`).toISOString()
 }
+const rowTab = (r: SuspectRow): VisitTab =>
+  r.keep?.visit_type === 'Staff' || r.dup?.visit_type === 'Staff'
+    ? 'Staff'
+    : r.keep?.visit_type === 'Member' || r.dup?.visit_type === 'Member'
+      ? 'Member'
+      : 'Guest'
+// The pair shown the other way round (display only: Merge still uses suspect_match_id)
+const swapped = (r: SuspectRow): SuspectRow => ({
+  ...r,
+  keep: r.dup,
+  dup: r.keep,
+  track_keep: r.track_dup,
+  track_dup: r.track_keep,
+  seen_keep: r.seen_dup,
+  seen_dup: r.seen_keep,
+  cam_keep: r.cam_dup,
+  cam_dup: r.cam_keep,
+})
 const person = (v: VisitInfo) =>
   v ? `${v.visit_type} · ${v.est_gender}${v.est_age ? ` · ${v.est_age}` : ''}` : '—'
 
@@ -143,22 +165,25 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   }, [branchId, status])
 
   useEffect(() => {
-    if (tab !== 'Guest') return // Staff / Member: nothing to load yet
     setLoaded(false)
     load()
     const timer = window.setInterval(load, REFRESH_MS)
     return () => window.clearInterval(timer)
   }, [load, tab])
 
-  // Guest tab: first track_id is a Guest, and the later track_id was first seen
-  // within 10 minutes of it (older pairs made before this rule are left out too)
+  // Tab of a pair: Staff if either visit is a staff, Member if either is a member, else Guest.
+  // Guest tab: the later track_id was first seen within 10 minutes of the first one
+  // (older pairs made before this rule are left out too).
+  // Staff / Member tab: the staff's (member's) visit is shown as the first track_id.
   const tabRows = useMemo(
     () =>
-      rows.filter((r) => {
-        if ((r.keep?.visit_type ?? 'Guest') !== tab) return false
-        if (tab !== 'Guest' || !r.seen_keep || !r.seen_dup) return true
-        return new Date(r.seen_dup).getTime() - new Date(r.seen_keep).getTime() <= GUEST_WINDOW_MS
-      }),
+      rows
+        .filter((r) => {
+          if (rowTab(r) !== tab) return false
+          if (tab !== 'Guest' || !r.seen_keep || !r.seen_dup) return true
+          return new Date(r.seen_dup).getTime() - new Date(r.seen_keep).getTime() <= GUEST_WINDOW_MS
+        })
+        .map((r) => (tab !== 'Guest' && r.dup?.visit_type === tab && r.keep?.visit_type !== tab ? swapped(r) : r)),
     [rows, tab],
   )
 
@@ -245,18 +270,22 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
           </button>
         ))}
       </div>
-      {tab !== 'Guest' ? (
-        <p className="ds-empty">
-          {tab} recognition is not set up yet. Suspicious same person for {tab.toLowerCase()}s will be listed here once
-          the cameras can recognise enrolled {tab.toLowerCase()}s by face.
+      <>
+      {tab === 'Guest' ? (
+        <p className="cam-count-note">
+          Guest: a first track_id only collects track_ids first seen within 10 minutes of it; a later one becomes a new
+          first track_id. People whose top or pants are clearly another colour, or whose shirt or pants pattern is
+          clearly different, are never paired.
+        </p>
+      ) : tab === 'Staff' ? (
+        <p className="cam-count-note">
+          Staff: a person recognised as a staff (by body, from any angle) has the staff no. as the first track_id.
+          Another track_id that may be the same staff is merged at once when it is at least 70% alike (see Merged);
+          lower ones wait here. <b>Merge</b> gives it the staff no.
         </p>
       ) : (
-      <>
-      <p className="cam-count-note">
-        Guest: a first track_id only collects track_ids first seen within 10 minutes of it; a later one becomes a new
-        first track_id. People whose top or pants are clearly another colour, or whose shirt or pants pattern is
-        clearly different, are never paired.
-      </p>
+        <p className="cam-count-note">Member: pairs where one of the two people was recognised as a member.</p>
+      )}
       <div className="cam-toolbar">
         <label className="cam-filter">
           Show
@@ -359,7 +388,6 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         </div>
       )}
       </>
-      )}
     </section>
   )
 }
