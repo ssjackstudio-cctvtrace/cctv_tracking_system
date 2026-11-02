@@ -290,8 +290,10 @@ export function countPeople(events: PersonEvent[]) {
   }
   const walkIn = tally([...people.values()].filter((p) => p.wentIn))
   const passedBy = tally([...people.values()].filter((p) => p.passedBy))
+  // Customers only (visit_type Guest / Member, COUNTED_VISIT_TYPES): Staff stays are left out of
+  // Top 5 Customer Longest Stay and the Average Daily Time Taken
   const stays: Stay[] = [...people.entries()]
-    .filter(([, p]) => p.ended && p.seconds >= 1)
+    .filter(([, p]) => p.ended && p.seconds >= 1 && isCounted(p.visitType))
     .map(([trackId, p]) => ({
       trackId,
       visitType: p.visitType,
@@ -301,11 +303,11 @@ export function countPeople(events: PersonEvent[]) {
     }))
     .sort((x, y) => y.seconds - x.seconds)
   const longest = stays.slice(0, 5)
-  // Average time in the shop of everyone with a finished stay on the day (null = no finished stays)
+  // Average time in the shop of every customer with a finished stay on the day (null = no finished stays)
   const averageStay = stays.length ? Math.round(stays.reduce((sum, s) => sum + s.seconds, 0) / stays.length) : null
-  // Each track_id once, with its longest stay in one track region
+  // Each track_id once, with its longest stay in one track region (customers only: no Staff)
   const regionLongest = [...regionStays.values()]
-    .flatMap((r) => (r.best ? [r.best] : []))
+    .flatMap((r) => (r.best && isCounted(r.best.visitType) ? [r.best] : []))
     .sort((x, y) => y.seconds - x.seconds)
     .slice(0, 5)
   return { in: walkIn, passedBy, longest, averageStay, stayCount: stays.length, regionLongest }
@@ -335,8 +337,11 @@ function AverageStay({
 }) {
   return (
     <section className="ds-panel ds-avgstay">
-      <h2>Average Daily Time Taken staying in {branchName || '—'}</h2>
-      <p className="ds-stay-note">Average time from walking in until Passed By, over everyone with a finished stay on this day.</p>
+      <h2>Average Daily Time Taken Customer Staying in {branchName || '—'}</h2>
+      <p className="ds-stay-note">
+        Average time from walking in until Passed By, over every customer (Guest / Member) with a finished stay on
+        this day. Staff are not counted.
+      </p>
       {loading && seconds === null ? (
         <p className="ds-empty">Loading…</p>
       ) : seconds === null ? (
@@ -359,7 +364,7 @@ function LongestStay({ branchName, stays, loading }: { branchName: string; stays
   const places = [2, 1, 3]
   return (
     <section className="ds-panel ds-stay">
-      <h2>Top 5 Longest Stay in {branchName || '—'}</h2>
+      <h2>Top 5 Customer Longest Stay in {branchName || '—'}</h2>
       <p className="ds-stay-note">Time from walking in (Purchasing / Counter) until Passed By on the Traffic walkway.</p>
       {loading && !stays ? (
         <p className="ds-empty">Loading…</p>
@@ -436,7 +441,7 @@ function RegionLongestStay({
   const places = [2, 1, 3]
   return (
     <section className="ds-panel ds-stay">
-      <h2>Top 5 Longest Stay for Track Region in {branchName || '—'}</h2>
+      <h2>Top 5 Customer Longest Stay for Track Region in {branchName || '—'}</h2>
       <p className="ds-stay-note">
         Time in one track region (Purchasing / Counter): from the record there until the next record of the same
         track_id.
