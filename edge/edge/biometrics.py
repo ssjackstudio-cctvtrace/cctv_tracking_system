@@ -43,6 +43,21 @@ and which body PARTS are in the photo: Head, Upper body, Lower body, Feet.
    again from sides and poses the photos never showed. A sample is only kept
    when it still looks like that person (no drift onto someone else).
 
+5. Same uniform, several staff on one day: all staff wear the same uniform (e.g. a
+   grey polo with a red collar), so their Upper body looks alike and cannot tell
+   WHICH staff it is. At each reload the parts that look alike between ALL staff of
+   the branch (UNIFORM_SAME) are found ("shared"). The uniform still helps to say
+   "this is a staff" (overall score, MATCH), but WHICH staff is decided by the other
+   parts only (hair / head, pants, shoes): the staff that is best on those wins, by
+   MARGIN over the next staff on those parts, and those parts must also look like
+   that staff (DISTINCT_MATCH), so a customer in similar clothes is not taken for a
+   staff. When only shared parts are visible (e.g. sitting at the counter, head cut
+   off) and 2+ staff may be on duty, there is no vote: tracking keeps the person.
+6. Who may be recognised: only staff of THIS edge box's branch, and when the website
+   has ticked "On duty today" for some of them (table staff_duty, Camera page →
+   Suspicious same person → Staff tab), only those. Nobody ticked: every Active staff
+   of the branch (as before).
+
 The 914 numbers of one part = body re-identification model on the part (768,
 OpenCV Zoo YoutuReID; zeros when the model is missing) + clothes / skin / hair
 colours (hue-saturation histogram, 128; black / very dark pixels ignored, so the
@@ -59,7 +74,7 @@ import os
 import queue
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 import cv2
@@ -110,6 +125,9 @@ LEARN_SAME = float(os.getenv("BODY_LEARN_SAME", "0.62"))  # a live sample must s
 RELOAD_SECONDS = float(os.getenv("BODY_RELOAD_SECONDS", "120"))
 ENROL_SECONDS = float(os.getenv("BODY_ENROL_SECONDS", "30"))
 LOG_MATCHES = _flag("BODY_LOG", "off")
+UNIFORM_SAME = float(os.getenv("BODY_UNIFORM_SAME", "0.85"))  # a part this alike between ALL staff = the uniform
+DISTINCT_MATCH = float(os.getenv("BODY_DISTINCT_MATCH", "0.70"))  # the staff's own (non-uniform) parts must match this
+MYT = timezone(timedelta(hours=8))  # staff_duty.duty_date is a Malaysia date
 
 
 def posture(box: tuple[float, float, float, float]) -> str:
@@ -363,9 +381,14 @@ class BodyMatcher(threading.Thread):
     """Body templates of the people who may be recognised, the votes per visit,
     and the live samples of recognised people."""
 
-    def __init__(self, supa: Supabase, insert: Callable[..., None], update: Callable[..., None]) -> None:
+    def __init__(self, supa: Supabase, insert: Callable[..., None], update: Callable[..., None],
+                 edge_device_id: str | None = None) -> None:
         super().__init__(name="body-matcher", daemon=True)
         self.supa, self.insert, self.update = supa, insert, update
+        self.edge_device_id = edge_device_id  # its branch's staff only
+        self._branch: str | None = None
+        self._shared: frozenset[str] = frozenset()  # parts that look alike between all staff (the uniform)
+        self._duty_note = ""  # last logged "on duty" list / warning
         self.stop_event = threading.Event()
         self.reload_now = threading.Event()
         self._lock = threading.Lock()
@@ -447,11 +470,39 @@ class BodyMatcher(threading.Thread):
                 return rows
             offset += 1000
 
+    def _branch_id(self) -> str | None:
+        """Branch of this edge box (edge_device.branch_id), looked up once."""
+        if self._branch is None and self.edge_device_id:
+            rows = self.supa.select("edge_device", "branch_id", edge_device_id=f"eq.{self.edge_device_id}")
+            self._branch = rows[0].get("branch_id") if rows else None
+        return self._branch
+
+    def _on_duty(self, branch: str | None) -> set[str]:
+        """staff_ids ticked "On duty today" for this branch (empty: nobody ticked, or no staff_duty table)."""
+        if not branch:
+            return set()
+        today = datetime.now(MYT).date().isoformat()
+        try:
+            rows = self.supa.select("staff_duty", "staff_id", branch_id=f"eq.{branch}", duty_date=f"eq.{today}")
+        except SupabaseError as exc:
+            note = f"staff_duty not readable ({exc}): every staff of the branch may be recognised"
+            if note != self._duty_note:
+                log.warning("%s. Run supabase/staff_duty.sql", note)
+                self._duty_note = note
+            return set()
+        return {r["staff_id"] for r in rows}
+
     def refresh(self) -> None:
-        # Only Active staff / members with PDPA consent (resigned staff never match)
+        # Only Active staff / members with PDPA consent (resigned staff never match);
+        # staff: only of this edge box's branch
+        branch = self._branch_id()
+        staff_filter = {"status": "eq.Active", "consent_pdpa": "is.true"}
+        if branch:
+            staff_filter["branch_id"] = f"eq.{branch}"
         staff = {s["staff_id"]: s for s in self._select_all(
-            "staff", "staff_id,staff_no,full_name,resigned_at", status="eq.Active", consent_pdpa="is.true")
+            "staff", "staff_id,staff_no,full_name,resigned_at", **staff_filter)
             if not s.get("resigned_at")}
+        on_duty = self._on_duty(branch)
         members = {m["member_id"]: m for m in self._select_all(
             "member", "member_id,member_no,full_name", status="eq.Active", consent_pdpa="is.true")}
         # the person of a template comes from its photo
@@ -494,7 +545,22 @@ class BodyMatcher(threading.Thread):
                 [r["body_template_id"] for r in rs], [int(r["body_view_angle"]) for r in rs],
                 [r["model_name"] for r in rs], np.stack([self._vectors[r["body_template_id"]] for r in rs]),
             )
+        # The uniform: parts that look alike between ALL staff of the branch (from their photos)
+        shared = self._shared_parts([p for p in people.values() if p.kind == "Staff"])
+        # Staff on duty today (when any is ticked): the others are not recognised today
+        if on_duty:
+            people = {k: p for k, p in people.items() if p.kind != "Staff" or p.person_id in on_duty}
+        duty_note = ("on duty today: " + ", ".join(sorted(p.label for p in people.values() if p.kind == "Staff"))
+                     if on_duty else "nobody ticked on duty today: every staff of the branch")
+        if duty_note != self._duty_note:
+            log.info("Body recognition, staff %s", duty_note)
+            self._duty_note = duty_note
+        if shared != self._shared:
+            log.info("Staff uniform: %s look alike between all staff, so WHICH staff is decided by %s",
+                     ", ".join(sorted(shared)) or "no part",
+                     ", ".join(p for p in PARTS if p not in shared))
         with self._lock:
+            self._shared = shared
             if date.today() != self._live_day:  # live samples are for one day (clothes change)
                 self._live, self._live_day = {}, date.today()
             for key, p in people.items():
@@ -504,11 +570,28 @@ class BodyMatcher(threading.Thread):
         if len(self._people) != before:
             log.info("Body recognition: %d person(s), %d template(s) loaded", len(self._people), len(rows))
 
+    @staticmethod
+    def _shared_parts(staff: list[_Person]) -> frozenset[str]:
+        """Parts in which EVERY two staff look alike (UNIFORM_SAME): the uniform."""
+        if len(staff) < 2:
+            return frozenset()
+        shared = set()
+        for part in PARTS:
+            mats = [p.parts[part][3] for p in staff if part in p.parts]
+            if len(mats) < 2:
+                continue
+            sims = [float((a @ b.T).max()) for i, a in enumerate(mats) for b in mats[i + 1:]]
+            if min(sims) >= UNIFORM_SAME:
+                shared.add(part)
+        return frozenset(shared)
+
     # ---- one look at one person
     def _score(self, person: _Person, feats: dict[str, np.ndarray], model_name: str) -> dict | None:
         """How alike these part numbers are to a person: per part the best of their
         photo templates (any angle) and live samples (movement)."""
         total = weight = 0.0
+        dtotal = dweight = 0.0  # the parts that are not the shared uniform
+        shared = self._shared
         matched, best_sim, best_tpl, best_angle = [], -1.0, None, None
         for part, vec in feats.items():
             s_part = -1.0
@@ -530,22 +613,39 @@ class BodyMatcher(threading.Thread):
                 continue
             total += PART_WEIGHTS[part] * s_part
             weight += PART_WEIGHTS[part]
+            if part not in shared:
+                dtotal += PART_WEIGHTS[part] * s_part
+                dweight += PART_WEIGHTS[part]
             if s_part >= PART_SAME:
                 matched.append(part)
         if weight <= 0:
             return None
-        return {"person": person, "score": total / weight, "parts": matched, "template": best_tpl, "angle": best_angle}
+        return {"person": person, "score": total / weight, "parts": matched, "template": best_tpl, "angle": best_angle,
+                "distinct": dtotal / dweight if dweight > 0 else None}
 
     def best_match(self, feats: dict[str, np.ndarray], model_name: str) -> tuple[dict | None, float]:
-        """Best person for these part numbers (any angle: 360°), and the 2nd best score."""
+        """Best person for these part numbers (any angle: 360°), and by how much it is
+        ahead of the next one (margin). Staff in the same uniform: when the best is a
+        staff and 2+ staff may be recognised, the staff are ranked by their parts that
+        are NOT the uniform ("distinct": hair / head, pants, shoes) and the margin is
+        over the next staff on those parts; none of those parts visible → margin 0."""
         with self._lock:
             people = self._people
+            shared = self._shared
         results = [r for r in (self._score(p, feats, model_name) for p in people) if r is not None]
         if not results:
             return None, 0.0
         results.sort(key=lambda r: r["score"], reverse=True)
-        second = results[1]["score"] if len(results) > 1 else 0.0
-        return results[0], second
+        best = results[0]
+        margin = best["score"] - (results[1]["score"] if len(results) > 1 else 0.0)
+        staff = [r for r in results if r["person"].kind == "Staff"]
+        if shared and best["person"].kind == "Staff" and len(staff) >= 2:
+            ranked = sorted((r for r in staff if r["distinct"] is not None), key=lambda r: r["distinct"], reverse=True)
+            if len(ranked) < len(staff):
+                return best, 0.0  # only the uniform is visible: cannot tell which staff
+            best = ranked[0]
+            margin = ranked[0]["distinct"] - ranked[1]["distinct"]
+        return best, margin
 
     def known(self, visit_id: str) -> bool:
         st = self._visits.get(visit_id)
@@ -555,14 +655,18 @@ class BodyMatcher(threading.Thread):
         """A look at a visitor not recognised yet: vote, and recognise when sure."""
         if not feats:
             return
-        best, second = self.best_match(feats, model_name)
+        best, margin = self.best_match(feats, model_name)
         if best is None:
             return
         p = best["person"]
-        ok = best["score"] >= MATCH and best["score"] - second >= MARGIN and len(best["parts"]) >= MIN_PARTS
+        # a staff (uniform shared with other staff): its own parts (hair, pants, shoes) must match too
+        distinct_ok = (p.kind != "Staff" or not self._shared
+                       or (best["distinct"] is not None and best["distinct"] >= DISTINCT_MATCH))
+        ok = (best["score"] >= MATCH and margin >= MARGIN and len(best["parts"]) >= MIN_PARTS and distinct_ok)
         if LOG_MATCHES:
-            log.info("Body match %s → %s: %.2f (2nd %.2f), parts %s, angle %s%s", visitor.track_id, p.label,
-                     best["score"], second, ",".join(best["parts"]) or "-", best["angle"], "" if ok else " (no vote)")
+            log.info("Body match %s → %s: %.2f (own parts %s, ahead by %.2f), parts %s, angle %s%s", visitor.track_id,
+                     p.label, best["score"], "-" if best["distinct"] is None else f"{best['distinct']:.2f}", margin,
+                     ",".join(best["parts"]) or "-", best["angle"], "" if ok else " (no vote)")
         if not ok:
             return
         key = (p.kind, p.person_id)

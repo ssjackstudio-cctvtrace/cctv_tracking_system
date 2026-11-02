@@ -92,7 +92,7 @@ def main() -> None:
     # BODY_RECOGNITION=off switches it off.
     body_matcher = None
     if supa and BODY_RECOGNITION:
-        body_matcher = BodyMatcher(supa, writer.insert, writer.update)
+        body_matcher = BodyMatcher(supa, writer.insert, writer.update, settings.edge_device_id)
         body_matcher.start()
         Enroller(supa, on_enrolled=body_matcher.reload_now.set).start()
 

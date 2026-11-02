@@ -166,6 +166,18 @@
   max-width: 100%;
 }
 
+/* Staff tab: "On duty today" tick of each staff */
+.sp-duty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #16242d;
+  cursor: pointer;
+}
+
 @media (max-width: 520px) {
   .sp-first,
   .sp-dup {

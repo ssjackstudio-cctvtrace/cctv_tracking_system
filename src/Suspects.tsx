@@ -38,6 +38,12 @@ import './Suspects.css'
 // Saved by public.set_first_track_type (supabase/suspect_first_track_type.sql), which
 // stamps visit.type_confirmed_at. A decided Guest card shows all its later track_ids
 // (the 10-minute Guest window only applies to undecided cards).
+//
+// Staff tab: every staff of the branch is listed first, as a first track_id (staff_no),
+// with an "On duty today" tick (table staff_duty, supabase/staff_duty.sql): the edge box
+// then only recognises the staff on duty today. A later track_id in ANY tab has "Is Staff"
+// too: pick the staff and that track_id (with the visits merged into it) becomes the
+// staff's track_id (staff_no), i.e. it joins that staff's first track_id.
 
 const SUSPECT_TABLE = 'suspect_match'
 const REFRESH_MS = 30_000
@@ -80,6 +86,7 @@ type SuspectRow = {
   cam_keep: { camera_name: string } | null
   cam_dup: { camera_name: string } | null
   keep_visit?: string // visit_id of the visit shown as the first track_id (visit_dup when shown swapped)
+  dup_visit?: string // visit_id of the visit shown as the later track_id (visit_keep when shown swapped)
 }
 
 type Group = {
@@ -96,6 +103,10 @@ const fmtTime = (iso: string | null) => {
   if (!iso) return '—'
   const d = new Date(iso)
   return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+}
+const todayKey = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` // Malaysia date (staff_duty.duty_date)
 }
 const todayStart = () => {
   const d = new Date()
@@ -119,6 +130,7 @@ const swapped = (r: SuspectRow): SuspectRow => ({
   cam_keep: r.cam_dup,
   cam_dup: r.cam_keep,
   keep_visit: r.visit_dup,
+  dup_visit: r.visit_keep,
 })
 const person = (v: VisitInfo) =>
   v ? `${v.visit_type} · ${v.est_gender}${v.est_age ? ` · ${v.est_age}` : ''}` : '—'
@@ -146,8 +158,30 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   const [message, setMessage] = useState('')
   const [staffList, setStaffList] = useState<StaffOption[]>([])
   const [staffError, setStaffError] = useState('')
-  // the first track_id whose "Is Staff" list is open, and the staff picked there
+  // the first track_id (or "dup:<pair id>" for a later track_id) whose "Is Staff" list is open, and the staff picked
   const [picking, setPicking] = useState<{ track: string; staffId: string } | null>(null)
+  const [onDuty, setOnDuty] = useState<Set<string>>(new Set()) // staff_ids ticked "On duty today"
+  const [dutyError, setDutyError] = useState('')
+
+  // Staff on duty today in this branch (staff_duty)
+  useEffect(() => {
+    let cancelled = false
+    setOnDuty(new Set())
+    setDutyError('')
+    supabase
+      .from('staff_duty')
+      .select('staff_id')
+      .eq('branch_id', branchId)
+      .eq('duty_date', todayKey())
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) setDutyError(error.message)
+        else setOnDuty(new Set((data ?? []).map((d: { staff_id: string }) => d.staff_id)))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [branchId])
 
   // Staff of the selected branch only (not resigned), for "Is Staff": staff_no – full_name
   useEffect(() => {
@@ -324,6 +358,110 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
     load()
   }
 
+  // "On duty today" tick of a staff: the edge box only recognises the staff on duty (when any is ticked)
+  const toggleDuty = async (st: StaffOption, on: boolean) => {
+    setBusy(true)
+    const { error } = on
+      ? await supabase
+          .from('staff_duty')
+          .upsert({ staff_id: st.staff_id, duty_date: todayKey(), branch_id: branchId }, { onConflict: 'staff_id,duty_date' })
+      : await supabase.from('staff_duty').delete().eq('staff_id', st.staff_id).eq('duty_date', todayKey())
+    if (error) {
+      setMessage(`Could not save on duty: ${error.message}`)
+    } else {
+      setOnDuty((prev) => {
+        const next = new Set(prev)
+        if (on) next.add(st.staff_id)
+        else next.delete(st.staff_id)
+        return next
+      })
+      setMessage(
+        `${st.staff_no} – ${st.full_name} is ${on ? '' : 'not '}on duty today. The edge box uses this within 2 minutes.`,
+      )
+    }
+    setBusy(false)
+  }
+
+  // "Is Staff" on a later track_id: it (and the visits merged into it) becomes that staff (track_id = staff_no)
+  const assignStaff = async (r: SuspectRow, staffId: string) => {
+    const st = staffList.find((x) => x.staff_id === staffId)
+    if (!st) {
+      setMessage('Choose the staff first.')
+      return
+    }
+    setBusy(true)
+    setMessage('')
+    const track = r.dup?.track_id ?? r.track_dup
+    const { error } = await supabase.rpc('set_first_track_type', {
+      p_visits: [r.dup_visit ?? r.visit_dup],
+      p_type: 'Staff',
+      p_staff: staffId,
+    })
+    setMessage(
+      error
+        ? `Could not save: ${error.message}`
+        : `${track} is staff ${st.staff_no} – ${st.full_name}: it now has the staff's track_id ${st.staff_no}.`,
+    )
+    if (!error) setPicking(null)
+    setBusy(false)
+    load()
+  }
+
+  // Staff tab: every staff of the branch first (its card, or an empty one), then the other cards
+  const items = useMemo(() => {
+    if (tab !== 'Staff') return groups.map((g) => ({ g, st: undefined as StaffOption | undefined }))
+    const used = new Set<string>()
+    const list: { g: Group | undefined; st: StaffOption | undefined }[] = staffList.map((st) => {
+      const g = groups.find((x) => x.track === st.staff_no)
+      if (g) used.add(g.track)
+      return { g, st }
+    })
+    return [...list, ...groups.filter((g) => !used.has(g.track)).map((g) => ({ g, st: undefined }))]
+  }, [tab, groups, staffList])
+
+  // The staff list of "Is Staff": staff of the selected branch only, staff_no – full_name
+  const staffPick = (key: string, label: string, onSave: (staffId: string) => void) =>
+    picking?.track === key && (
+      <span className="sp-staff-pick">
+        <select
+          aria-label={`Staff for ${label}`}
+          value={picking.staffId}
+          onChange={(e) => setPicking({ track: key, staffId: e.target.value })}
+        >
+          <option value="">
+            {staffError
+              ? `Could not load staff: ${staffError}`
+              : staffList.length === 0
+                ? 'No staff in this branch'
+                : 'Choose the staff…'}
+          </option>
+          {staffList.map((st) => (
+            <option key={st.staff_id} value={st.staff_id}>
+              {st.staff_no} – {st.full_name}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="cam-add" disabled={busy || !picking.staffId} onClick={() => onSave(picking.staffId)}>
+          Save as staff
+        </button>
+        <button type="button" className="cam-toggle" disabled={busy} onClick={() => setPicking(null)}>
+          Cancel
+        </button>
+      </span>
+    )
+
+  const dutyTick = (st: StaffOption) => (
+    <label className="sp-duty">
+      <input
+        type="checkbox"
+        checked={onDuty.has(st.staff_id)}
+        disabled={busy || Boolean(dutyError)}
+        onChange={(e) => toggleDuty(st, e.target.checked)}
+      />
+      On duty today
+    </label>
+  )
+
   const notSame = async (r: SuspectRow) => {
     setBusy(true)
     const { error } = await supabase
@@ -372,9 +510,12 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         </p>
       ) : tab === 'Staff' ? (
         <p className="cam-count-note">
-          Staff: a person recognised as a staff (by body, from any angle) has the staff no. as the first track_id.
-          Another track_id that may be the same staff is merged at once when it is at least 70% alike (see Merged);
-          lower ones wait here. <b>Merge</b> gives it the staff no.
+          Staff: every staff of this branch is listed first, with the staff no. as the first track_id. Tick{' '}
+          <b>On duty today</b> for the staff working today: the edge box then only recognises them (nobody ticked:
+          every staff of the branch). A person recognised as a staff (by body, from any angle) has the staff no. as
+          the first track_id. Another track_id that may be the same staff is merged at once when it is at least 70%
+          alike (see Merged); lower ones wait here. <b>Merge</b> gives it the staff no.
+          {dutyError && <span className="ds-error"> On duty cannot be saved yet: {dutyError} (run staff_duty.sql)</span>}
         </p>
       ) : (
         <p className="cam-count-note">Member: pairs where one of the two people was recognised as a member.</p>
@@ -405,19 +546,41 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         <p className="ds-empty">Loading…</p>
       ) : error ? (
         <p className="ds-error">Failed to load: {error}</p>
-      ) : groups.length === 0 ? (
+      ) : items.length === 0 ? (
         <p className="ds-empty">
           {status === 'Open' ? 'No suspicious same person today.' : `No ${status.toLowerCase()} pairs today.`}
         </p>
       ) : (
         <div className="sp-list">
-          {groups.map((g) => (
+          {items.map(({ g, st }) =>
+            !g ? (
+              st && (
+                <article key={`staff-${st.staff_id}`} className="sp-card">
+                  <header className="sp-first">
+                    <div className="sp-photo sp-photo--none">Staff</div>
+                    <div className="sp-info">
+                      <span className="sp-label">First track_id (staff)</span>
+                      <strong className="sp-track">{st.staff_no}</strong>
+                      <span>{st.full_name}</span>
+                      {dutyTick(st)}
+                      <span className="sp-muted">
+                        {status === 'Open'
+                          ? 'No suspicious same person for this staff today.'
+                          : `No ${status.toLowerCase()} pairs for this staff today.`}
+                      </span>
+                    </div>
+                  </header>
+                </article>
+              )
+            ) : (
             <article key={g.track} className="sp-card">
               <header className="sp-first">
                 <Photo url={g.keep?.photo_url} label={g.track} />
                 <div className="sp-info">
                   <span className="sp-label">First track_id (kept)</span>
                   <strong className="sp-track">{g.track}</strong>
+                  {st && <span>{st.full_name}</span>}
+                  {st && dutyTick(st)}
                   <span>
                     {g.camera} · first seen {fmtTime(g.seen)}
                   </span>
@@ -452,39 +615,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
                       </button>
                     </span>
                   )}
-                  {status === 'Open' && picking?.track === g.track && (
-                    <span className="sp-staff-pick">
-                      <select
-                        aria-label={`Staff for ${g.track}`}
-                        value={picking.staffId}
-                        onChange={(e) => setPicking({ track: g.track, staffId: e.target.value })}
-                      >
-                        <option value="">
-                          {staffError
-                            ? `Could not load staff: ${staffError}`
-                            : staffList.length === 0
-                              ? 'No staff in this branch'
-                              : 'Choose the staff…'}
-                        </option>
-                        {staffList.map((st) => (
-                          <option key={st.staff_id} value={st.staff_id}>
-                            {st.staff_no} – {st.full_name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="cam-add"
-                        disabled={busy || !picking.staffId}
-                        onClick={() => decide(g, 'Staff', picking.staffId)}
-                      >
-                        Save as staff
-                      </button>
-                      <button type="button" className="cam-toggle" disabled={busy} onClick={() => setPicking(null)}>
-                        Cancel
-                      </button>
-                    </span>
-                  )}
+                  {status === 'Open' && staffPick(g.track, g.track, (staffId) => decide(g, 'Staff', staffId))}
                   {status === 'Open' && g.rows.length > 1 && (
                     <button
                       type="button"
@@ -543,17 +674,34 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
                             >
                               Not same
                             </button>
+                            <button
+                              type="button"
+                              className="cam-toggle"
+                              disabled={busy}
+                              onClick={() =>
+                                setPicking(
+                                  picking?.track === `dup:${r.suspect_match_id}`
+                                    ? null
+                                    : { track: `dup:${r.suspect_match_id}`, staffId: '' },
+                                )
+                              }
+                            >
+                              Is Staff
+                            </button>
                           </span>
                         ) : (
                           <span className="sp-muted">{r.status}</span>
                         )}
+                        {r.status === 'Open' &&
+                          staffPick(`dup:${r.suspect_match_id}`, track, (staffId) => assignStaff(r, staffId))}
                       </div>
                     </li>
                   )
                 })}
               </ul>
             </article>
-          ))}
+            ),
+          )}
         </div>
       )}
       </>
