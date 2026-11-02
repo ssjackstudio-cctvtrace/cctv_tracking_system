@@ -160,6 +160,12 @@ const inOpenHours = (iso: string) => {
   return minutes >= OPEN_MINUTES && minutes < closeMinutes(d)
 }
 
+// Passed By / Walk-in count customers only: visit_type Guest or Member (a member is a customer;
+// 'Customer' is listed too in case that value is added later). Staff are never counted.
+// MUST stay the same as counted_visit_types in supabase/store_analytics_api.sql (JackStudio OS).
+export const COUNTED_VISIT_TYPES = ['Guest', 'Member', 'Customer']
+const isCounted = (visitType: string | undefined) => COUNTED_VISIT_TYPES.includes(visitType ?? 'Guest')
+
 // One row per cctv_event: the visit (person, track_id) it belongs to, its direction and time
 type PersonEvent = {
   visit_id: string
@@ -198,6 +204,7 @@ async function loadPersonEvents(branch: string, range: Range): Promise<PersonEve
 
 // People, not events: one person (one track_id) can be seen going In by several
 // cameras and walk into several areas, so each number counts distinct track_ids.
+//   Only events of a Guest / Member visit count (COUNTED_VISIT_TYPES); Staff are left out.
 //   People Passed By = distinct track_ids with a Passed By event in track_region Traffic, during opening hours
 //   People Walk-in = distinct track_ids with an In event in track_region Counter or Purchasing, during opening hours
 //     (one track_id with In rows in several areas / from several cameras is one person)
@@ -237,7 +244,8 @@ export function countPeople(events: PersonEvent[]) {
       seconds: 0,
       ended: false,
     }
-    const open = inOpenHours(e.event_time)
+    // counts: opening hours AND a customer visit (Guest / Member), see COUNTED_VISIT_TYPES
+    const open = inOpenHours(e.event_time) && isCounted(e.visit?.visit_type)
     if (open && e.direction === 'Passed By' && e.track_region === 'Traffic') p.passedBy = true
     const t = new Date(e.event_time).getTime()
     if (e.direction === 'In') {
