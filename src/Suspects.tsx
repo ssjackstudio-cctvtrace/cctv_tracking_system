@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { Badge } from './Datatable'
+import { TABLES } from './Usetable'
 import './Suspects.css'
 
 // Suspicious same person (Camera page, below the cameras).
@@ -27,6 +28,16 @@ import './Suspects.css'
 //           lower ones wait here: Merge gives the other visit the staff_no
 //           (supabase/body_view_angle_staff_track.sql).
 //   Member  a visit recognised as a member.
+//
+// First track_id first: in every tab an admin decides what the FIRST track_id is
+// before its later track_ids can be merged / marked Not same:
+//   Leave as Guest  → visit_type Guest; the card moves to the Guest tab
+//   Is Staff        → pick a staff of the selected branch (staff_no – full_name); the
+//                     first track_id becomes that staff (track_id = staff_no) and the
+//                     card moves to the Staff tab
+// Saved by public.set_first_track_type (supabase/suspect_first_track_type.sql), which
+// stamps visit.type_confirmed_at. A decided Guest card shows all its later track_ids
+// (the 10-minute Guest window only applies to undecided cards).
 
 const SUSPECT_TABLE = 'suspect_match'
 const REFRESH_MS = 30_000
@@ -45,7 +56,11 @@ type VisitInfo = {
   est_gender: string
   est_age: number | null
   photo_url: string | null
+  type_confirmed_at: string | null // when an admin decided Guest / Staff (null = not yet)
+  staff?: { staff_no: string; full_name: string } | null
 } | null
+
+type StaffOption = { staff_id: string; staff_no: string; full_name: string }
 
 type SuspectRow = {
   suspect_match_id: string
@@ -64,6 +79,7 @@ type SuspectRow = {
   dup: VisitInfo
   cam_keep: { camera_name: string } | null
   cam_dup: { camera_name: string } | null
+  keep_visit?: string // visit_id of the visit shown as the first track_id (visit_dup when shown swapped)
 }
 
 type Group = {
@@ -71,6 +87,7 @@ type Group = {
   camera: string
   seen: string | null
   keep: VisitInfo
+  keepVisits: string[] // visit_id(s) shown as this first track_id
   rows: SuspectRow[] // later track_ids, earliest first
 }
 
@@ -101,6 +118,7 @@ const swapped = (r: SuspectRow): SuspectRow => ({
   seen_dup: r.seen_keep,
   cam_keep: r.cam_dup,
   cam_dup: r.cam_keep,
+  keep_visit: r.visit_dup,
 })
 const person = (v: VisitInfo) =>
   v ? `${v.visit_type} · ${v.est_gender}${v.est_age ? ` · ${v.est_age}` : ''}` : '—'
@@ -126,6 +144,31 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [staffList, setStaffList] = useState<StaffOption[]>([])
+  const [staffError, setStaffError] = useState('')
+  // the first track_id whose "Is Staff" list is open, and the staff picked there
+  const [picking, setPicking] = useState<{ track: string; staffId: string } | null>(null)
+
+  // Staff of the selected branch only (not resigned), for "Is Staff": staff_no – full_name
+  useEffect(() => {
+    let cancelled = false
+    setStaffList([])
+    setStaffError('')
+    supabase
+      .from(TABLES.staff)
+      .select('staff_id, staff_no, full_name')
+      .eq('branch_id', branchId)
+      .neq('status', 'Resigned')
+      .order('staff_no', { ascending: true })
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) setStaffError(error.message)
+        else setStaffList((data ?? []) as StaffOption[])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [branchId])
 
   // select s.*, vk.*, vd.*, ck.camera_name, cd.camera_name from suspect_match s
   // join visit vk on s.visit_keep = vk.visit_id join visit vd on s.visit_dup = vd.visit_id
@@ -141,8 +184,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         .select(
           'suspect_match_id, visit_keep, visit_dup, track_keep, track_dup, kind, score, floor_apart, reason, ' +
             'seen_keep, seen_dup, status, ' +
-            'keep:visit!suspect_match_visit_keep_fkey!inner(track_id, branch_id, visit_type, est_gender, est_age, photo_url), ' +
-            'dup:visit!suspect_match_visit_dup_fkey(track_id, branch_id, visit_type, est_gender, est_age, photo_url), ' +
+            'keep:visit!suspect_match_visit_keep_fkey!inner(track_id, branch_id, visit_type, est_gender, est_age, photo_url, type_confirmed_at, staff(staff_no, full_name)), ' +
+            'dup:visit!suspect_match_visit_dup_fkey(track_id, branch_id, visit_type, est_gender, est_age, photo_url, type_confirmed_at, staff(staff_no, full_name)), ' +
             'cam_keep:camera!suspect_match_camera_keep_fkey(camera_name), cam_dup:camera!suspect_match_camera_dup_fkey(camera_name)',
         )
         .eq('keep.branch_id', branchId)
@@ -181,6 +224,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         .filter((r) => {
           if (rowTab(r) !== tab) return false
           if (tab !== 'Guest' || !r.seen_keep || !r.seen_dup) return true
+          if (r.keep?.type_confirmed_at) return true // decided Guest: all its later track_ids
           return new Date(r.seen_dup).getTime() - new Date(r.seen_keep).getTime() <= GUEST_WINDOW_MS
         })
         .map((r) => (tab !== 'Guest' && r.dup?.visit_type === tab && r.keep?.visit_type !== tab ? swapped(r) : r)),
@@ -194,9 +238,12 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
       const track = r.keep?.track_id ?? r.track_keep
       let g = byTrack.get(track)
       if (!g) {
-        g = { track, camera: r.cam_keep?.camera_name ?? '—', seen: r.seen_keep, keep: r.keep, rows: [] }
+        g = { track, camera: r.cam_keep?.camera_name ?? '—', seen: r.seen_keep, keep: r.keep, keepVisits: [], rows: [] }
         byTrack.set(track, g)
       }
+      const keepVisit = r.keep_visit ?? r.visit_keep
+      if (!g.keepVisits.includes(keepVisit)) g.keepVisits.push(keepVisit)
+      if (!g.keep?.type_confirmed_at && r.keep?.type_confirmed_at) g.keep = { ...r.keep, photo_url: g.keep?.photo_url ?? r.keep.photo_url }
       if ((r.seen_keep ?? '') < (g.seen ?? '~')) {
         g.seen = r.seen_keep
         g.camera = r.cam_keep?.camera_name ?? g.camera
@@ -209,11 +256,55 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
     return list.sort((a, b) => (a.seen ?? '').localeCompare(b.seen ?? ''))
   }, [tabRows])
 
+  // First track_id decided (Guest / Staff)? Only then can its later track_ids be merged / marked Not same
+  const decided = (g: Group) => Boolean(g.keep?.type_confirmed_at)
+
   const sureIds = useMemo(
     () =>
-      groups.flatMap((g) => g.rows).filter((r) => Number(r.score) >= SURE_SCORE).map((r) => r.suspect_match_id),
+      groups
+        .filter((g) => Boolean(g.keep?.type_confirmed_at))
+        .flatMap((g) => g.rows)
+        .filter((r) => Number(r.score) >= SURE_SCORE)
+        .map((r) => r.suspect_match_id),
     [groups],
   )
+
+  // Leave as Guest / Is Staff for the first track_id of a card; the card then moves to that tab
+  const decide = async (g: Group, type: 'Guest' | 'Staff', staffId?: string) => {
+    if (type === 'Staff' && !staffId) {
+      setMessage('Choose the staff first.')
+      return
+    }
+    // A staff card can hold several of that staff's visits: say so before turning them all into guests
+    if (
+      type === 'Guest' &&
+      g.keep?.visit_type === 'Staff' &&
+      g.keepVisits.length > 1 &&
+      !window.confirm(`${g.track} has ${g.keepVisits.length} visits in this card. Make all ${g.keepVisits.length} guests?`)
+    )
+      return
+    setBusy(true)
+    setMessage('')
+    const { data, error } = await supabase.rpc('set_first_track_type', {
+      p_visits: g.keepVisits,
+      p_type: type,
+      p_staff: type === 'Staff' ? staffId : null,
+    })
+    if (error) {
+      setMessage(`Could not save: ${error.message}`)
+    } else {
+      const staff = staffList.find((st) => st.staff_id === staffId)
+      setMessage(
+        type === 'Staff'
+          ? `${g.track} is staff ${staff ? `${staff.staff_no} – ${staff.full_name}` : (data as string)}: moved to the Staff tab. Now decide its later track_ids.`
+          : `${g.track} is a guest: moved to the Guest tab. Now decide its later track_ids.`,
+      )
+      setPicking(null)
+      setTab(type)
+    }
+    setBusy(false)
+    load()
+  }
 
   // ids must be oldest first, so a chain A → B → C always ends on A's track_id
   const merge = async (ids: string[]) => {
@@ -261,7 +352,9 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         One card per first track_id, earliest first. Below it: later track_ids that may be the same person, judged by
         their looks only: attire colour, face, whole body, and the texture of the head, chest and legs. Compare the
         photos. <b>Merge</b> gives the later track_id the first one, so the Dashboard counts
-        that person once. <b>Not same</b> makes it its own first track_id.
+        that person once. <b>Not same</b> makes it its own first track_id. First decide the first track_id:{' '}
+        <b>Leave as Guest</b> or <b>Is Staff</b> (pick the staff); the card moves to that tab, then decide its later
+        track_ids.
       </p>
       <div className="tabs">
         {VISIT_TABS.map((t) => (
@@ -329,11 +422,75 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
                     {g.camera} · first seen {fmtTime(g.seen)}
                   </span>
                   <span className="sp-muted">{person(g.keep)}</span>
+                  {decided(g) ? (
+                    <span className="sp-decided">
+                      Decided: {g.keep?.visit_type === 'Staff' ? 'Staff' : 'Guest'}
+                      {g.keep?.visit_type === 'Staff' && g.keep.staff
+                        ? ` · ${g.keep.staff.staff_no} – ${g.keep.staff.full_name}`
+                        : ''}
+                    </span>
+                  ) : (
+                    status === 'Open' && <span className="sp-undecided">Decide this first track_id first: Guest or Staff?</span>
+                  )}
+                  {status === 'Open' && (
+                    <span className="sp-actions">
+                      <button
+                        type="button"
+                        className="cam-toggle"
+                        disabled={busy}
+                        onClick={() => decide(g, 'Guest')}
+                      >
+                        Leave as Guest
+                      </button>
+                      <button
+                        type="button"
+                        className="cam-toggle"
+                        disabled={busy}
+                        onClick={() => setPicking(picking?.track === g.track ? null : { track: g.track, staffId: '' })}
+                      >
+                        Is Staff
+                      </button>
+                    </span>
+                  )}
+                  {status === 'Open' && picking?.track === g.track && (
+                    <span className="sp-staff-pick">
+                      <select
+                        aria-label={`Staff for ${g.track}`}
+                        value={picking.staffId}
+                        onChange={(e) => setPicking({ track: g.track, staffId: e.target.value })}
+                      >
+                        <option value="">
+                          {staffError
+                            ? `Could not load staff: ${staffError}`
+                            : staffList.length === 0
+                              ? 'No staff in this branch'
+                              : 'Choose the staff…'}
+                        </option>
+                        {staffList.map((st) => (
+                          <option key={st.staff_id} value={st.staff_id}>
+                            {st.staff_no} – {st.full_name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="cam-add"
+                        disabled={busy || !picking.staffId}
+                        onClick={() => decide(g, 'Staff', picking.staffId)}
+                      >
+                        Save as staff
+                      </button>
+                      <button type="button" className="cam-toggle" disabled={busy} onClick={() => setPicking(null)}>
+                        Cancel
+                      </button>
+                    </span>
+                  )}
                   {status === 'Open' && g.rows.length > 1 && (
                     <button
                       type="button"
                       className="cam-toggle sp-group-merge"
-                      disabled={busy}
+                      disabled={busy || !decided(g)}
+                      title={decided(g) ? undefined : 'Decide the first track_id (Guest or Staff) first'}
                       onClick={() => {
                         if (window.confirm(`Merge all ${g.rows.length} track_ids of this card into ${g.track}?`))
                           merge(g.rows.map((r) => r.suspect_match_id))
@@ -368,10 +525,22 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
                         {r.reason && <span className="sp-muted sp-reason">{r.reason}</span>}
                         {r.status === 'Open' ? (
                           <span className="sp-actions">
-                            <button type="button" className="cam-add" disabled={busy} onClick={() => merge([r.suspect_match_id])}>
+                            <button
+                              type="button"
+                              className="cam-add"
+                              disabled={busy || !decided(g)}
+                              title={decided(g) ? undefined : 'Decide the first track_id (Guest or Staff) first'}
+                              onClick={() => merge([r.suspect_match_id])}
+                            >
                               Merge
                             </button>
-                            <button type="button" className="cam-toggle" disabled={busy} onClick={() => notSame(r)}>
+                            <button
+                              type="button"
+                              className="cam-toggle"
+                              disabled={busy || !decided(g)}
+                              title={decided(g) ? undefined : 'Decide the first track_id (Guest or Staff) first'}
+                              onClick={() => notSame(r)}
+                            >
                               Not same
                             </button>
                           </span>

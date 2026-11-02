@@ -134,6 +134,38 @@
   margin-top: 6px;
 }
 
+/* First track_id: decide Guest / Staff before its later track_ids */
+.sp-decided {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.sp-undecided {
+  margin-top: 4px;
+  color: #b45309;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.sp-staff-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.sp-staff-pick select {
+  min-width: 220px;
+  max-width: 100%;
+}
+
 @media (max-width: 520px) {
   .sp-first,
   .sp-dup {
