@@ -9,10 +9,12 @@ import { TABLES } from './Usetable'
 //   was recognised (Body / Staff zone / Admin) and how sure. For each:
 //     Correct          it is that staff (stamps visit.type_confirmed_at: reviewed)
 //     Change staff     it is ANOTHER staff: pick the name (staff_no – full_name)
-//     Not staff → Guest  it is a customer: the visit becomes a Guest again with the track_id
-//                      the edge box first gave it (visit.edge_track_id) and moves to the
-//                      Guest tab; the edge box stops treating that person as a staff within
-//                      a minute and never makes them a staff again today.
+//     Leave as Guest   it is a customer: the visit becomes a Guest with a track_id of its
+//                      own again (the one the edge box first gave it, or a new one), so its
+//                      cctv_event rows count for that guest; its wrong recognition_event rows
+//                      are deleted (supabase/staff_review_guest.sql). It moves to the Guest
+//                      tab; the edge box stops treating that person as a staff within a
+//                      minute and never makes them a staff again today.
 //     A staff without a name (recognised by the Staff zone only): Give staff name.
 //   Guest tab → "Changed from Staff to Guest today": the visits an admin made Guests, with
 //   Is Staff to undo a mistake.
@@ -132,7 +134,7 @@ export default function StaffReview({
       const st = staffList.find((s) => s.staff_id === staffId)
       setMessage(
         type === 'Guest'
-          ? `${v.track_id} is not a staff: it is Guest ${data as string} again (Guest tab). The edge box stops treating this person as a staff within a minute.`
+          ? `${v.track_id} is not a staff: it is Guest ${data as string} now (Guest tab); its staff recognition records are deleted. The edge box stops treating this person as a staff within a minute.`
           : `${v.edge_track_id ?? v.track_id} is staff ${st ? `${st.staff_no} – ${st.full_name}` : (data as string)}.`,
       )
       setPicking(null)
@@ -186,9 +188,10 @@ export default function StaffReview({
       <p className="cam-count-note">
         {mode === 'staff' ? (
           <>
-            Every visit made a staff today, newest first. Check the photo: <b>Correct</b> if it is that staff,{' '}
-            <b>Change staff</b> if it is another staff, <b>Not staff → Guest</b> if it is a customer (it gets its own
-            track_id back, moves to the Guest tab, and the edge box never makes this person a staff again today).
+            Every visit recognised as a staff today, newest first: check each one by its photo. <b>Correct</b> if it
+            is that staff, <b>Change staff</b> if it is another staff, <b>Leave as Guest</b> if it is a customer (it
+            gets a track_id of its own, its events count as a guest, its wrong recognition records are deleted, it
+            moves to the Guest tab, and the edge box never makes this person a staff again today).
           </>
         ) : (
           <>Visits an admin changed from Staff to Guest today. <b>Is Staff</b> undoes a mistake.</>
@@ -254,7 +257,7 @@ export default function StaffReview({
                           {v.staff_id ? 'Change staff' : 'Give staff name'}
                         </button>
                         <button type="button" className="cam-toggle" disabled={busy} onClick={() => decide(v, 'Guest')}>
-                          Not staff → Guest
+                          Leave as Guest
                         </button>
                       </>
                     ) : (
