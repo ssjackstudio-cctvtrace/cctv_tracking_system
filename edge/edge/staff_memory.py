@@ -203,3 +203,47 @@ class StaffMemory:
                 added += 1
         if added or marked:
             log.info("Staff from Supabase today: %d remembered again, %d marked by an admin", added, marked)
+        self._admin_decisions(midnight)
+
+    def _admin_decisions(self, midnight: datetime) -> None:
+        """Decisions an admin made today on the Camera page (Suspicious same person → Staff tab:
+        "Not staff → Guest", or another staff name): applied to the people the box follows
+        right now, so the live video and every later event follow the admin at once."""
+        try:
+            rows = self.supa.select("visit", "visit_id,visit_type,staff_id,track_id",
+                                    branch_id=f"eq.{self.branch_id}",
+                                    type_confirmed_at=f"gte.{midnight.isoformat()}", limit="1000")
+        except Exception as exc:  # column not there yet / internet down: next minute
+            if str(exc) != self._warned:
+                log.warning("Admin staff decisions not read: %s", exc)
+                self._warned = str(exc)
+            return
+        bm = self.body_matcher
+        undone = renamed = 0
+        reg = self.registry
+        for r in rows:
+            with reg._lock:
+                v = reg._inside.get(r["visit_id"])
+                if v is None or v.left:
+                    continue
+                if r["visit_type"] == "Guest" and v.staff:
+                    # not a staff: back to the guest track_id the website gave back
+                    v.staff, v.staff_id, v.staff_no, v.staff_how = False, None, None, None
+                    v.track_id = r.get("track_id") or v.guest_track_id or v.track_id
+                    v.staff_zone_s = 0.0
+                    undone += 1
+                elif r["visit_type"] == "Staff" and r.get("staff_id") and r.get("staff_id") != v.staff_id:
+                    if not v.staff:
+                        v.guest_track_id = v.track_id
+                    v.staff, v.staff_id, v.staff_no, v.staff_how = True, r["staff_id"], r.get("track_id"), "Admin"
+                    v.track_id = r.get("track_id") or v.track_id
+                    renamed += 1
+                else:
+                    continue
+            if bm is not None:
+                if v.staff:
+                    bm.admin_staff(v, v.staff_id)
+                else:
+                    bm.admin_not_staff(v)
+        if undone or renamed:
+            log.info("Admin decisions applied: %d not staff (back to Guest), %d given a staff name", undone, renamed)

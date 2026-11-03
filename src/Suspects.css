@@ -191,3 +191,33 @@
     height: 90px;
   }
 }
+
+/* Staff tab: every staff recognition of today to check (StaffReview.tsx) */
+.sr {
+  margin: 4px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.sr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sr-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.sr-list {
+  max-height: 55vh;
+  overflow: auto;
+}
+
+.sr-item {
+  padding-left: 12px;
+}

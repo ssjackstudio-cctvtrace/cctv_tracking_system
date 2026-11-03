@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { Badge } from './Datatable'
 import { TABLES } from './Usetable'
+import StaffReview from './StaffReview'
 import './Suspects.css'
 
 // Suspicious same person (Camera page, below the cameras).
@@ -541,6 +542,14 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         )}
       </div>
       {message && <p className="cam-count-note">{message}</p>}
+
+      {/* Every staff recognition of today to check (Staff tab), and the ones made Guests (Guest tab) */}
+      {status === 'Open' && tab === 'Staff' && (
+        <StaffReview branchId={branchId} staffList={staffList} mode="staff" onChanged={load} />
+      )}
+      {status === 'Open' && tab === 'Guest' && (
+        <StaffReview branchId={branchId} staffList={staffList} mode="undone" onChanged={load} />
+      )}
 
       {!loaded ? (
         <p className="ds-empty">Loading…</p>

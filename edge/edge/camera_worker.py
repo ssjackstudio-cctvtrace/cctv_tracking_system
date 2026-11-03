@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 from .demographics import Demographics, Estimate
-from .plan import ShopPlan
+from .plan import ShopPlan, signed_distance
 from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
 from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, LEARN_SECONDS as BODY_LEARN_SECONDS, \
@@ -189,6 +189,12 @@ WATCH_MARGIN_PICTURE = float(os.getenv("WATCH_MARGIN_PICTURE", "0.08"))
 # Staff zone (shop plan area of kind "Staff", the staff side of the counter): a person seen
 # standing / sitting there this many seconds in total is a staff (customers do not go there)
 STAFF_ZONE_SECONDS = float(os.getenv("STAFF_ZONE_SECONDS", "15"))
+# ... but only time spent DEEP inside the Staff zone counts: at least STAFF_ZONE_DEPTH metres from its
+# lines with the feet seen, STAFF_ZONE_DEPTH_HEAD metres when the floor spot is worked out from the
+# head (legs hidden behind the counter: that spot can be ~0.5 m off). A customer paying at the
+# counter stands right at its line (and the cameras may put them a little inside it): never staff.
+STAFF_ZONE_DEPTH = float(os.getenv("STAFF_ZONE_DEPTH", "0.2"))
+STAFF_ZONE_DEPTH_HEAD = float(os.getenv("STAFF_ZONE_DEPTH_HEAD", "0.4"))
 
 # Only things that MOVE are people. A mannequin, a bag on a stand or a poster can
 # look like a person to the detector, but it never moves. A new tracker number
@@ -1469,6 +1475,12 @@ class CameraWorker(threading.Thread):
         v = self._link.get(p.tid)
         if v is None or v.left or v.staff or not st.staff_zone:
             return
+        zone = st.region.floor if st.region is not None else None
+        if p.floor is None or not zone:
+            return
+        need = STAFF_ZONE_DEPTH_HEAD if (p.est_feet or not p.full) else STAFF_ZONE_DEPTH
+        if -signed_distance(tuple(zone), p.floor) < need:
+            return  # near the zone's line (e.g. a customer at the counter): does not count
         with self.registry._lock:
             gap = now - v.staff_zone_at
             v.staff_zone_s += gap if gap < 1.0 else 0.0

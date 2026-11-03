@@ -685,8 +685,8 @@ class BodyMatcher(threading.Thread):
         key = (p.kind, p.person_id)
         with self._lock:
             st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
-            if st["done"] or key in st.get("blocked", ()):
-                return  # recognised already, or this person was undone for this visit
+            if st["done"] or key in st.get("blocked", ()) or (key[0] == "Staff" and st.get("no_staff")):
+                return  # recognised already, or this person was undone / marked Guest for this visit
             n_sum = st["votes"].setdefault(key, [0, 0.0])
             n_sum[0] += 1
             n_sum[1] += best["score"]
@@ -705,7 +705,9 @@ class BodyMatcher(threading.Thread):
                 log.info("%s looks like staff %s, but %s is followed elsewhere right now: not that staff",
                          visitor.track_id, p.label, other.track_id)
                 return
-            into = other  # that staff back again (not seen right now): same track_id for the day
+            # that staff back again (not seen right now): joined to their track_id for the day,
+            # but ONLY when this person surely looks like that staff looked today
+            into = None
             if other is not None:
                 same = self._same_look(visitor, other)
                 if same is False:
@@ -716,6 +718,8 @@ class BodyMatcher(threading.Thread):
                     return
                 if same is None and n_sum[0] < 2 * VOTES:
                     return  # nothing to compare with that staff's look today: wait for more votes
+                if same is True:
+                    into = other
         with self._lock:
             if st["done"]:
                 return
@@ -768,6 +772,10 @@ class BodyMatcher(threading.Thread):
         else:
             values = {"visit_type": "Member", "member_id": person.person_id, "staff_id": None}
         self.update("visit", values, camera_id=top["camera_id"], visit_id=f"eq.{visitor.visit_id}")
+        if person.kind == "Staff" and guest_track and guest_track != person.number:
+            # sent on its own: a missing column (staff_review.sql not run) never loses the Staff update
+            self.update("visit", {"edge_track_id": guest_track}, camera_id=top["camera_id"],
+                        visit_id=f"eq.{visitor.visit_id}")
         self.insert("recognition_event", {
             "camera_id": top["camera_id"],
             "visit_id": visitor.visit_id,
@@ -834,15 +842,20 @@ class BodyMatcher(threading.Thread):
 
     def zone_staff(self, visitor: Any, camera_id: str) -> None:
         """A person who stayed in the Staff zone (staff side of the counter) is a staff.
-        Which one: the on-duty staff their body looks most like, among those NOT followed
-        elsewhere right now; when the body cannot tell, the only on-duty staff not on the
-        floor right now; else a staff without a name (still not counted as a customer)."""
+        Which one: only the on-duty staff their BODY voted for (not followed elsewhere
+        right now). Otherwise a staff without a name, with their own track_id: an admin
+        gives the name on the Camera page (Staff tab → Recognised as staff today).
+        (Before, the box guessed: "the only staff not on the floor", or joined them to
+        a staff who was away. A customer standing at the counter could so become that
+        staff, and every camera then followed them as that staff.)"""
         if getattr(visitor, "staff", False):
             return
         with self._lock:
             people = [p for p in self._people if p.kind == "Staff"]
             st = self._visits.get(visitor.visit_id) or {"votes": {}, "best": {}}
-            votes = {k: v for k, v in st["votes"].items() if k[0] == "Staff"}
+            if st.get("no_staff"):
+                return  # an admin said: not a staff
+            votes = {k: v for k, v in st["votes"].items() if k[0] == "Staff" and k not in st.get("blocked", ())}
             best_of = dict(st["best"])
         now = time.time()
         busy = self.registry.staff_on_floor(now, STAFF_BUSY_SECONDS) if self.registry is not None else set()
@@ -851,11 +864,10 @@ class BodyMatcher(threading.Thread):
         if votes:
             key = max(votes, key=lambda k: (votes[k][0], votes[k][1]))
             pick = next((p for p in free if p.person_id == key[1]), None)
-        if pick is None and len(free) == 1:
-            pick = free[0]
         into = None
         if pick is not None and self.registry is not None:
-            into = self.registry.staff_visitor(pick.person_id, exclude=visitor.visit_id)
+            other = self.registry.staff_visitor(pick.person_id, exclude=visitor.visit_id)
+            into = other if other is not None and self._same_look(visitor, other) is True else None
         with self._lock:
             st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
             st["done"] = ("Staff", pick.person_id) if pick is not None else ("Staff", "")
@@ -865,24 +877,30 @@ class BodyMatcher(threading.Thread):
                              float((top.get("score") if isinstance(top, dict) else None) or 0.9),
                              into=into, how="Staff zone")
             return
-        hidden = self.registry.hidden_staff(now, STAFF_BUSY_SECONDS, exclude=visitor.visit_id) \
-            if self.registry is not None else []
-        back = hidden[0] if len(hidden) == 1 else None  # the only staff away right now: back again
-        self.mark_staff(visitor, back.staff_id if back else None, back.staff_no if back else None, "Staff zone")
-        values = {"visit_type": "Staff", "member_id": None}
-        if back is not None:
-            values.update(staff_id=back.staff_id, track_id=back.track_id)
-        self.update("visit", values, camera_id=camera_id, visit_id=f"eq.{visitor.visit_id}")
+        self.mark_staff(visitor, None, None, "Staff zone")
+        self.update("visit", {"visit_type": "Staff", "member_id": None}, camera_id=camera_id,
+                    visit_id=f"eq.{visitor.visit_id}")
         self.insert("recognition_event", {
             "camera_id": camera_id, "visit_id": visitor.visit_id, "match_score": 90.0, "result": "Matched",
             "method": "Staff zone", "event_time": _now(),
         })
-        if back is not None:
-            self.registry.merge(visitor, back)
-            log.info("%s stayed in the Staff zone: staff %s back again (same track_id today)",
-                     visitor.guest_track_id, back.track_id)
-            return
-        log.info("%s stayed in the Staff zone: a staff (which one could not be told)", visitor.track_id)
+        log.info("%s stayed in the Staff zone: a staff (name to be given on the Camera page)", visitor.track_id)
+
+    def admin_not_staff(self, visitor: Any) -> None:
+        """An admin said this visit is NOT a staff (Camera page → Leave as Guest): it is
+        never recognised as a staff again (by body or the Staff zone) while remembered."""
+        with self._lock:
+            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
+            st["done"], st["no_staff"] = None, True
+            st["votes"] = {k: v for k, v in st["votes"].items() if k[0] != "Staff"}
+            self._doubt.pop(visitor.visit_id, None)
+
+    def admin_staff(self, visitor: Any, staff_id: str) -> None:
+        """An admin gave this visit a staff (Camera page): body recognition keeps learning
+        that staff's look from it, no more votes."""
+        with self._lock:
+            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
+            st["done"], st["no_staff"] = ("Staff", staff_id), False
 
     def forget(self, visit_id: str) -> None:
         with self._lock:
