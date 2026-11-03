@@ -149,4 +149,5 @@ __pycache__/
 *_rknn_model/
 edge/*.mp4
 edge/models/
+edge/state/
 body_model/

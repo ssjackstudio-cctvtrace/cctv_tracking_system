@@ -36,6 +36,7 @@ from edge.live_server import LiveServer  # noqa: E402
 from edge.supa import Supabase  # noqa: E402
 from edge.uploader import PhotoUploader, SnapshotUploader, Writer  # noqa: E402
 from edge.visitors import KEEP_SECONDS, VisitorRegistry  # noqa: E402
+from edge.staff_memory import SAVE_SECONDS as STAFF_SAVE_SECONDS, StaffMemory  # noqa: E402
 
 log = logging.getLogger("main")
 
@@ -75,6 +76,14 @@ def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(threadName)s: %(message)s")
     settings = load_settings(offline=args.offline)
+    # sudo systemctl stop / restart sends SIGTERM: stop the same way as Ctrl+C, so the
+    # finally block below runs (today's staff are saved, the box is marked Offline)
+    import signal
+
+    def _stop(*_: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _stop)
 
     supa = None if args.offline else Supabase(settings.supabase_url, settings.supabase_secret_key)
     writer = Writer(supa)
@@ -289,6 +298,20 @@ def main() -> None:
             log.warning("Could not save people_inside (run supabase/people_inside.sql once): %s", exc)
         last_inside.update(value=now, at=time.time())
 
+    # Today's staff, remembered across a restart (edge/state/staff-<day>.json + Supabase): loaded
+    # BEFORE the cameras start, so a staff seen again gets their track_id back and a customer
+    # can never take the place of a staff the box already knows (edge/staff_memory.py)
+    branch_id = None
+    if supa:
+        try:
+            rows = supa.select("edge_device", "branch_id", edge_device_id=f"eq.{settings.edge_device_id}")
+            branch_id = rows[0].get("branch_id") if rows else None
+        except Exception as exc:
+            log.warning("Branch of this edge box not read: %s", exc)
+    staff_memory = StaffMemory(visitors, body_matcher, supa, branch_id)
+    staff_memory.load()
+    staff_memory.sync_db()
+
     sync_workers()
     if not workers:
         sys.exit("No cameras found for this EDGE_DEVICE_ID. Check the camera table (Step 4).")
@@ -338,6 +361,7 @@ def main() -> None:
                      names.get(a, a), names.get(b, b), metres, n, hint)
 
     next_refresh = next_status = next_close = next_suspect = 0.0
+    next_staff_save = time.time() + STAFF_SAVE_SECONDS
     next_gaps = time.time() + GAP_LOG_SECONDS
     open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
@@ -346,9 +370,13 @@ def main() -> None:
                 try:
                     heartbeat()
                     sync_workers()
+                    staff_memory.sync_db()  # e.g. an admin pressed "Is Staff" on the Camera page
                 except Exception as exc:  # internet down: keep counting, try again later
                     log.warning("Refresh / heartbeat failed: %s", exc)
                 next_refresh = time.time() + REFRESH_SECONDS
+            if time.time() >= next_staff_save:
+                staff_memory.save()
+                next_staff_save = time.time() + STAFF_SAVE_SECONDS
             if time.time() >= next_close:
                 close_lost()  # people unseen for KEEP_SECONDS: track_id ended
                 next_close = time.time() + 1
@@ -390,6 +418,7 @@ def main() -> None:
     finally:
         for w in workers.values():
             w.stop()
+        staff_memory.save()  # today's staff, for the next start
         deadline = time.time() + 10  # give unsent rows a moment to reach Supabase
         while writer.jobs.qsize() and time.time() < deadline:
             time.sleep(0.5)

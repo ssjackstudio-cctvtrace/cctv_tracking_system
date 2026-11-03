@@ -213,6 +213,28 @@ function floorOutline(cal: Calibration, image: Point[]): Point[] {
 
 const pts = (list: Point[]) => list.map((p) => `${p.x.toFixed(3)},${(-p.y).toFixed(3)}`).join(' ')
 
+// Plan corners snap to 5 cm while dragging
+const snap = (v: number) => Math.round(v * 20) / 20
+
+const polyArea = (p: Point[]) =>
+  Math.abs(p.reduce((s, a, i) => s + a.x * p[(i + 1) % p.length].y - p[(i + 1) % p.length].x * a.y, 0)) / 2
+
+// Where to write an area's name: its centre of mass (inside the area for the usual shapes)
+function labelSpot(p: Point[]): Point {
+  let a = 0
+  let cx = 0
+  let cy = 0
+  p.forEach((q, i) => {
+    const r = p[(i + 1) % p.length]
+    const f = q.x * r.y - r.x * q.y
+    a += f
+    cx += (q.x + r.x) * f
+    cy += (q.y + r.y) * f
+  })
+  if (Math.abs(a) < 1e-9) return { x: p.reduce((s, q) => s + q.x, 0) / p.length, y: p.reduce((s, q) => s + q.y, 0) / p.length }
+  return { x: cx / (3 * a), y: cy / (3 * a) }
+}
+
 // The calibration shown on the map for a camera: its saved floor when it is
 // placed on the plan; otherwise the same floor put at the suggested place.
 function mapCalibration(fa: FloorAreas, suggested: Place | undefined, draft?: Draft | null): Calibration | null {
@@ -258,6 +280,9 @@ export function FloorMap({
   const [planAreas, setPlanAreas] = useState<PlanAreas | null>(null)
   const [planDraft, setPlanDraft] = useState<PlanAreas | null>(null)
   const [planError, setPlanError] = useState('')
+  const [selected, setSelected] = useState<string | null>(null) // plan area being edited
+  // the areas drawn on each camera's PICTURE, laid onto the map (hidden by default once there are plan areas)
+  const [showPictureAreas, setShowPictureAreas] = useState(false)
 
   useEffect(() => {
     if (!camera.edge_device_id) return
@@ -369,7 +394,7 @@ export function FloorMap({
     if (d?.kind === 'plan' && planDraft) {
       const p = toPlan(e)
       if (!p) return
-      const q = { x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100 }
+      const q = { x: snap(p.x), y: snap(p.y) }
       setPlanDraft({
         ...planDraft,
         areas: planDraft.areas.map((a) => (a.id === d.area ? { ...a, pts: a.pts.map((pt, i) => (i === d.index ? q : pt)) } : a)),
@@ -455,8 +480,9 @@ export function FloorMap({
         ? { ...base, shop: base.shop.map((p) => ({ ...p })), areas: base.areas.map((a) => ({ ...a, pts: a.pts.map((p) => ({ ...p })) })) }
         : { version: 1, margin: DEFAULT_MARGIN, shop: [], areas: [] },
     )
+    setSelected(base?.areas[0]?.id ?? null)
     setMessage(
-      'Drag the white corners to where each area really is on the floor. Click a small dot on a line to add a corner, double-click a corner to remove it.',
+      'Pick an area (click it on the map or in the list), then drag its white corners to where it really is on the floor (they snap to 5 cm), or type the corners in metres. Click a small dot on a line to add a corner, double-click a corner to remove it.',
     )
   }
 
@@ -473,6 +499,12 @@ export function FloorMap({
       ...planDraft,
       areas: [...planDraft.areas, { id: `a${n}`, name: 'Purchasing', kind: 'Purchasing', pts: rect(cx - 0.5, cy - 0.5, cx + 0.5, cy + 0.5) }],
     })
+    setSelected(`a${n}`)
+  }
+
+  const setCorner = (id: string, index: number, axis: 'x' | 'y', v: number) => {
+    const a = planDraft?.areas.find((x) => x.id === id)
+    if (a) setPlanArea(id, { pts: a.pts.map((p, i) => (i === index ? { ...p, [axis]: v } : p)) })
   }
 
   const savePlan = async () => {
@@ -492,10 +524,13 @@ export function FloorMap({
     }
     setPlanAreas(value)
     setPlanDraft(null)
+    setSelected(null)
     setMessage('Shop areas saved on the plan. Every camera placed on the plan uses them within a minute.')
   }
 
   const shownPlan = planDraft ?? planAreas
+  // picture areas: shown when there is no plan yet, while adjusting a camera, or when ticked
+  const pictureAreasOn = !shownPlan || !!draft || showPictureAreas
 
   const vb = `${view.x0} ${-view.y1} ${view.x1 - view.x0} ${view.y1 - view.y0}`
   const stroke = Math.max(view.x1 - view.x0, view.y1 - view.y0) / 320 // ~1 px
@@ -525,7 +560,17 @@ export function FloorMap({
             drag.current = { kind: 'camera' }
           }}
         />
-        <text x={place.x + stroke * 8} y={-place.y - stroke * 8} fontSize={font} fontWeight={700} fill="#0f172a">
+        <text
+          x={place.x + stroke * 8}
+          y={-place.y - stroke * 8}
+          fontSize={font}
+          fontWeight={700}
+          fill="#0f172a"
+          stroke="#fff"
+          strokeWidth={stroke * 3}
+          paintOrder="stroke"
+          pointerEvents="none"
+        >
           {name}
         </text>
       </g>
@@ -580,60 +625,97 @@ export function FloorMap({
 
   const planShape = (a: PlanArea) => {
     const color = PLAN_COLORS[a.kind]
-    const cx = a.pts.reduce((s, p) => s + p.x, 0) / a.pts.length
-    const cy = a.pts.reduce((s, p) => s + p.y, 0) / a.pts.length
+    const c = labelSpot(a.pts)
     const editing = !!planDraft
+    const chosen = editing && selected === a.id
     return (
       <g key={`plan-${a.id}`}>
         <polygon
           points={pts(a.pts)}
           fill={color}
-          fillOpacity={a.kind === 'Staff' ? 0.35 : 0.22}
+          fillOpacity={chosen ? 0.4 : a.kind === 'Staff' ? 0.35 : 0.22}
           stroke={color}
-          strokeWidth={stroke * 2.5}
-        />
-        <text x={cx} y={-cy} fontSize={font} textAnchor="middle" fill={color} fontWeight={800}>
+          strokeWidth={stroke * (chosen ? 4 : 2.5)}
+          style={editing ? { cursor: 'pointer' } : undefined}
+          onClick={editing ? () => setSelected(a.id) : undefined}
+        >
+          <title>{`${a.name} (${a.kind})`}</title>
+        </polygon>
+        {/* white halo so the name stays readable over other areas and camera names */}
+        <text
+          x={c.x}
+          y={-c.y}
+          fontSize={font * Math.min(0.9, Math.max(0.55, Math.sqrt(polyArea(a.pts)) / 3))}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fill={color}
+          fontWeight={800}
+          stroke="#fff"
+          strokeWidth={stroke * 3}
+          paintOrder="stroke"
+          pointerEvents="none"
+        >
           {a.name}
         </text>
-        {editing &&
-          a.pts.map((pt, i) => {
-            const nx = a.pts[(i + 1) % a.pts.length]
-            return (
-              <g key={i}>
-                <circle
-                  className="fm-corner"
-                  cx={(pt.x + nx.x) / 2}
-                  cy={-(pt.y + nx.y) / 2}
-                  r={stroke * 3}
-                  fill={color}
-                  opacity={0.7}
-                  onClick={() =>
-                    setPlanArea(a.id, {
-                      pts: [...a.pts.slice(0, i + 1), { x: (pt.x + nx.x) / 2, y: (pt.y + nx.y) / 2 }, ...a.pts.slice(i + 1)],
-                    })
-                  }
-                >
-                  <title>Add a corner here</title>
-                </circle>
-                <circle
-                  className="fm-corner"
-                  cx={pt.x}
-                  cy={-pt.y}
-                  r={stroke * 5}
-                  fill="#fff"
-                  stroke={color}
-                  strokeWidth={stroke * 2}
-                  onPointerDown={(e) => {
-                    ;(e.target as Element).setPointerCapture?.(e.pointerId)
-                    drag.current = { kind: 'plan', area: a.id, index: i }
-                  }}
-                  onDoubleClick={() => a.pts.length > 3 && setPlanArea(a.id, { pts: a.pts.filter((_, j) => j !== i) })}
-                >
-                  <title>{`${a.name}: drag to move, double-click to remove`}</title>
-                </circle>
-              </g>
-            )
-          })}
+      </g>
+    )
+  }
+
+  // Corners of the chosen area, drawn last (on top of every other area)
+  const planCorners = (a: PlanArea) => {
+    const color = PLAN_COLORS[a.kind]
+    return (
+      <g key={`corners-${a.id}`}>
+        {a.pts.map((pt, i) => {
+          const nx = a.pts[(i + 1) % a.pts.length]
+          return (
+            <g key={i}>
+              <circle
+                className="fm-corner"
+                cx={(pt.x + nx.x) / 2}
+                cy={-(pt.y + nx.y) / 2}
+                r={stroke * 3.5}
+                fill={color}
+                opacity={0.8}
+                onClick={() =>
+                  setPlanArea(a.id, {
+                    pts: [...a.pts.slice(0, i + 1), { x: snap((pt.x + nx.x) / 2), y: snap((pt.y + nx.y) / 2) }, ...a.pts.slice(i + 1)],
+                  })
+                }
+              >
+                <title>Add a corner here</title>
+              </circle>
+              <circle
+                className="fm-corner"
+                cx={pt.x}
+                cy={-pt.y}
+                r={stroke * 6}
+                fill="#fff"
+                stroke={color}
+                strokeWidth={stroke * 2.5}
+                onPointerDown={(e) => {
+                  ;(e.target as Element).setPointerCapture?.(e.pointerId)
+                  drag.current = { kind: 'plan', area: a.id, index: i }
+                }}
+                onDoubleClick={() => a.pts.length > 3 && setPlanArea(a.id, { pts: a.pts.filter((_, j) => j !== i) })}
+              >
+                <title>{`${a.name} corner ${i + 1} (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)} m): drag to move, double-click to remove`}</title>
+              </circle>
+              <text
+                x={pt.x}
+                y={-pt.y}
+                fontSize={font * 0.6}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fill={color}
+                fontWeight={800}
+                pointerEvents="none"
+              >
+                {i + 1}
+              </text>
+            </g>
+          )
+        })}
       </g>
     )
   }
@@ -736,7 +818,11 @@ export function FloorMap({
       {planDraft && (
         <div className="fm-plan-list">
           {planDraft.areas.map((a) => (
-            <div key={a.id} className="fm-plan-row">
+            <div key={a.id}>
+            <div
+              className={selected === a.id ? 'fm-plan-row fm-plan-row--on' : 'fm-plan-row'}
+              onClick={() => setSelected(a.id)}
+            >
               <span className="fm-plan-swatch" style={{ background: PLAN_COLORS[a.kind] }} />
               <input
                 aria-label="Area name"
@@ -758,6 +844,31 @@ export function FloorMap({
               >
                 Delete
               </button>
+            </div>
+            {selected === a.id && (
+              <div className="fm-plan-corners">
+                <span className="fm-plan-note">Corners (metres from the ABT-04 corner: X along the front wall, Y up the side wall)</span>
+                {a.pts.map((p, i) => (
+                  <label key={i}>
+                    {i + 1}
+                    <input
+                      type="number"
+                      step={0.05}
+                      aria-label={`Corner ${i + 1} X`}
+                      value={p.x}
+                      onChange={(e) => Number.isFinite(Number(e.target.value)) && setCorner(a.id, i, 'x', Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      step={0.05}
+                      aria-label={`Corner ${i + 1} Y`}
+                      value={p.y}
+                      onChange={(e) => Number.isFinite(Number(e.target.value)) && setCorner(a.id, i, 'y', Number(e.target.value))}
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
             </div>
           ))}
           <div className="fm-plan-row">
@@ -863,17 +974,15 @@ export function FloorMap({
                   strokeDasharray={`${stroke * 2} ${stroke * 2}`}
                 />
               ))}
-              <text x={8.3} y={-2.2} fontSize={font * 1.2} fill="#c2410c" fontWeight={700} textAnchor="middle">
-                Traffic
-              </text>
+              {!shownPlan && (
+                <text x={8.3} y={-2.2} fontSize={font * 1.2} fill="#c2410c" fontWeight={700} textAnchor="middle">
+                  Traffic
+                </text>
+              )}
             </g>
           )}
-          {shownPlan && shownPlan.shop.length >= 3 && (
-            <polygon points={pts(shownPlan.shop)} fill="none" stroke="#0f172a" strokeWidth={stroke * 1.5} />
-          )}
-          {shownPlan?.areas.filter((a) => a.kind !== 'Staff').map(planShape)}
-          {shownPlan?.areas.filter((a) => a.kind === 'Staff').map(planShape)}
-          <g opacity={shownPlan && (placedNow || planDraft) ? 0.3 : 1}>
+          {pictureAreasOn && (
+          <g opacity={shownPlan ? 0.35 : 1}>
           {otherLayers.map(
             (l) => l.cal && l.fa.regions.map((r) => regionShape(l.cal!, r, false, `${l.camera.camera_id}-${r.id}`)),
           )}
@@ -882,6 +991,16 @@ export function FloorMap({
           )}
           {cal && regions.map((r) => regionShape(cal, r, true, r.id))}
           </g>
+          )}
+          {shownPlan && shownPlan.shop.length >= 3 && (
+            <polygon points={pts(shownPlan.shop)} fill="none" stroke="#0f172a" strokeWidth={stroke * 1.5} />
+          )}
+          {/* plan areas ON TOP of the picture areas: biggest first, the Staff zone last */}
+          {shownPlan?.areas
+            .slice()
+            .sort((a, b) => Number(a.kind === 'Staff') - Number(b.kind === 'Staff') || polyArea(b.pts) - polyArea(a.pts))
+            .map(planShape)}
+          {planDraft && planDraft.areas.filter((a) => a.id === selected).map(planCorners)}
           {cal && savedObstacles.map((o) => obstacleShape(cal, o, true, `s-${o.id}`))}
           {cal && !draft && liveObstacles.map((o, i) => obstacleShape(cal, o, false, `l-${i}`))}
           {otherLayers.map((l) => l.cal?.place && cameraMark(l.cal.place, l.camera.camera_name, false))}
@@ -906,6 +1025,20 @@ export function FloorMap({
           )}
         </svg>
       </div>
+      {shownPlan && (
+        <div className="fm-legend">
+          {PLAN_KINDS.map((k) => (
+            <span key={k}>
+              <span className="fm-plan-swatch" style={{ background: PLAN_COLORS[k] }} /> {k}
+              {k === 'Staff' ? ' (staff side of the counter)' : ''}
+            </span>
+          ))}
+          <label>
+            <input type="checkbox" checked={showPictureAreas} onChange={(e) => setShowPictureAreas(e.target.checked)} /> Also show the
+            areas drawn on each camera picture (faint)
+          </label>
+        </div>
+      )}
       <p className="cam-count-note fm-occupancy">
         Now on {camera.camera_name}: Purchasing {occupancy.Purchasing} · Counter (queue) {occupancy.Counter} · Traffic{' '}
         {occupancy.Traffic}

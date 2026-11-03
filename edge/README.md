@@ -515,6 +515,22 @@ says how far apart each pair of cameras puts the same person
   a hidden visitor's track_id back with a looser look match
   (`INSIDE_CONSERVE`), instead of a new track_id.
 
+### Staff after a restart (edge/staff_memory.py)
+
+Today's staff (track_id = staff_no, how they look today on each camera, the body
+samples learnt while they walked around) are saved to
+`edge/state/staff-<day>.json` every `STAFF_SAVE_SECONDS` and when the box stops,
+and read back when it starts again the same day. Today's Staff visits in
+Supabase (also "Is Staff" pressed by an admin) are remembered too, checked every
+minute. So after a restart:
+- a staff seen again (on the walkway, in Purchasing or at the Counter) gets the
+  SAME track_id back, by their look or by body recognition;
+- body recognition only gives a staff to a person who looks like that staff
+  looked TODAY (clothes, body, face): a customer in other clothes is never
+  taken for them. With nothing to compare yet (staff only known from
+  Supabase), twice as many body votes are needed.
+The file holds numbers only (no picture); files of older days are deleted.
+
 ### Stronger person detector (optional)
 
 `export_rknn.py` makes `yolo11s_rknn_model` (on an x86-64 Linux PC / WSL with

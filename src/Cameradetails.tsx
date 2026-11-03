@@ -196,8 +196,9 @@ export function CameraScreen({
 // from CCTV_EVENT since midnight today: Passed By = direction 'Passed By'
 // (walked onto the Traffic walkway), Walk-in = direction 'In'. People, not
 // rows: one person (visit = one track_id) is counted once, even when this
-// camera recorded them more than once. reloadKey changes when the edge box
-// says a new row was saved, so the numbers change at once.
+// camera recorded them more than once. Staff (visit.visit_type 'Staff') are
+// not counted. reloadKey changes when the edge box says a new row was saved,
+// so the numbers change at once.
 function usePeopleCount(cameraId: string, reloadKey = 0) {
   const [counts, setCounts] = useState({ passedBy: 0, in: 0 })
   const [error, setError] = useState('')
@@ -212,8 +213,9 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
         for (let from = 0; from < 20000; from += 1000) {
           const { data, error } = await supabase
             .from(TABLES.cctvEvent)
-            .select('visit_id')
+            .select('visit_id, visit!inner(visit_type)')
             .eq('camera_id', cameraId)
+            .neq('visit.visit_type', 'Staff')
             .in('direction', directions)
             .gte('event_time', startOfToday.toISOString())
             .range(from, from + 999)
@@ -247,7 +249,8 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
 // ---------- People Passed By / Walk-in timeline (today, 30-minute steps) ----------
 // Opening hours: 10:00 AM – 10:30 PM on Friday and Saturday, 10:00 AM – 10:00 PM other days.
 // Each person (visit_id) is counted once per direction, in the 30 minutes of
-// their first Passed By / In row from this camera today, like the cards above.
+// their first Passed By / In row from this camera today, like the cards above
+// (staff not counted).
 const SLOT_MINUTES = 30
 
 type TimelineSlot = { start: Date; passedBy: number; in: number }
@@ -268,8 +271,9 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
       for (let from = 0; from < 20000; from += 1000) {
         const { data, error } = await supabase
           .from(TABLES.cctvEvent)
-          .select('visit_id, direction, event_time')
+          .select('visit_id, direction, event_time, visit!inner(visit_type)')
           .eq('camera_id', cameraId)
+          .neq('visit.visit_type', 'Staff')
           .in('direction', ['Passed By', 'In'])
           .gte('event_time', open.toISOString())
           .lt('event_time', close.toISOString())
@@ -741,16 +745,14 @@ function drawPerson(ctx: CanvasRenderingContext2D, box: LiveBox, rec: TrackRecor
 }
 
 // "Store metrics" in the top-left corner of the live video: this camera's
-// People Passed By / Walk-in today, and the people inside the shop right now
-// (all cameras of the edge box, each person once)
-function drawMetrics(ctx: CanvasRenderingContext2D, passedBy: number, walkIn: number, inside: number | null | undefined) {
+// People Passed By / Walk-in today (staff not counted)
+function drawMetrics(ctx: CanvasRenderingContext2D, passedBy: number, walkIn: number) {
   const H = ctx.canvas.height
   const font = Math.max(11, Math.round(H * 0.028))
   const lines: [string, string][] = [
     ['STORE METRICS', '#cbd5e1'],
     [`Passed By: ${passedBy}`, OUT_COLOR],
     [`Walk-in: ${walkIn}`, IN_COLOR],
-    [`Inside now: ${inside ?? '—'}`, '#ffffff'],
   ]
   ctx.save()
   ctx.font = `700 ${font}px system-ui, sans-serif`
@@ -838,7 +840,7 @@ export default function CameraDetails({
     drawSpace(ctx, { ...space, grid: [], axes: [] }) // flat areas only: no floor grid / axes on the live video
     const shown = frame.boxes.filter((box) => box.visit || records.byTrack.has(box.track) || showAll)
     for (const box of shown) drawPerson(ctx, box, records.byTrack.get(box.track), floorAreas.calibration)
-    drawMetrics(ctx, people.passedBy, people.in, frame.inside)
+    drawMetrics(ctx, people.passedBy, people.in)
   }
 
   const cameraRows: [string, ReactNode][] = [

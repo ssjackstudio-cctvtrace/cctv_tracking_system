@@ -80,7 +80,7 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
-from .reid import BODY_MEAN, BODY_SIZE, BODY_STD, Recognizer, _even_light, _texture, _unit
+from .reid import BODY_MEAN, BODY_SIZE, BODY_STD, Recognizer, _even_light, _texture, _unit, comparable, compare
 from .supa import Supabase, SupabaseError
 
 log = logging.getLogger("biometrics")
@@ -408,7 +408,7 @@ class BodyMatcher(threading.Thread):
         self._people: list[_Person] = []
         self._vectors: dict[str, np.ndarray] = {}  # body_template_id → numbers (kept between reloads)
         self._live: dict[tuple[str, str], dict[str, list[tuple[str, np.ndarray]]]] = {}  # (kind, id) → live samples
-        self._live_day = date.today()
+        self._live_day = datetime.now(MYT).date()  # Malaysian day (the box clock may be UTC)
         self._visits: dict[str, dict] = {}  # visit_id → {"votes": {key: [n, score sum]}, "best": {...}, "done": key|None}
         self._warned = ""
         # Body model work, off the camera threads: (visitor, camera_id, part crops, learn?)
@@ -574,8 +574,8 @@ class BodyMatcher(threading.Thread):
                      ", ".join(p for p in PARTS if p not in shared))
         with self._lock:
             self._shared = shared
-            if date.today() != self._live_day:  # live samples are for one day (clothes change)
-                self._live, self._live_day = {}, date.today()
+            if datetime.now(MYT).date() != self._live_day:  # live samples are for one day (clothes change)
+                self._live, self._live_day = {}, datetime.now(MYT).date()
             for key, p in people.items():
                 p.live = self._live.setdefault(key, {})
             before = len(self._people)
@@ -706,6 +706,16 @@ class BodyMatcher(threading.Thread):
                          visitor.track_id, p.label, other.track_id)
                 return
             into = other  # that staff back again (not seen right now): same track_id for the day
+            if other is not None:
+                same = self._same_look(visitor, other)
+                if same is False:
+                    with self._lock:
+                        st["votes"].pop(key, None)
+                    log.info("%s looks like staff %s by body, but not like %s looked today (clothes / body / "
+                             "face): not that staff", visitor.track_id, p.label, other.track_id)
+                    return
+                if same is None and n_sum[0] < 2 * VOTES:
+                    return  # nothing to compare with that staff's look today: wait for more votes
         with self._lock:
             if st["done"]:
                 return
@@ -774,6 +784,16 @@ class BodyMatcher(threading.Thread):
             log.info("%s is staff %s back again: joined to their track_id for today", guest_track, person.label)
         log.info("%s recognised as %s %s by %s (%s°, %s, score %.0f%%)", guest_track, person.kind,
                  person.label, how.lower(), top.get("angle"), ", ".join(top.get("parts") or []) or "-", score * 100)
+
+    @staticmethod
+    def _same_look(visitor: Any, staff_visitor: Any) -> bool | None:
+        """Does this person look like the staff looked TODAY (clothes, body, face,
+        seen by the cameras since the shop opened, also before a restart)?
+        True = alike, False = clearly someone else, None = nothing to compare."""
+        a, b = getattr(visitor, "look", None), getattr(staff_visitor, "look", None)
+        if not comparable(a, b, cross=True):
+            return None
+        return compare(a, b, cross=True) is not None
 
     def mark_staff(self, visitor: Any, staff_id: str | None, staff_no: str | None, how: str) -> None:
         """The visitor is a staff from now on: remembered all day, not counted as a customer."""

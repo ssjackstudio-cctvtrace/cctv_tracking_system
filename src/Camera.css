@@ -860,6 +860,65 @@
   width: 72px;
 }
 
+/* the area being edited, and its corners in metres */
+.fm-plan-row {
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.fm-plan-row--on {
+  background: #eef2ff;
+  outline: 1px solid #a5b4fc;
+}
+
+.fm-plan-corners {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 4px 0 6px 28px;
+  font-size: 0.8rem;
+}
+
+.fm-plan-corners label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-weight: 700;
+}
+
+.fm-plan-corners input {
+  width: 64px;
+  padding: 3px 5px;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  font: inherit;
+}
+
+.fm-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: #334155;
+}
+
+.fm-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.fm-legend label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #64748b;
+}
+
 .fm-occupancy {
   margin-top: 8px;
   font-weight: 600;
