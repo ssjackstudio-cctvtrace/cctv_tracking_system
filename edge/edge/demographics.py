@@ -179,20 +179,26 @@ class Demographics:
         ages = ages / max(float(ages.sum()), 1e-9)
         return np.array([1 - female, female]), ages @ BODY_AGE_SPREAD
 
-    def from_whole_person(self, frame: np.ndarray, box: tuple[float, float, float, float]):
-        """All looks at one full-body person: [(gender_probs, age_probs, weight), ...]."""
+    def from_whole_person(self, frame: np.ndarray, box: tuple[float, float, float, float], body: bool = True):
+        """All looks at one person: [(gender_probs, age_probs, weight), ...].
+        body=False (legs hidden): the face only.
+        A face counts more the bigger (sharper) it is in the picture: a 36-pixel face
+        counts 0.5, a 72-pixel face or bigger 1.5, so a few clear faces outweigh
+        many tiny, blurry ones."""
         found = []
         face = self.from_person(frame, box)
         if face is not None:
-            found.append((face[0], face[1], 1.0))
-        body = self.from_body(frame, box)
-        if body is not None:
-            found.append((body[0], body[1], BODY_WEIGHT))
+            g, a, size = face
+            found.append((g, a, float(np.clip(size / 48.0, 0.5, 1.5))))
+        whole = self.from_body(frame, box) if body else None
+        if whole is not None:
+            found.append((whole[0], whole[1], BODY_WEIGHT))
         return found
 
     def from_person(self, frame: np.ndarray, box: tuple[float, float, float, float]):
-        """Gender and age-group probabilities from the face inside a person box
-        (pixels x1, y1, x2, y2), or None when no clear face is visible."""
+        """(gender probabilities, age-group probabilities, face size in pixels) from
+        the face inside a person box (pixels x1, y1, x2, y2), or None when no clear
+        face is visible."""
         if not self.enabled:
             return None
         h, w = frame.shape[:2]
@@ -219,4 +225,4 @@ class Demographics:
         gender_probs = self.gender.forward().flatten()
         self.age.setInput(blob)
         age_probs = self.age.forward().flatten()
-        return gender_probs, age_probs
+        return gender_probs, age_probs, float(min(fw, fh))

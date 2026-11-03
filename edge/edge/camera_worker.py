@@ -25,11 +25,13 @@ import cv2
 import numpy as np
 
 from .demographics import Demographics, Estimate
+from .plan import ShopPlan
 from .space3d import INSIDE_KINDS, OUT_OF_RANGE, TRAFFIC, Region, Space
 from .reid import Look, Recognizer, comparable, compare
 from .biometrics import EVERY_SECONDS as BODY_EVERY_SECONDS, LEARN_SECONDS as BODY_LEARN_SECONDS, \
     PER_FRAME as BODY_PER_FRAME, live_crops
-from .visitors import KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry, look_distance
+from .visitors import CONSERVE, CONSERVE_DISTANCE, KEEP_SECONDS, MAX_DISTANCE, Visitor, VisitorRegistry, \
+    look_distance
 
 log = logging.getLogger("camera")
 
@@ -47,7 +49,7 @@ PHOTO_EVERY_SECONDS = float(os.getenv("PERSON_PHOTO_EVERY_SECONDS", "10"))  # a 
 PHOTO_BETTER = 1.2  # replaced only by a photo at least 20% better
 PHOTO_MAX_WIDTH = 960  # whole camera picture, landscape, scaled down to this width (pixels)
 PHOTO_BOX = (0, 200, 255)  # BGR orange: the person's box and track_id label
-FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "8"))  # looks (face + whole body) averaged per visitor
+FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "16"))  # looks (face + whole body) averaged per visitor
 FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
 FACES_PER_FRAME = 1  # people looked at per frame (~0.15 s each on the CPU; keeps counting smooth)
 TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age sent
@@ -147,8 +149,10 @@ RECOGNIZE_PER_FRAME = int(os.getenv("RECOGNIZE_PER_FRAME", "1"))  # face + body 
 SWITCH_LOOKS = 2  # a linked tracker number that looks like ANOTHER person this many times in a row = tracker mixed people up
 FORGET_TRACK_SECONDS = 30  # tracker id not seen this long → forget it on this camera
 LINK_EVERY_SECONDS = 0.25  # how often an unlinked person is compared with the visitors remembered
-LOST_RELINK_SECONDS = min(10.0, KEEP_SECONDS)  # a linked person lost this recently ...
-RELINK_PICTURE_DISTANCE = 0.15  # ... and a new number this close (share of the picture), with the same look = same person
+# a linked person lost this recently (was 10 s) ...
+LOST_RELINK_SECONDS = min(float(os.getenv("LOST_RELINK_SECONDS", "20")), KEEP_SECONDS)
+# ... and a new number this close (share of the picture, was 0.15), with the same look = same person
+RELINK_PICTURE_DISTANCE = float(os.getenv("RELINK_PICTURE_DISTANCE", "0.20"))
 RELINK_BLIND_SECONDS = 1.5  # no look yet: only a number that appears right where they were lost, this soon
 # A followed person who sits down, crouches, lies down (desk-napping, sleeping) or picks up luggage gets a
 # very different box, and the tracker often gives them a NEW number on the same spot. A new number whose box
@@ -159,12 +163,32 @@ POSTURE_OVERLAP = float(os.getenv("POSTURE_OVERLAP", "0.4"))  # share of the sma
 # A new person's visit is only made after this long, so a camera whose view
 # overlaps another camera's has time to see that it is someone already inside
 NEW_VISITOR_HOLD_SECONDS = float(os.getenv("NEW_VISITOR_HOLD_SECONDS", "1.0"))
+# Someone inside whose legs stay hidden (sitting behind the counter, standing behind a display)
+# never shows the whole body: after this long inside, their visit is made from the head anyway
+PARTIAL_VISIT_SECONDS = float(os.getenv("PARTIAL_VISIT_SECONDS", "3.0"))
 
 # Shop areas (camera.floor_areas → regions): the feet must stay in an area this
 # long before the visitor counts as being there. Purchasing / Counter = In,
 # Traffic = Passed By, anywhere else = Out of Range (Out), see _walk_regions
 REGION_STEADY_FRAMES = 3
 REGION_MIN_SECONDS = float(os.getenv("REGION_MIN_SECONDS", "1.0"))
+# Touching an area's line counts as being in it. Shop plan areas (branch.plan_areas): their own
+# "margin" (metres). Areas drawn on the camera picture: this share of the picture height.
+REGION_MARGIN_PICTURE = float(os.getenv("REGION_MARGIN_PICTURE", "0.02"))
+# Out (Out of Range) only after the person stayed out of every area this long, and no camera
+# with a better view saw them inside meanwhile (a short step into a gap / a wrong foot point
+# behind a display no longer closes the visit)
+OUT_CONFIRM_SECONDS = float(os.getenv("OUT_CONFIRM_SECONDS", "3.0"))
+# People not worth following: their floor spot is further than WATCH_MARGIN metres from the shop
+# and the walkway on the shop plan (other shops, the far side of the mall, the escalator), or,
+# for a camera not placed on the plan, further than WATCH_MARGIN_PICTURE (share of the picture)
+# from every area drawn on its picture. off = follow everyone the camera sees.
+WATCH_AREA = os.getenv("WATCH_AREA", "on").strip().lower() not in ("off", "0", "false", "no")
+WATCH_MARGIN = float(os.getenv("WATCH_MARGIN", "1.0"))
+WATCH_MARGIN_PICTURE = float(os.getenv("WATCH_MARGIN_PICTURE", "0.08"))
+# Staff zone (shop plan area of kind "Staff", the staff side of the counter): a person seen
+# standing / sitting there this many seconds in total is a staff (customers do not go there)
+STAFF_ZONE_SECONDS = float(os.getenv("STAFF_ZONE_SECONDS", "15"))
 
 # Only things that MOVE are people. A mannequin, a bag on a stand or a poster can
 # look like a person to the detector, but it never moves. A new tracker number
@@ -173,7 +197,11 @@ REGION_MIN_SECONDS = float(os.getenv("REGION_MIN_SECONDS", "1.0"))
 # STATIC_SECONDS it is an object: ignored on this camera from then on (not shown,
 # no track_id, no events). Should it move after all, it becomes a person.
 MOVE_CHECK = os.getenv("MOVE_CHECK", "on").strip().lower() not in ("off", "0", "false", "no")
-MOVE_MIN_SHARE = float(os.getenv("MOVE_MIN_SHARE", "0.15"))  # 0.15 of a 1.7 m person ≈ 25 cm
+MOVE_MIN_SHARE = float(os.getenv("MOVE_MIN_SHARE", "0.10"))  # 0.10 of a 1.7 m person ≈ 17 cm (was 0.15)
+# MOVE_CHECK=obstacles: only a detection standing on a SAVED obstacle (Floor map, e.g. a
+# mannequin / bag stand) has to move first; everyone else is a person straight away (people
+# standing still at the counter or a shelf were taken for objects and never counted)
+MOVE_ONLY_ON_OBSTACLES = os.getenv("MOVE_CHECK", "on").strip().lower() == "obstacles"
 STATIC_SECONDS = float(os.getenv("STATIC_SECONDS", "8"))
 MOVE_FRAMES = 2  # the move must be seen this many frames in a row (one odd box is not a move)
 MOVE_SIZE_RANGE = (0.7, 1.4)  # box height vs. first box: outside this the box was cut / covered, not moved
@@ -194,6 +222,11 @@ MAX_BODY_WIDTH = float(os.getenv("MAX_BODY_WIDTH", "1.1"))  # metres
 # height (or AVG_PERSON_HEIGHT when the feet are behind a saved obstacle), so the
 # position does not jump and the person stays in the right area.
 AVG_PERSON_HEIGHT = float(os.getenv("AVG_PERSON_HEIGHT", "1.65"))  # metres
+SEATED_HEIGHT = float(os.getenv("SEATED_HEIGHT", "1.25"))  # metres: top of the head of someone sitting
+# Feet hidden, height not known yet: always = take the average height (sitting: SEATED_HEIGHT) so the
+# person still gets a floor spot / area (staff behind the counter, shoppers behind a display);
+# obstacles = only behind a saved obstacle (as before)
+FEET_FROM_HEAD = os.getenv("FEET_FROM_HEAD", "always").strip().lower()
 OBSTACLE_SHORT = 1.45  # metres: a box ending on an obstacle and "shorter" than this = legs hidden behind it
 
 # Obstacles: every OBSTACLE_SECONDS the box also looks for furniture / objects
@@ -452,6 +485,9 @@ class _RegionState:
     candidate: str | None = None
     streak: int = 0
     since: float = 0.0
+    entered: float = 0.0  # when the steady spot became the current one
+    staff_zone: bool = False  # the spot is the Staff zone of the shop plan
+    quality: float = 0.0  # how good this camera's view of the person is (0-1), see _view_quality
 
 
 @dataclass
@@ -501,6 +537,9 @@ class CameraWorker(threading.Thread):
         self._last_look: dict[int, float] = {}  # tracker id → last time its face / body was checked
         # 3D floor + shop areas; the automatic floor (camera 3.25 m high) until the Camera page saves one
         self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
+        # Shop areas drawn once on the shop plan (branch.plan_areas), for cameras placed on the plan
+        self.plan = ShopPlan.from_json(camera.get("plan_areas"))
+        self._wh = (0, 0)  # picture width, height
         self._heights: dict[int, list[float]] = {}  # tracker id → body heights measured with the feet seen
         self.stop_event = threading.Event()
         self.last_frame_at = 0.0  # used for camera.last_seen_at
@@ -620,14 +659,18 @@ class CameraWorker(threading.Thread):
         if y2 - y1 < MIN_BODY_PIXELS * 0.6:
             return
         height = known
-        if height is None and self.space.behind_obstacle((x1 / w, y1 / h, x2 / w, y2 / h)) is not None:
-            height = AVG_PERSON_HEIGHT
+        if height is None and (FEET_FROM_HEAD == "always"
+                               or self.space.behind_obstacle((x1 / w, y1 / h, x2 / w, y2 / h)) is not None):
+            # sitting / crouching (box not tall like a standing person): the head is lower
+            height = AVG_PERSON_HEIGHT if (y2 - y1) / max(x2 - x1, 1.0) >= 1.7 else SEATED_HEIGHT
         if height is None:
             return
         floor = self.space.floor_from_head(p.head, height)
         foot = self.space.to_picture(floor[0], floor[1], 0.0) if floor is not None else None
-        # the worked-out feet must be BELOW the bottom of the box (really hidden) and in the picture
-        if foot is None or not (-0.02 <= foot[0] <= 1.02 and y2 / h - 0.01 <= foot[1] <= 1.05):
+        # the worked-out feet must be BELOW the bottom of the box (really hidden) and in the picture,
+        # or below its bottom edge when the box is cut by it (someone close to the camera)
+        low = 1.6 if y2 >= h * BOTTOM_EDGE else 1.05
+        if foot is None or not (-0.02 <= foot[0] <= 1.02 and y2 / h - 0.01 <= foot[1] <= low):
             return
         p.floor, p.height, p.foot, p.est_feet = floor, height, foot, True
 
@@ -645,6 +688,10 @@ class CameraWorker(threading.Thread):
         if camera.get("floor_areas") != self.camera.get("floor_areas"):
             self.space = Space.from_json(camera.get("floor_areas")) or Space.automatic()
             self._regions.clear()
+        if camera.get("plan_areas") != self.camera.get("plan_areas"):
+            self.plan = ShopPlan.from_json(camera.get("plan_areas"))
+            self._regions.clear()
+            log.info("shop plan areas %s", "loaded" if self.plan else "removed")
         self.camera = camera
 
     def stop(self) -> None:
@@ -696,6 +743,7 @@ class CameraWorker(threading.Thread):
             now = time.time()
             self.last_frame_at = now
             h, w = frame.shape[:2]
+            self._wh = (w, h)
 
             # Camera closed? (the picture turns almost all black)
             if now - last_dark_check >= 1:
@@ -749,6 +797,9 @@ class CameraWorker(threading.Thread):
                         kp_xy[i] if kp_xy is not None else None, kp_conf[i] if kp_conf is not None else None, w, h,
                     ))
             people, waiting = self._moving(people, now)  # only people who move; objects are dropped
+            if WATCH_AREA:  # nobody far outside the shop / walkway (other shops, the mall beyond)
+                people = [p for p in people if self._watched(p)]
+                waiting = [p for p in waiting if self._watched(p)]
             by_tid = {p.tid: p for p in people}
 
             self._identify(frame, people, now)
@@ -806,7 +857,10 @@ class CameraWorker(threading.Thread):
             if m.peak < PERSON_CONF_PEAK:
                 waiting.append(p)  # detector never sure yet: may be an object (a trolley, a bag)
                 continue
-            if not MOVE_CHECK:
+            if not MOVE_CHECK or (MOVE_ONLY_ON_OBSTACLES and not m.moving and not self._on_obstacle(p.box)) \
+                    or (not m.moving and self._in_staff_zone(p)):
+                # (staff sit still behind the counter for minutes: never taken for an object there)
+                m.moving, m.static = True, False
                 moving.append(p)
                 continue
             if not m.moving:
@@ -832,6 +886,24 @@ class CameraWorker(threading.Thread):
         for tid in [t for t, m in self._motion.items() if now - m.seen > FORGET_TRACK_SECONDS]:
             del self._motion[tid]
         return moving, waiting
+
+    def _in_staff_zone(self, p: Person) -> bool:
+        """The person's floor spot is in the Staff zone of the shop plan."""
+        return self._plan_on() and p.floor is not None and self.plan.locate(p.floor).staff_zone  # type: ignore[union-attr]
+
+    def _on_obstacle(self, box: tuple[float, float, float, float]) -> bool:
+        """The box stands on / covers a saved obstacle (mannequin, stand, table)."""
+        w, h = self._wh
+        if not self.space.obstacles or not w or not h:
+            return False
+        x1, y1, x2, y2 = box[0] / w, box[1] / h, box[2] / w, box[3] / h
+        area = max((x2 - x1) * (y2 - y1), 1e-9)
+        for o in self.space.obstacles:
+            ox1, oy1, ox2, oy2 = o.box
+            inter = max(0.0, min(x2, ox2) - max(x1, ox1)) * max(0.0, min(y2, oy2) - max(y1, oy1))
+            if inter / area >= 0.5:
+                return True
+        return False
 
     def _scan_obstacles(self, frame: np.ndarray, now: float) -> None:
         """Furniture / objects standing on the floor, and "people" that never
@@ -892,6 +964,7 @@ class CameraWorker(threading.Thread):
             "area": "in" if st is not None and st.kind in INSIDE_KINDS else (
                 "out" if st is not None and st.kind is not None else None),
             "visit": v is not None,  # linked to a visitor (has a visit row / track_id)
+            "staff": bool(v is not None and v.staff),
             "full": p.full,
             "est": p.est_feet,  # feet hidden: floor spot worked out from the head
             "xyz": [round(p.floor[0], 2), round(p.floor[1], 2), round(p.height or 1.7, 2)] if p.floor else None,
@@ -909,6 +982,9 @@ class CameraWorker(threading.Thread):
         people the box remembers, learn how people look."""
         cam_id = self.camera["camera_id"]
         present = {p.tid for p in people}
+        for tid, v in list(self._link.items()):  # merged into another visitor (e.g. a staff back again)
+            if v.merged_into is not None:
+                self._link[tid] = v.resolved()
         for tid in [t for t, v in self._link.items() if v.left]:  # track_id ended (unseen KEEP_SECONDS)
             del self._link[tid]
             if tid in present:
@@ -1146,8 +1222,10 @@ class CameraWorker(threading.Thread):
                     self._camera_in(v, conf, tid, when)
                 continue
             p = by_tid.get(tid)
-            if p is None or not p.full or now - when < NEW_VISITOR_HOLD_SECONDS:
-                continue  # hidden / not full body yet / still waiting
+            if p is None or now - when < NEW_VISITOR_HOLD_SECONDS:
+                continue  # hidden / still waiting
+            if not p.full and not (p.est_feet and now - when >= PARTIAL_VISIT_SECONDS):
+                continue  # whole body not seen yet (legs hidden: after PARTIAL_VISIT_SECONDS inside)
             del self._pending[tid]
             conf = conf or p.conf
             if tid not in self._look and self._recog is not None:
@@ -1158,6 +1236,10 @@ class CameraWorker(threading.Thread):
                 v = self.registry.match(sig, self._plan(p), exclude=busy, now=now, inside_only=True,
                                         camera_id=cam_id) or \
                     self.registry.reclaim(sig, self._plan(p), busy, now, camera_id=cam_id)
+                if v is None and CONSERVE and tid not in self._from_outside:
+                    # nobody appears in the middle of the shop: a hidden visitor with a loose match
+                    v = self.registry.reclaim(sig, self._plan(p), busy, now, camera_id=cam_id,
+                                              limit=CONSERVE_DISTANCE)
                 if v is not None:
                     self._attach(tid, v, now, "recognised, back after being hidden")
                     self.registry.seen(v, cam_id, now, self._plan(p), p.height, p.conf)
@@ -1305,37 +1387,104 @@ class CameraWorker(threading.Thread):
 
     # ---------- Shop areas (3D regions) → In / Passed By / Out ----------
     def _walk_regions(self, frame: np.ndarray, people: list[Person], now: float) -> None:
-        """Where each full-body person stands steadily (REGION_STEADY_FRAMES
-        frames and REGION_MIN_SECONDS): a Purchasing / Counter area (inside
-        the shop), the Traffic walkway, or Out of Range (no area there; on an
-        inside-only camera that is Purchasing). Then:
+        """Where each person stands steadily (REGION_STEADY_FRAMES frames and
+        REGION_MIN_SECONDS): a Purchasing / Counter area (inside the shop), the
+        Traffic walkway, or Out of Range. Then:
           inside              → In (new visitor, came back, or the other kind of area)
           inside → Traffic    → Passed By, track_region Traffic (the stay ends)
-          inside → Out of Range → Out, track_region Out of Range
-        Only people whose feet are confirmed on the floor (p.full), or worked
-        out from the head when hidden behind a table / another shopper
-        (p.est_feet); otherwise they keep the spot they were in."""
-        if self.space is None or not self.space.counting:
+          inside → Out of Range → Out, track_region Out of Range (after OUT_CONFIRM_SECONDS)
+        Where (see _locate): on the SHOP PLAN when this camera is placed on it and the
+        branch has plan areas (one outline per area for all cameras, in metres), else
+        the outlines drawn on this camera's picture. Touching an area's line counts.
+        Only people whose feet are confirmed on the floor (p.full), or worked out from
+        the head when hidden (p.est_feet); otherwise they keep the spot they were in.
+        A person seen by 2+ cameras: the camera with the best view decides (_act)."""
+        if self.space is None or not (self.space.counting or self._plan_on()):
             return
+        h = frame.shape[0]
         for p in people:
             if not p.full and not p.est_feet:
                 continue  # partly hidden, feet unknown: keep the area they were in
-            r = self.space.region_at(p.foot, None, p.height)  # flat: the feet point in the outline drawn on the picture
-            kind = self.space.kind_at(r)
+            key, r, kind, staff_zone = self._locate(p)
             if kind == TRAFFIC:
                 self._from_outside.add(p.tid)  # on the walkway: walked in from outside
-            key = r.id if r is not None else ""
             st = self._regions.setdefault(p.tid, _RegionState())
+            st.quality = self._view_quality(p, h)
             if key == st.current:
                 st.candidate, st.streak = None, 0
+                st.region, st.staff_zone = r, staff_zone  # same area (a plan area keeps its outline)
             else:
                 if key != st.candidate:
                     st.candidate, st.streak, st.since = key, 0, now
                 st.streak += 1
                 if st.streak >= REGION_STEADY_FRAMES and now - st.since >= REGION_MIN_SECONDS:
                     st.current, st.region, st.kind, st.candidate, st.streak = key, r, kind, None, 0
+                    st.entered, st.staff_zone = st.since, staff_zone
             if st.current is not None:
+                self._staff_zone(p, st, now)
                 self._act(frame, p, st, now)
+
+    def _plan_on(self) -> bool:
+        """The shop plan areas decide the areas on this camera (placed on the plan)."""
+        return self.plan is not None and self.space is not None and self.space.shared and self.space.calibrated
+
+    def _locate(self, p: Person) -> tuple[str, Region | None, str, bool]:
+        """(area key, area, track_region, in the Staff zone) of a person's feet."""
+        if self._plan_on() and p.floor is not None:
+            spot = self.plan.locate(p.floor)  # type: ignore[union-attr]
+            if spot.area is not None:
+                a = spot.area
+                r = Region(id=f"plan:{a.id}", name=a.name, kind=spot.kind, image=(), floor=a.pts)
+                return r.id, r, spot.kind, spot.staff_zone
+            if spot.kind != OUT_OF_RANGE:  # shop floor between two areas: inside, never Out
+                return "plan:shop", Region(id="plan:shop", name="Shop floor", kind=spot.kind, image=(), floor=None), \
+                    spot.kind, False
+            return "", None, OUT_OF_RANGE, False
+        r = self.space.region_near(p.foot, p.feet, REGION_MARGIN_PICTURE)
+        return (r.id if r is not None else ""), r, self.space.kind_at(r), False
+
+    def _view_quality(self, p: Person, h: int) -> float:
+        """How well this camera sees where this person stands (0-1): feet seen beats
+        feet worked out from the head; a big person near the middle of the picture
+        beats a small one at the edge, where the round lens bends the floor most."""
+        x1, y1, x2, y2 = p.box
+        q = 1.0 if p.full else 0.55
+        q *= 0.4 + 0.6 * min(1.0, (y2 - y1) / max(0.45 * h, 1.0))
+        q *= 1.0 - 0.5 * min(1.0, math.hypot(p.foot[0] - 0.5, p.foot[1] - 0.55) / 0.75)
+        return round(q, 3)
+
+    def _watched(self, p: Person) -> bool:
+        """Worth following? Someone already linked always is. Otherwise their floor spot
+        must be near the shop / walkway (shop plan), or near an area drawn on the picture."""
+        if p.tid in self._link or not (p.full or p.est_feet):
+            return True  # feet unknown: cannot tell yet
+        if self._plan_on() and p.floor is not None:
+            return self.plan.watched(p.floor, WATCH_MARGIN)  # type: ignore[union-attr]
+        if self.space.inside_only or not self.space.regions:
+            return True
+        return self.space.region_near(p.foot, p.feet, WATCH_MARGIN_PICTURE) is not None
+
+    def _staff_zone(self, p: Person, st: _RegionState, now: float) -> None:
+        """Time a linked person spends in the Staff zone; long enough = staff."""
+        v = self._link.get(p.tid)
+        if v is None or v.left or v.staff or not st.staff_zone:
+            return
+        with self.registry._lock:
+            gap = now - v.staff_zone_at
+            v.staff_zone_s += gap if gap < 1.0 else 0.0
+            v.staff_zone_at = now
+            due = v.staff_zone_s >= STAFF_ZONE_SECONDS
+        if not due:
+            return
+        if self.body_matcher is not None and hasattr(self.body_matcher, "zone_staff"):
+            self.body_matcher.zone_staff(v, self.camera["camera_id"])
+            return
+        with self.registry._lock:  # no body recognition: a staff without a name
+            v.guest_track_id, v.staff, v.staff_how = v.track_id, True, "Staff zone"
+        if self.update:
+            self.update("visit", {"visit_type": "Staff", "member_id": None}, camera_id=self.camera["camera_id"],
+                        visit_id=f"eq.{v.visit_id}")
+        log.info("person %s (%s) stayed in the Staff zone: a staff", p.tid, v.track_id)
 
     def _act(self, frame: np.ndarray, p: Person, st: _RegionState, now: float) -> None:
         """Events for one person steadily in a spot (see _walk_regions)."""
@@ -1343,6 +1492,9 @@ class CameraWorker(threading.Thread):
         v = self._link.get(tid)
         if v is not None and v.left:
             v = None
+        # Seen by another camera with a clearly better view right now: that camera decides
+        if v is not None and not self.registry.area_authority(v, cam_id, st.quality, st.kind or "", now):
+            return
         inside = True if st.kind in INSIDE_KINDS else (False if st.kind == TRAFFIC else None)
         if inside:
             if v is None:  # new person? recognised or made a visit in _make_visitors
@@ -1352,6 +1504,8 @@ class CameraWorker(threading.Thread):
             return
         # Outside the shop: the Traffic walkway, or Out of Range
         out_of_range = inside is None
+        if out_of_range and now - st.entered < OUT_CONFIRM_SECONDS:
+            return  # not sure yet: may be a gap / a wrong foot point for a moment
         linked = v is not None
         if v is None:
             if tid not in self._pending:
@@ -1462,15 +1616,18 @@ class CameraWorker(threading.Thread):
             return v.estimate if v is not None and not v.left else self._estimates.setdefault(p.tid, Estimate())
 
         # Full-body people who still need looks, those with the fewest first
+        # Whole body seen: face + whole-body model. Legs hidden (behind the counter, a display,
+        # sitting) but the head seen: the face alone (it was never looked at before).
+        h = frame.shape[0]
         due = [
             p for p in people
-            if p.full and estimate_of(p).samples < FACE_SAMPLES
+            if (p.full or not cut_head(p.box[1], h)) and estimate_of(p).samples < FACE_SAMPLES
             and now - self._last_look.get(p.tid, 0.0) >= FACE_EVERY_SECONDS
         ]
-        due.sort(key=lambda p: estimate_of(p).samples)
+        due.sort(key=lambda p: (estimate_of(p).samples, not p.full))
         for p in due[:FACES_PER_FRAME]:
             self._last_look[p.tid] = now
-            found = demo.from_whole_person(frame, p.box)
+            found = demo.from_whole_person(frame, p.box, body=p.full)
             v = self._link.get(p.tid)
             est = estimate_of(p)
             with self.registry._lock:

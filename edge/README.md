@@ -462,6 +462,66 @@ share one floor and a person seen by 2 cameras lands on one spot).
 worked out from their head. The live video shows Store metrics (Passed By,
 Walk-in, Inside now) in its corner instead of the small floor map.
 
+### Shop areas on the plan (one outline per area for all cameras)
+
+Areas drawn on a camera's PICTURE are seen in perspective: a line on the floor
+of a tilted, round-lens picture lands a little elsewhere on the real floor, and
+each camera drew its own. Where 2 cameras overlap, one person could be in
+Counter on ABT-02 and in Purchasing on ABT-04 at the same moment, or "Out of
+Range" in a gap between two areas while still inside. So the areas are now
+drawn ONCE on the shop plan, in metres, top view (`branch.plan_areas`,
+`supabase/plan_areas.sql`): **Edit areas on plan** → drag corners (click the
+small dot on a line to add a corner, double-click a corner to remove it), set
+each area's kind, **Save areas on plan**. Kinds: Purchasing, Counter (In),
+Traffic (walkway: Passed By), **Staff** (staff-only side of the counter:
+recorded as Counter; anyone there for `STAFF_ZONE_SECONDS` is a staff).
+
+This is still 2D (the floor), not 3D: people stand on the floor, so their
+FEET on the floor decide the area. The camera's height (3.25 m) and tilt are
+only used to turn the feet in the picture into a floor spot; the area itself
+needs no height. A camera uses the plan areas once it is **placed on the plan**
+(Adjust on map → Save to camera); until then it uses the areas on its picture.
+How the box decides (`edge/plan.py`, `camera_worker._locate`):
+1. inside an outline → that area (Staff zone before Counter, small before large);
+2. within the plan's margin (default 0.25 m) of an area's line → that area
+   (touching the line counts);
+3. inside the shop walls but in no area → Purchasing (a gap never makes an Out);
+4. else Out of Range, and Out only after `OUT_CONFIRM_SECONDS`.
+When 2+ cameras see the person, the camera with the best view (feet seen, big,
+near the middle of its picture) decides (`AREA_FUSE_SECONDS`). People further
+than `WATCH_MARGIN` metres from the shop and walkway (other shops, the far side
+of the mall) are not followed at all (`WATCH_AREA`). Every 5 minutes the log
+says how far apart each pair of cameras puts the same person
+(`shop plan: ABT-02 and ABT-04 put the same person 0.84 m apart`): above
+~0.5 m, adjust one of them on the map (X / Y / Facing / Tilt).
+
+### Memory, staff and track_ids (TRACK_KEEP / PASSER_KEEP / staff all day)
+
+- Customers inside: remembered 15 min after the last camera saw them
+  (`TRACK_KEEP_SECONDS=900`); passers-by who never walked in: 1 min
+  (`PASSER_KEEP_SECONDS=60`); walked in then out: `OUTSIDE_KEEP_SECONDS`.
+- Staff: remembered the whole operating day, until `SHOP_CLOSE` /
+  `SHOP_CLOSE_FRI_SAT` (Malaysia time). A staff back from a break who first
+  gets a new track_id is joined to their track_id for the day as soon as the
+  body recognition (or the Staff zone) knows them.
+- One staff = one person: a staff followed by a camera right now can never
+  also be another person (a customer in similar clothes), `STAFF_BUSY_SECONDS`.
+- A wrong staff is undone: recognised by body, then `STAFF_REVOKE_LOOKS` looks
+  in a row that do not match that staff → Guest again (recognition_event
+  result Not Matched). `recognition_event.method` says Body / Staff zone.
+- "Inside now" counts customers seen in the last `INSIDE_NOW_SECONDS`, not
+  staff, and not people unseen for minutes.
+- A person who appears in the middle of the shop (not from the walkway) gets
+  a hidden visitor's track_id back with a looser look match
+  (`INSIDE_CONSERVE`), instead of a new track_id.
+
+### Stronger person detector (optional)
+
+`export_rknn.py` makes `yolo11s_rknn_model` (on an x86-64 Linux PC / WSL with
+rknn-toolkit2; it cannot run on the box). yolo11s finds more small, far and
+partly hidden people than yolo11n. Copy the folder to the box and set
+`MODEL=./yolo11s_rknn_model` (lower `DECODE_MAX_FPS` to 10 if the live video lags).
+
 ## Staff recognition by body (360°)
 
 The cameras hang high up, so faces are rarely clear. Staff (and members) are

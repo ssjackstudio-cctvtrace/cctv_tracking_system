@@ -809,6 +809,57 @@
   color: #92400e;
 }
 
+/* Shop areas on the plan: one row per area while editing */
+.fm-plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+
+.fm-plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.fm-plan-row input,
+.fm-plan-row select {
+  padding: 5px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.fm-plan-row input:not([type='number']) {
+  width: 190px;
+}
+
+.fm-plan-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.fm-plan-note {
+  color: #64748b;
+  min-width: 180px;
+}
+
+.fm-plan-margin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.fm-plan-margin input {
+  width: 72px;
+}
+
 .fm-occupancy {
   margin-top: 8px;
   font-weight: 600;

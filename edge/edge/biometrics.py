@@ -128,6 +128,17 @@ LOG_MATCHES = _flag("BODY_LOG", "off")
 UNIFORM_SAME = float(os.getenv("BODY_UNIFORM_SAME", "0.85"))  # a part this alike between ALL staff = the uniform
 DISTINCT_MATCH = float(os.getenv("BODY_DISTINCT_MATCH", "0.70"))  # the staff's own (non-uniform) parts must match this
 MYT = timezone(timedelta(hours=8))  # staff_duty.duty_date is a Malaysia date
+# One staff is ONE person: a staff already followed by a camera right now (seen in the last
+# STAFF_BUSY_SECONDS) cannot also be someone else in the shop, so a customer who looks like a
+# staff is not taken for them. A staff NOT seen right now who is recognised on a new track_id is
+# that staff coming back (after a break, the store room): the new track_id joins the staff's
+# track_id for the day.
+STAFF_BUSY_SECONDS = float(os.getenv("STAFF_BUSY_SECONDS", "3"))
+# A wrong staff (a customer taken for a staff) is undone: a person recognised by BODY whose
+# looks then keep NOT matching that staff (score below STAFF_REVOKE_SCORE, standing, 3+ parts
+# seen) STAFF_REVOKE_LOOKS times in a row, and who never stayed in the Staff zone, is a Guest again.
+STAFF_REVOKE_SCORE = float(os.getenv("STAFF_REVOKE_SCORE", "0.55"))
+STAFF_REVOKE_LOOKS = int(os.getenv("STAFF_REVOKE_LOOKS", "6"))
 
 
 def posture(box: tuple[float, float, float, float]) -> str:
@@ -382,9 +393,11 @@ class BodyMatcher(threading.Thread):
     and the live samples of recognised people."""
 
     def __init__(self, supa: Supabase, insert: Callable[..., None], update: Callable[..., None],
-                 edge_device_id: str | None = None) -> None:
+                 edge_device_id: str | None = None, registry: Any = None) -> None:
         super().__init__(name="body-matcher", daemon=True)
         self.supa, self.insert, self.update = supa, insert, update
+        self.registry = registry  # visitors.VisitorRegistry: one staff = one person
+        self._doubt: dict[str, int] = {}  # visit_id → looks in a row that do not match its staff
         self.edge_device_id = edge_device_id  # its branch's staff only
         self._branch: str | None = None
         self._shared: frozenset[str] = frozenset()  # parts that look alike between all staff (the uniform)
@@ -672,8 +685,8 @@ class BodyMatcher(threading.Thread):
         key = (p.kind, p.person_id)
         with self._lock:
             st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
-            if st["done"]:
-                return
+            if st["done"] or key in st.get("blocked", ()):
+                return  # recognised already, or this person was undone for this visit
             n_sum = st["votes"].setdefault(key, [0, 0.0])
             n_sum[0] += 1
             n_sum[1] += best["score"]
@@ -683,10 +696,23 @@ class BodyMatcher(threading.Thread):
             total = sum(n for n, _ in st["votes"].values())
             if n_sum[0] < VOTES or n_sum[0] < VOTE_SHARE * total:
                 return
+        into = None
+        if p.kind == "Staff" and self.registry is not None:
+            other = self.registry.staff_visitor(p.person_id, exclude=visitor.visit_id)
+            if other is not None and time.time() - other.last_any <= STAFF_BUSY_SECONDS:
+                with self._lock:
+                    st["votes"].pop(key, None)  # that staff is somewhere else right now: not them
+                log.info("%s looks like staff %s, but %s is followed elsewhere right now: not that staff",
+                         visitor.track_id, p.label, other.track_id)
+                return
+            into = other  # that staff back again (not seen right now): same track_id for the day
+        with self._lock:
+            if st["done"]:
+                return
             st["done"] = key
             top = st["best"][key]
             score = n_sum[1] / n_sum[0]
-        self._recognised(visitor, p, top, score)
+        self._recognised(visitor, p, top, score, into=into)
 
     def learn(self, visitor: Any, feats: dict[str, np.ndarray], model_name: str) -> None:
         """A recognised visitor seen again (turning, sitting, crouching, carrying
@@ -704,6 +730,14 @@ class BodyMatcher(threading.Thread):
             return
         mine = self._score(person, feats, model_name)
         best, _ = self.best_match(feats, model_name)
+        if person.kind == "Staff" and getattr(visitor, "staff_how", None) == "Body" and len(feats) >= 3:
+            # standing, well seen: does this still look like that staff?
+            bad = mine is None or mine["score"] < STAFF_REVOKE_SCORE
+            n = self._doubt.get(visitor.visit_id, 0) + 1 if bad else 0
+            self._doubt[visitor.visit_id] = n
+            if n >= STAFF_REVOKE_LOOKS and getattr(visitor, "staff_zone_s", 0.0) < 1.0:
+                self._revoke(visitor, person, mine["score"] if mine else 0.0)
+                return
         # still this person (the tracker did not switch to someone else), and nobody fits better
         if mine is None or mine["score"] < LEARN_SAME or (best is not None and best["person"] is not person):
             return
@@ -713,12 +747,14 @@ class BodyMatcher(threading.Thread):
                 samples.append((model_name, vec))
                 del samples[:-LIVE_SAMPLES]
 
-    def _recognised(self, visitor: Any, person: _Person, top: dict, score: float) -> None:
+    def _recognised(self, visitor: Any, person: _Person, top: dict, score: float, into: Any = None,
+                    how: str = "Body") -> None:
+        guest_track = visitor.track_id
         if person.kind == "Staff":
             # the staff's staff_no is the track_id of every visit of this staff
             values = {"visit_type": "Staff", "staff_id": person.person_id, "member_id": None,
                       "track_id": person.number}
-            visitor.track_id = person.number  # live video label and suspicious pairs use it from now on
+            self.mark_staff(visitor, person.person_id, person.number, how)
         else:
             values = {"visit_type": "Member", "member_id": person.person_id, "staff_id": None}
         self.update("visit", values, camera_id=top["camera_id"], visit_id=f"eq.{visitor.visit_id}")
@@ -727,14 +763,108 @@ class BodyMatcher(threading.Thread):
             "visit_id": visitor.visit_id,
             "match_score": round(min(1.0, max(0.0, score)) * 100, 2),
             "result": "Matched",
-            "body_template_id": top["template"],
-            "body_view_angle": top["angle"],
-            "matched_parts": top["parts"],
+            "body_template_id": top.get("template"),
+            "body_view_angle": top.get("angle"),
+            "matched_parts": top.get("parts") or None,
+            "method": how,
             "event_time": _now(),
         })
-        log.info("%s recognised as %s %s by body (%s°, %s, score %.0f%%)", visitor.track_id, person.kind,
-                 person.label, top["angle"], ", ".join(top["parts"]), score * 100)
+        if into is not None and self.registry is not None:
+            self.registry.merge(visitor, into)  # every camera follows the staff's first track_id today
+            log.info("%s is staff %s back again: joined to their track_id for today", guest_track, person.label)
+        log.info("%s recognised as %s %s by %s (%s°, %s, score %.0f%%)", guest_track, person.kind,
+                 person.label, how.lower(), top.get("angle"), ", ".join(top.get("parts") or []) or "-", score * 100)
+
+    def mark_staff(self, visitor: Any, staff_id: str | None, staff_no: str | None, how: str) -> None:
+        """The visitor is a staff from now on: remembered all day, not counted as a customer."""
+        lock = self.registry._lock if self.registry is not None else self._lock
+        with lock:
+            if not getattr(visitor, "staff", False):
+                visitor.guest_track_id = visitor.track_id
+            visitor.staff, visitor.staff_id, visitor.staff_how = True, staff_id, how
+            if staff_no:
+                visitor.staff_no = staff_no
+                visitor.track_id = staff_no  # live video label and suspicious pairs use it from now on
+
+    def _revoke(self, visitor: Any, person: _Person, score: float) -> None:
+        """Recognised as this staff by mistake: back to a Guest with its own track_id."""
+        with self._lock:
+            st = self._visits.get(visitor.visit_id)
+            if st:
+                st["done"] = None
+                st["votes"].pop(("Staff", person.person_id), None)
+                st.setdefault("blocked", set()).add(("Staff", person.person_id))
+            self._doubt.pop(visitor.visit_id, None)
+        lock = self.registry._lock if self.registry is not None else self._lock
+        with lock:
+            back = visitor.guest_track_id or visitor.track_id
+            visitor.staff, visitor.staff_id, visitor.staff_no, visitor.staff_how = False, None, None, None
+            visitor.track_id = back
+        cam = max(visitor.seen_on, key=visitor.seen_on.get) if getattr(visitor, "seen_on", None) else None
+        self.update("visit", {"visit_type": "Guest", "staff_id": None, "track_id": back},
+                    camera_id=cam, visit_id=f"eq.{visitor.visit_id}")
+        if cam:
+            self.insert("recognition_event", {
+                "camera_id": cam, "visit_id": visitor.visit_id,
+                "match_score": round(min(1.0, max(0.0, score)) * 100, 2), "result": "Not Matched",
+                "method": "Body", "event_time": _now(),
+            })
+        log.info("%s no longer looks like staff %s (%d looks in a row): back to Guest %s",
+                 person.number, person.label, STAFF_REVOKE_LOOKS, back)
+
+    def zone_staff(self, visitor: Any, camera_id: str) -> None:
+        """A person who stayed in the Staff zone (staff side of the counter) is a staff.
+        Which one: the on-duty staff their body looks most like, among those NOT followed
+        elsewhere right now; when the body cannot tell, the only on-duty staff not on the
+        floor right now; else a staff without a name (still not counted as a customer)."""
+        if getattr(visitor, "staff", False):
+            return
+        with self._lock:
+            people = [p for p in self._people if p.kind == "Staff"]
+            st = self._visits.get(visitor.visit_id) or {"votes": {}, "best": {}}
+            votes = {k: v for k, v in st["votes"].items() if k[0] == "Staff"}
+            best_of = dict(st["best"])
+        now = time.time()
+        busy = self.registry.staff_on_floor(now, STAFF_BUSY_SECONDS) if self.registry is not None else set()
+        free = [p for p in people if p.person_id not in busy]
+        pick = None
+        if votes:
+            key = max(votes, key=lambda k: (votes[k][0], votes[k][1]))
+            pick = next((p for p in free if p.person_id == key[1]), None)
+        if pick is None and len(free) == 1:
+            pick = free[0]
+        into = None
+        if pick is not None and self.registry is not None:
+            into = self.registry.staff_visitor(pick.person_id, exclude=visitor.visit_id)
+        with self._lock:
+            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
+            st["done"] = ("Staff", pick.person_id) if pick is not None else ("Staff", "")
+        if pick is not None:
+            top = best_of.get(("Staff", pick.person_id)) or {"camera_id": camera_id}
+            self._recognised(visitor, pick, {**top, "camera_id": camera_id},
+                             float((top.get("score") if isinstance(top, dict) else None) or 0.9),
+                             into=into, how="Staff zone")
+            return
+        hidden = self.registry.hidden_staff(now, STAFF_BUSY_SECONDS, exclude=visitor.visit_id) \
+            if self.registry is not None else []
+        back = hidden[0] if len(hidden) == 1 else None  # the only staff away right now: back again
+        self.mark_staff(visitor, back.staff_id if back else None, back.staff_no if back else None, "Staff zone")
+        values = {"visit_type": "Staff", "member_id": None}
+        if back is not None:
+            values.update(staff_id=back.staff_id, track_id=back.track_id)
+        self.update("visit", values, camera_id=camera_id, visit_id=f"eq.{visitor.visit_id}")
+        self.insert("recognition_event", {
+            "camera_id": camera_id, "visit_id": visitor.visit_id, "match_score": 90.0, "result": "Matched",
+            "method": "Staff zone", "event_time": _now(),
+        })
+        if back is not None:
+            self.registry.merge(visitor, back)
+            log.info("%s stayed in the Staff zone: staff %s back again (same track_id today)",
+                     visitor.guest_track_id, back.track_id)
+            return
+        log.info("%s stayed in the Staff zone: a staff (which one could not be told)", visitor.track_id)
 
     def forget(self, visit_id: str) -> None:
         with self._lock:
             self._visits.pop(visit_id, None)
+            self._doubt.pop(visit_id, None)

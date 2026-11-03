@@ -12,7 +12,7 @@
 tracker_type: bytetrack
 track_high_thresh: 0.35 # first association: sure boxes
 track_low_thresh: 0.12 # second association: partly hidden people (keep existing numbers only)
-new_track_thresh: 0.45 # a new tracker number needs a fairly sure detection
+new_track_thresh: 0.40 # a new tracker number needs a fairly sure detection (0.45 missed partly hidden walk-ins)
 track_buffer: 150 # frames a lost person is kept before their number is dropped
 match_thresh: 0.8 # threshold for matching tracks
 fuse_score: True # fuse confidence scores with the iou distances before matching

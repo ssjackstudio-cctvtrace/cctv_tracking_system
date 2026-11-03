@@ -44,6 +44,9 @@ log = logging.getLogger("main")
 CAMERA_COLUMNS = (
     "camera_id,camera_name,active_status,ip_address,stream_path,floor_areas,edge_device(branch_id)"
 )
+# + the shop areas drawn once on the shop plan (branch.plan_areas, supabase/plan_areas.sql)
+CAMERA_COLUMNS_PLAN = CAMERA_COLUMNS.replace("edge_device(branch_id)", "edge_device(branch_id,branch(plan_areas))")
+GAP_LOG_SECONDS = 300  # log how far apart 2 cameras put the same person on the shop plan
 OUT_OF_RANGE = "Out of Range"  # cctv_event.track_region of a visit closed by the box (person not seen any more)
 REFRESH_SECONDS = 60  # reload camera settings + send heartbeat
 SUSPECT_SECONDS = 30  # look for suspicious same person pairs (Camera page)
@@ -59,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--inside-only", action="store_true",
                    help="for --offline without --zones: the whole picture is inside the shop")
     p.add_argument("--zones", help="for --offline: JSON file with a camera.floor_areas value (3D floor + areas)")
+    p.add_argument("--plan", help="for --offline: JSON file with a branch.plan_areas value (areas on the shop plan)")
     p.add_argument("--show", action="store_true", help="open a window with boxes, areas and counts")
     return p.parse_args()
 
@@ -90,15 +94,16 @@ def main() -> None:
     # Staff / members recognised by body parts from any side (360°), learnt from the
     # biometric photos uploaded on the website (supabase/biometric_photo.sql).
     # BODY_RECOGNITION=off switches it off.
+    # People the cameras see, shared by all cameras: one track_id per person
+    visitors = VisitorRegistry()
+
     body_matcher = None
     if supa and BODY_RECOGNITION:
-        body_matcher = BodyMatcher(supa, writer.insert, writer.update, settings.edge_device_id)
+        body_matcher = BodyMatcher(supa, writer.insert, writer.update, settings.edge_device_id, registry=visitors)
         body_matcher.start()
         Enroller(supa, on_enrolled=body_matcher.reload_now.set).start()
 
     workers: dict[str, CameraWorker] = {}
-    # People the cameras see, shared by all cameras: one track_id per person
-    visitors = VisitorRegistry()
 
     def stamp(epoch: float) -> str:
         return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
@@ -162,8 +167,11 @@ def main() -> None:
                 body_matcher.forget(v.visit_id)
             if v.estimate.samples > v.sent_faces:  # newest gender / age
                 writer.update("visit", v.estimate.visit_fields(), camera_id=cam_id, visit_id=f"eq.{v.visit_id}")
-            log.info("%s not seen by any camera for %.0f s: track_id ended, visit closed (Out)",
-                     v.track_id, KEEP_SECONDS)
+            if v.staff:
+                log.info("staff %s: shop closed (or a new day), track_id ended, visit closed (Out)", v.track_id)
+            else:
+                log.info("%s not seen by any camera for %.0f s: track_id ended, visit closed (Out)",
+                         v.track_id, time.time() - v.last_any)
 
     # Live video for the website (only sends pictures while someone watches)
     live = None
@@ -173,20 +181,31 @@ def main() -> None:
         live.start()
         writer.on_saved = live.notify  # a row was saved → the website reloads at once
 
+    plan_warned = {"done": False}
+
     def load_cameras() -> list[dict]:
         if supa is None:
             areas = json.load(open(args.zones, encoding="utf-8")) if args.zones else \
                 {"version": 3, "calibration": None, "regions": [], "inside_only": bool(args.inside_only)}
+            plan = json.load(open(args.plan, encoding="utf-8")) if args.plan else None
             return [{
                 "camera_id": "offline", "camera_name": args.camera or "test", "branch_id": "offline",
                 "active_status": "Active", "ip_address": "", "stream_path": "stream2",
-                "floor_areas": areas,
+                "floor_areas": areas, "plan_areas": plan,
             }]
         # Every camera of this box, Active or Inactive: the box itself decides
         # active_status from whether the camera picture is live and open.
-        rows = supa.select("camera", CAMERA_COLUMNS, edge_device_id=f"eq.{settings.edge_device_id}")
+        try:
+            rows = supa.select("camera", CAMERA_COLUMNS_PLAN, edge_device_id=f"eq.{settings.edge_device_id}")
+        except Exception as exc:  # supabase/plan_areas.sql not run yet: the areas of each camera picture
+            if not plan_warned["done"]:
+                log.warning("Shop plan areas not readable (run supabase/plan_areas.sql): %s", exc)
+                plan_warned["done"] = True
+            rows = supa.select("camera", CAMERA_COLUMNS, edge_device_id=f"eq.{settings.edge_device_id}")
         for c in rows:  # visit.branch_id = branch of this edge box
-            c["branch_id"] = (c.pop("edge_device", None) or {}).get("branch_id")
+            ed = c.pop("edge_device", None) or {}
+            c["branch_id"] = ed.get("branch_id")
+            c["plan_areas"] = (ed.get("branch") or {}).get("plan_areas")
         return [c for c in rows if not args.camera or c["camera_name"] == args.camera]
 
     def source_for(cam: dict) -> str | int:
@@ -310,7 +329,16 @@ def main() -> None:
                            created_at=f"gte.{midnight.isoformat()}", limit="10000")
         visitors.set_apart({frozenset((r["visit_keep"], r["visit_dup"])) for r in rows})
 
+    def log_plan_gaps() -> None:
+        """Same person, two cameras, same moment: how far apart on the shop plan."""
+        names = {cid: w.camera["camera_name"] for cid, w in workers.items()}
+        for a, b, metres, n in visitors.plan_gaps():
+            hint = "  ← adjust one of them on the Shop Floor Map" if metres > 0.6 else ""
+            log.info("shop plan: %s and %s put the same person %.2f m apart (median of %d)%s",
+                     names.get(a, a), names.get(b, b), metres, n, hint)
+
     next_refresh = next_status = next_close = next_suspect = 0.0
+    next_gaps = time.time() + GAP_LOG_SECONDS
     open_windows: set[str] = set()  # --show: one window per camera that is on
     try:
         while True:
@@ -324,6 +352,9 @@ def main() -> None:
             if time.time() >= next_close:
                 close_lost()  # people unseen for KEEP_SECONDS: track_id ended
                 next_close = time.time() + 1
+            if time.time() >= next_gaps:
+                log_plan_gaps()
+                next_gaps = time.time() + GAP_LOG_SECONDS
             if time.time() >= next_suspect:
                 try:
                     load_not_same()

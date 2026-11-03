@@ -39,6 +39,59 @@ type Plan = {
   areas: { kind: RegionKind; name: string; pts: Point[] }[] // areas as marked on the drawing
   furniture: { name: string; pts: Point[] }[]
   cameras: Record<string, { x: number; y: number; yaw: number }> // suggested places, from the drawing
+  planSeed?: PlanArea[] // first draft of the areas on the plan (incl. the Staff zone)
+}
+
+// ---------- Shop areas on the PLAN (branch.plan_areas, supabase/plan_areas.sql) ----------
+// Drawn once, in metres, for every camera of the branch. A camera placed on the plan
+// turns each person's feet into a floor spot and the edge box asks THESE outlines which
+// area it is in, so overlapping cameras always agree. (Areas drawn on a camera's picture
+// are seen in perspective: on the floor they land a little elsewhere on every camera.)
+// Staff = the staff-only side of the counter: recorded as Counter, and a person who
+// stays there is recognised as staff.
+type PlanKind = RegionKind | 'Staff'
+type PlanArea = { id: string; name: string; kind: PlanKind; pts: Point[] }
+type PlanAreas = { version: 1; margin: number; shop: Point[]; areas: PlanArea[] }
+const PLAN_KINDS: PlanKind[] = ['Purchasing', 'Counter', 'Staff', 'Traffic']
+const PLAN_COLORS: Record<PlanKind, string> = { ...REGION_COLORS, Staff: '#0d9488' }
+const PLAN_KIND_NOTE: Record<PlanKind, string> = {
+  Purchasing: 'In (inside the shop)',
+  Counter: 'In (inside the shop)',
+  Staff: 'staff only: recorded as Counter, staying here = staff',
+  Traffic: 'Passed By (walkway outside)',
+}
+const DEFAULT_MARGIN = 0.25
+
+function readPlanAreas(value: unknown): PlanAreas | null {
+  if (!value || typeof value !== 'object') return null
+  const v = value as { margin?: unknown; shop?: unknown; areas?: unknown }
+  const pt = (p: unknown): Point | null => {
+    const q = p as { x?: unknown; y?: unknown }
+    return q && Number.isFinite(Number(q.x)) && Number.isFinite(Number(q.y)) ? { x: Number(q.x), y: Number(q.y) } : null
+  }
+  const list = (a: unknown): Point[] => (Array.isArray(a) ? a.map(pt).filter((p): p is Point => !!p) : [])
+  const areas = (Array.isArray(v.areas) ? v.areas : [])
+    .map((a, i) => {
+      const r = a as { id?: unknown; name?: unknown; kind?: unknown; pts?: unknown }
+      const kind = PLAN_KINDS.includes(r.kind as PlanKind) ? (r.kind as PlanKind) : null
+      const pts = list(r.pts)
+      return kind && pts.length >= 3 ? { id: String(r.id ?? `a${i + 1}`), name: String(r.name ?? kind), kind, pts } : null
+    })
+    .filter((a): a is PlanArea => !!a)
+  if (!areas.length) return null
+  const margin = Number(v.margin)
+  return { version: 1, margin: Number.isFinite(margin) ? margin : DEFAULT_MARGIN, shop: list(v.shop), areas }
+}
+
+// First draft from the drawing: its draft areas, or its marked areas + the walkway (Traffic)
+function planFromDrawing(plan: Plan): PlanAreas {
+  const areas: PlanArea[] = plan.planSeed
+    ? plan.planSeed.map((a) => ({ ...a, pts: a.pts.map((p) => ({ ...p })) }))
+    : [
+        ...plan.areas.map((a, i) => ({ id: `a${i + 1}`, name: a.name, kind: a.kind as PlanKind, pts: a.pts })),
+        { id: `a${plan.areas.length + 1}`, name: 'Traffic', kind: 'Traffic' as PlanKind, pts: plan.walkway },
+      ]
+  return { version: 1, margin: DEFAULT_MARGIN, shop: plan.shop, areas }
 }
 
 const rect = (x0: number, y0: number, x1: number, y1: number): Point[] => [
@@ -96,6 +149,20 @@ const BUKIT_TINGGI: Plan = {
     { name: 'Product display table', pts: rect(1.56, 3.13, 2.81, 4.04) },
     { name: 'Product display table set', pts: rect(4.4, 3.0, 5.86, 4.1) },
     { name: 'Cashier counter', pts: rect(1.87, 1.3, 3.99, 2.31) },
+  ],
+  // First draft of the areas on the plan (same as supabase/plan_areas.sql): the staff side of the
+  // cashier counter (back wall → counter), the counter with the paying customers in front of it
+  // (up to 3.0 m), the rest of the shop floor, and the walkway
+  planSeed: [
+    { id: 'a1', name: 'Staff side of counter', kind: 'Staff', pts: [{ x: 1.04, y: 0 }, { x: 4.208, y: 0 }, { x: 4.894, y: 1.3 }, { x: 1.04, y: 1.3 }] },
+    { id: 'a2', name: 'Counter', kind: 'Counter', pts: [{ x: 1.04, y: 1.3 }, { x: 4.894, y: 1.3 }, { x: 5.79, y: 3.0 }, { x: 1.04, y: 3.0 }] },
+    {
+      id: 'a3',
+      name: 'Purchasing',
+      kind: 'Purchasing',
+      pts: [{ x: 0, y: 0 }, { x: 1.04, y: 0 }, { x: 1.04, y: 3.0 }, { x: 5.79, y: 3.0 }, { x: 7.314, y: 5.89 }, { x: 0, y: 5.89 }],
+    },
+    { id: 'a4', name: 'Traffic', kind: 'Traffic', pts: [{ x: 4.208, y: 0 }, { x: 7.314, y: 5.89 }, { x: 10.2, y: 4.35 }, { x: 7.05, y: -1.8 }] },
   ],
   cameras: {
     'ABT-01': { x: 0.25, y: 5.54, yaw: 125 },
@@ -180,7 +247,40 @@ export function FloorMap({
   const [message, setMessage] = useState('')
   const [, setTick] = useState(0)
   const svgRef = useRef<SVGSVGElement>(null)
-  const drag = useRef<{ kind: 'camera' } | { kind: 'corner'; region: string; index: number } | null>(null)
+  const drag = useRef<
+    | { kind: 'camera' }
+    | { kind: 'corner'; region: string; index: number }
+    | { kind: 'plan'; area: string; index: number }
+    | null
+  >(null)
+  // Shop areas on the plan, shared by all cameras of the branch (branch.plan_areas)
+  const [branchId, setBranchId] = useState<string | null>(null)
+  const [planAreas, setPlanAreas] = useState<PlanAreas | null>(null)
+  const [planDraft, setPlanDraft] = useState<PlanAreas | null>(null)
+  const [planError, setPlanError] = useState('')
+
+  useEffect(() => {
+    if (!camera.edge_device_id) return
+    let cancelled = false
+    supabase
+      .from(TABLES.edgeDevice)
+      .select('branch_id, branch(plan_areas)')
+      .eq('edge_device_id', camera.edge_device_id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) {
+          setPlanError(`Shop areas on the plan are not available yet (run supabase/plan_areas.sql): ${error.message}`)
+          return
+        }
+        const row = data as { branch_id?: string; branch?: { plan_areas?: unknown } | null } | null
+        setBranchId(row?.branch_id ?? null)
+        setPlanAreas(readPlanAreas(row?.branch?.plan_areas))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [camera.edge_device_id])
 
   // The other cameras of this edge box (their areas are shown too)
   useEffect(() => {
@@ -266,7 +366,17 @@ export function FloorMap({
 
   const onMove = (e: PointerEvent<SVGSVGElement>) => {
     const d = drag.current
-    if (!d || !draft || !cal) return
+    if (d?.kind === 'plan' && planDraft) {
+      const p = toPlan(e)
+      if (!p) return
+      const q = { x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100 }
+      setPlanDraft({
+        ...planDraft,
+        areas: planDraft.areas.map((a) => (a.id === d.area ? { ...a, pts: a.pts.map((pt, i) => (i === d.index ? q : pt)) } : a)),
+      })
+      return
+    }
+    if (!d || d.kind === 'plan' || !draft || !cal) return
     const p = toPlan(e)
     if (!p) return
     if (d.kind === 'camera') {
@@ -336,6 +446,56 @@ export function FloorMap({
     if (!window.confirm(`Remove the ${savedObstacles.length} saved obstacle(s) of ${camera.camera_name}?`)) return
     store({ ...areas, obstacles: [] }, 'Saved obstacles removed.')
   }
+
+  // ---------- shop areas on the plan ----------
+  const startPlanEdit = () => {
+    const base = planAreas ?? (plan ? planFromDrawing(plan) : null)
+    setPlanDraft(
+      base
+        ? { ...base, shop: base.shop.map((p) => ({ ...p })), areas: base.areas.map((a) => ({ ...a, pts: a.pts.map((p) => ({ ...p })) })) }
+        : { version: 1, margin: DEFAULT_MARGIN, shop: [], areas: [] },
+    )
+    setMessage(
+      'Drag the white corners to where each area really is on the floor. Click a small dot on a line to add a corner, double-click a corner to remove it.',
+    )
+  }
+
+  const setPlanArea = (id: string, change: Partial<PlanArea>) =>
+    planDraft && setPlanDraft({ ...planDraft, areas: planDraft.areas.map((a) => (a.id === id ? { ...a, ...change } : a)) })
+
+  const addPlanArea = () => {
+    if (!planDraft) return
+    const cx = Math.round(((view.x0 + view.x1) / 2) * 100) / 100
+    const cy = Math.round(((view.y0 + view.y1) / 2) * 100) / 100
+    let n = planDraft.areas.length + 1
+    while (planDraft.areas.some((a) => a.id === `a${n}`)) n++
+    setPlanDraft({
+      ...planDraft,
+      areas: [...planDraft.areas, { id: `a${n}`, name: 'Purchasing', kind: 'Purchasing', pts: rect(cx - 0.5, cy - 0.5, cx + 0.5, cy + 0.5) }],
+    })
+  }
+
+  const savePlan = async () => {
+    if (!planDraft || !branchId) return
+    const bad = planDraft.areas.find((a) => a.pts.length < 3 || !a.name.trim())
+    if (bad) {
+      setMessage(`Could not save: every area needs a name and at least 3 corners ("${bad.name || bad.id}").`)
+      return
+    }
+    setSaving(true)
+    const value: PlanAreas = { ...planDraft, margin: Math.min(Math.max(planDraft.margin, 0), 1.5) }
+    const { error } = await supabase.from(TABLES.branch).update({ plan_areas: value }).eq('branch_id', branchId)
+    setSaving(false)
+    if (error) {
+      setMessage(`Could not save: ${error.message}`)
+      return
+    }
+    setPlanAreas(value)
+    setPlanDraft(null)
+    setMessage('Shop areas saved on the plan. Every camera placed on the plan uses them within a minute.')
+  }
+
+  const shownPlan = planDraft ?? planAreas
 
   const vb = `${view.x0} ${-view.y1} ${view.x1 - view.x0} ${view.y1 - view.y0}`
   const stroke = Math.max(view.x1 - view.x0, view.y1 - view.y0) / 320 // ~1 px
@@ -418,6 +578,66 @@ export function FloorMap({
     )
   }
 
+  const planShape = (a: PlanArea) => {
+    const color = PLAN_COLORS[a.kind]
+    const cx = a.pts.reduce((s, p) => s + p.x, 0) / a.pts.length
+    const cy = a.pts.reduce((s, p) => s + p.y, 0) / a.pts.length
+    const editing = !!planDraft
+    return (
+      <g key={`plan-${a.id}`}>
+        <polygon
+          points={pts(a.pts)}
+          fill={color}
+          fillOpacity={a.kind === 'Staff' ? 0.35 : 0.22}
+          stroke={color}
+          strokeWidth={stroke * 2.5}
+        />
+        <text x={cx} y={-cy} fontSize={font} textAnchor="middle" fill={color} fontWeight={800}>
+          {a.name}
+        </text>
+        {editing &&
+          a.pts.map((pt, i) => {
+            const nx = a.pts[(i + 1) % a.pts.length]
+            return (
+              <g key={i}>
+                <circle
+                  className="fm-corner"
+                  cx={(pt.x + nx.x) / 2}
+                  cy={-(pt.y + nx.y) / 2}
+                  r={stroke * 3}
+                  fill={color}
+                  opacity={0.7}
+                  onClick={() =>
+                    setPlanArea(a.id, {
+                      pts: [...a.pts.slice(0, i + 1), { x: (pt.x + nx.x) / 2, y: (pt.y + nx.y) / 2 }, ...a.pts.slice(i + 1)],
+                    })
+                  }
+                >
+                  <title>Add a corner here</title>
+                </circle>
+                <circle
+                  className="fm-corner"
+                  cx={pt.x}
+                  cy={-pt.y}
+                  r={stroke * 5}
+                  fill="#fff"
+                  stroke={color}
+                  strokeWidth={stroke * 2}
+                  onPointerDown={(e) => {
+                    ;(e.target as Element).setPointerCapture?.(e.pointerId)
+                    drag.current = { kind: 'plan', area: a.id, index: i }
+                  }}
+                  onDoubleClick={() => a.pts.length > 3 && setPlanArea(a.id, { pts: a.pts.filter((_, j) => j !== i) })}
+                >
+                  <title>{`${a.name}: drag to move, double-click to remove`}</title>
+                </circle>
+              </g>
+            )
+          })}
+      </g>
+    )
+  }
+
   const obstacleShape = (c: Calibration, o: Obstacle, saved: boolean, key: string) => {
     const f = obstacleFootprint(c, o)
     if (!f) return null
@@ -441,7 +661,16 @@ export function FloorMap({
       <div className="cam-line-head">
         <h2>Shop Floor Map</h2>
         <div className="cam-line-actions">
-          {draft ? (
+          {planDraft ? (
+            <>
+              <button type="button" className="cam-toggle" onClick={() => setPlanDraft(null)} disabled={saving}>
+                Cancel
+              </button>
+              <button type="button" className="cam-line-save" onClick={savePlan} disabled={saving || !branchId}>
+                {saving ? 'Saving…' : 'Save areas on plan'}
+              </button>
+            </>
+          ) : draft ? (
             <>
               <button type="button" className="cam-toggle" onClick={() => setDraft(null)} disabled={saving}>
                 Cancel
@@ -468,6 +697,15 @@ export function FloorMap({
               )}
               <button
                 type="button"
+                className="cam-toggle"
+                onClick={startPlanEdit}
+                disabled={saving || !branchId}
+                title="Purchasing / Counter / Staff / Traffic drawn once on the shop plan, for every camera"
+              >
+                Edit areas on plan
+              </button>
+              <button
+                type="button"
                 className="cam-line-save"
                 onClick={startEdit}
                 disabled={saving || (!!areas.calibration && areas.calibration.mode !== 'auto' && !areas.calibration.placed)}
@@ -485,7 +723,69 @@ export function FloorMap({
         solid = saved).
         {!placedNow && cal && !draft && ' This camera is not placed on the shop plan yet: it is shown at its place on the drawing. Check it, then "Adjust on map" → Save.'}
       </p>
+      <p className="cam-count-note">
+        {planAreas
+          ? placedNow
+            ? `Solid, labelled shapes are the shop areas on the plan: ${camera.camera_name} is placed on the plan, so the edge box uses THESE areas for it (the same for every camera placed on the plan; touching a line counts). The areas drawn on its picture are only used while it is not placed.`
+            : `Solid, labelled shapes are the shop areas on the plan. ${camera.camera_name} is not placed on the plan yet, so it still uses the areas drawn on its picture: place it with "Adjust on map" → Save.`
+          : 'No shop areas on the plan yet: "Edit areas on plan" draws Purchasing / Counter / Staff / Traffic once for all cameras (fewer wrong areas where cameras overlap).'}
+      </p>
+      {planError && <p className="cam-error">{planError}</p>}
       {message && <p className="cam-count-note fm-message">{message}</p>}
+
+      {planDraft && (
+        <div className="fm-plan-list">
+          {planDraft.areas.map((a) => (
+            <div key={a.id} className="fm-plan-row">
+              <span className="fm-plan-swatch" style={{ background: PLAN_COLORS[a.kind] }} />
+              <input
+                aria-label="Area name"
+                value={a.name}
+                onChange={(e) => setPlanArea(a.id, { name: e.target.value })}
+              />
+              <select aria-label="Area kind" value={a.kind} onChange={(e) => setPlanArea(a.id, { kind: e.target.value as PlanKind })}>
+                {PLAN_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <span className="fm-plan-note">{PLAN_KIND_NOTE[a.kind]}</span>
+              <button
+                type="button"
+                className="cam-toggle"
+                onClick={() => setPlanDraft({ ...planDraft, areas: planDraft.areas.filter((x) => x.id !== a.id) })}
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+          <div className="fm-plan-row">
+            <button type="button" className="cam-toggle" onClick={addPlanArea}>
+              + Area
+            </button>
+            {plan && (
+              <button type="button" className="cam-toggle" onClick={() => setPlanDraft(planFromDrawing(plan))}>
+                Start again from the drawing
+              </button>
+            )}
+            <label className="fm-plan-margin">
+              Touching a line counts within (m)
+              <input
+                type="number"
+                min={0}
+                max={1.5}
+                step={0.05}
+                value={planDraft.margin}
+                onChange={(e) => {
+                  const v = Number(e.target.value)
+                  if (Number.isFinite(v)) setPlanDraft({ ...planDraft, margin: v })
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      )}
 
       {draft && (
         <div className="fm-controls">
@@ -568,6 +868,12 @@ export function FloorMap({
               </text>
             </g>
           )}
+          {shownPlan && shownPlan.shop.length >= 3 && (
+            <polygon points={pts(shownPlan.shop)} fill="none" stroke="#0f172a" strokeWidth={stroke * 1.5} />
+          )}
+          {shownPlan?.areas.filter((a) => a.kind !== 'Staff').map(planShape)}
+          {shownPlan?.areas.filter((a) => a.kind === 'Staff').map(planShape)}
+          <g opacity={shownPlan && (placedNow || planDraft) ? 0.3 : 1}>
           {otherLayers.map(
             (l) => l.cal && l.fa.regions.map((r) => regionShape(l.cal!, r, false, `${l.camera.camera_id}-${r.id}`)),
           )}
@@ -575,6 +881,7 @@ export function FloorMap({
             (l) => l.cal && (l.fa.obstacles ?? []).map((o) => obstacleShape(l.cal!, o, true, `${l.camera.camera_id}-${o.id}`)),
           )}
           {cal && regions.map((r) => regionShape(cal, r, true, r.id))}
+          </g>
           {cal && savedObstacles.map((o) => obstacleShape(cal, o, true, `s-${o.id}`))}
           {cal && !draft && liveObstacles.map((o, i) => obstacleShape(cal, o, false, `l-${i}`))}
           {otherLayers.map((l) => l.cal?.place && cameraMark(l.cal.place, l.camera.camera_name, false))}

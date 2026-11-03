@@ -78,6 +78,7 @@ Only numbers are kept in memory; no picture is saved or sent.
 
 from __future__ import annotations
 
+import calendar
 import math
 import os
 import threading
@@ -97,12 +98,32 @@ from datetime import datetime, timezone
 distance = attire_distance
 __all__ = ["MAX_DISTANCE", "KEEP_SECONDS", "OUTSIDE_KEEP_SECONDS", "Visitor", "VisitorRegistry", "appearance", "distance"]
 
-# Not seen by any camera for this long → the track_id ends (person gone)
-# 10 minutes: a person still inside the shop whom no camera sees for a while (hidden behind a
-# display, out of every picture) keeps their track_id this long, and gets it back when seen again
-KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "600"))  # 10 minutes
-# After Out: the track_id is kept this long after the last camera saw the person (outside the shop)
+# How long a person is remembered after the LAST camera saw them (then the track_id ends for
+# good). Three kinds of people:
+#   inside the shop (walked in)   TRACK_KEEP_SECONDS   (15 min): hidden behind a display, out of
+#                                 every picture, they get the SAME track_id back when seen again
+#   only passed by (never inside) PASSER_KEEP_SECONDS  (1 min)
+#   walked in, then out again     OUTSIDE_KEEP_SECONDS (walks back in within it = same visit)
+#   staff                         the whole operating day, until the shop closes (SHOP_CLOSE)
+KEEP_SECONDS = float(os.getenv("TRACK_KEEP_SECONDS", "900"))  # 15 minutes
 OUTSIDE_KEEP_SECONDS = float(os.getenv("OUTSIDE_KEEP_SECONDS", "300"))
+PASSER_KEEP_SECONDS = float(os.getenv("PASSER_KEEP_SECONDS", "60"))
+# Shop closing time (local time, HH:MM): staff are remembered until then. Friday / Saturday may differ.
+SHOP_CLOSE = os.getenv("SHOP_CLOSE", "22:00")
+SHOP_CLOSE_FRI_SAT = os.getenv("SHOP_CLOSE_FRI_SAT", SHOP_CLOSE)
+STAFF_KEEP_SECONDS = 24 * 3600.0  # (ended at closing time by expire())
+# "People inside now" (dashboard, live video): customers inside whom a camera saw this recently.
+# Staff are not counted. (Before: everyone remembered, i.e. also people unseen for 10 minutes.)
+INSIDE_NOW_SECONDS = float(os.getenv("INSIDE_NOW_SECONDS", "120"))
+# Areas seen by 2+ cameras at once (overlapping views): the camera with the BEST view of the
+# person (feet seen, big in the picture, near the middle of it) decides which area they are in;
+# a camera's view counts for this many seconds.
+AREA_FUSE_SECONDS = float(os.getenv("AREA_FUSE_SECONDS", "1.5"))
+# Nobody appears in the middle of the shop out of nowhere: a person first seen INSIDE (not walking
+# in from the walkway) is given back to a hidden visitor even with a loose look match (up to
+# CONSERVE_DISTANCE; a clearly different face / clothes still says "another person").
+CONSERVE = os.getenv("INSIDE_CONSERVE", "on").strip().lower() not in ("off", "0", "false", "no")
+CONSERVE_DISTANCE = float(os.getenv("CONSERVE_DISTANCE", "0.95"))
 HIDDEN_SECONDS = min(3.0, KEEP_SECONDS)  # a visitor no camera has seen for this long is "hidden" (may come back)
 # A visitor no camera has seen for this long may be given back to someone who appears INSIDE
 # with a matching look (reclaim). Was HIDDEN_SECONDS (3 s): a person who walked out of one
@@ -178,6 +199,21 @@ SUSPECT_WEIGHTS = {"face": 3.0, "body": 2.0, "clothes": 2.0, "head": 0.5, "chest
 SUSPECT_WEIGHTS_CROSS = {"face": 3.0, "body": 2.0, "clothes": 1.5, "head": 0.3, "chest": 0.7, "legs": 0.7}
 
 
+SHOP_UTC_OFFSET = float(os.getenv("SHOP_UTC_OFFSET", "8"))  # hours: Malaysia = UTC+8 (box clock may be UTC)
+
+
+def closing_time(now: float) -> float:
+    """Closing time (epoch seconds) of the shop's day of `now` (Malaysia time)."""
+    off = SHOP_UTC_OFFSET * 3600
+    t = time.gmtime(now + off)
+    text = SHOP_CLOSE_FRI_SAT if t.tm_wday in (4, 5) else SHOP_CLOSE  # Friday, Saturday
+    try:
+        hh, mm = (int(x) for x in text.split(":")[:2])
+    except ValueError:
+        hh, mm = 22, 0
+    return calendar.timegm((t.tm_year, t.tm_mon, t.tm_mday, hh, mm, 0)) - off
+
+
 def look_distance(look: Look | None, v: "Visitor", camera_id: str | None) -> tuple[bool, float | None]:
     """(comparable, distance) between a new look and a remembered visitor, as
     reid.compare (0 = same, None = clearly someone else).
@@ -231,6 +267,26 @@ class Visitor:
     # Photo of this track_id for the Camera page "Suspicious same person" (camera_worker._take_photos)
     photo_q: float = 0.0  # how good the uploaded photo is (bigger, sharper, face visible = better)
     photo_at: float = 0.0  # when it was last taken
+    ever_in: bool = False  # walked into the shop at least once (else: only passed by → PASSER_KEEP_SECONDS)
+    # Staff (biometrics.BodyMatcher, or the Staff zone of the shop plan): remembered all day
+    staff: bool = False
+    staff_id: str | None = None
+    staff_no: str | None = None
+    staff_how: str | None = None  # "Body" / "Staff zone"
+    guest_track_id: str | None = None  # track_id before it became the staff_no (to undo a wrong staff)
+    staff_zone_s: float = 0.0  # seconds seen standing in the Staff zone
+    staff_zone_at: float = 0.0
+    merged_into: "Visitor | None" = None  # this track_id turned out to be another visitor (staff back again)
+    # area seen by each camera now: camera_id → (time, how good the view is, track_region)
+    area_obs: dict[str, tuple[float, float, str]] = field(default_factory=dict)
+    cam_floor: dict[str, tuple[float, float, float]] = field(default_factory=dict)  # camera_id → (x, y, time)
+
+    def resolved(self) -> "Visitor":
+        """The visitor this one now is (after a merge), else itself."""
+        v, n = self, 0
+        while v.merged_into is not None and n < 10:
+            v, n = v.merged_into, n + 1
+        return v
 
     def add_look(self, look: Look | None, camera_id: str | None = None) -> None:
         """Keep a running average of how the visitor looks (several frames, several
@@ -265,6 +321,9 @@ class VisitorRegistry:
         self._apart: set[frozenset[str]] = set()
         self._lock = threading.RLock()
         self._day = time.localtime().tm_yday  # the list starts again every day
+        # Same person on two cameras at the same moment: how far apart the two cameras put them on
+        # the shop plan (camera pair → recent distances), to show which camera needs adjusting
+        self._gaps: dict[tuple[str, str], list[tuple[float, float]]] = {}
 
     # ---------- who is this person? ----------
     def _score(self, v: Visitor, look: Look | None, floor: tuple[float, float] | None,
@@ -448,9 +507,14 @@ class VisitorRegistry:
             return v, True
 
     def _keep(self, v: Visitor) -> float:
-        """How long a visitor is remembered after the last camera saw them:
-        5 minutes after going Out (may come back in), TRACK_KEEP_SECONDS (10 minutes) while inside."""
-        return self.outside_keep_seconds if v.outside else self.keep_seconds
+        """How long a visitor is remembered after the last camera saw them: staff
+        all day (until closing time, see expire), inside TRACK_KEEP_SECONDS,
+        walked out OUTSIDE_KEEP_SECONDS, only passed by PASSER_KEEP_SECONDS."""
+        if v.staff:
+            return STAFF_KEEP_SECONDS
+        if v.outside:
+            return self.outside_keep_seconds if v.ever_in else min(PASSER_KEEP_SECONDS, self.outside_keep_seconds)
+        return self.keep_seconds
 
     # ---------- updates ----------
     def seen(self, visitor: Visitor, camera_id: str, now: float | None = None,
@@ -468,6 +532,12 @@ class VisitorRegistry:
                 visitor.last_conf = conf
             if floor is not None:
                 visitor.floor, visitor.floor_at = floor, now
+                visitor.cam_floor[camera_id] = (floor[0], floor[1], now)
+                for c, (x, y, t) in visitor.cam_floor.items():
+                    if c != camera_id and now - t <= 0.3:  # the other camera sees them at this moment
+                        gaps = self._gaps.setdefault(tuple(sorted((c, camera_id))), [])
+                        gaps.append((now, math.dist((x, y), floor)))
+                        del gaps[:-300]
             if height is not None:
                 visitor.height = height if visitor.height is None else visitor.height * 0.8 + height * 0.2
 
@@ -517,6 +587,7 @@ class VisitorRegistry:
                     return False, False  # the camera that placed them sees them in its own area right now
             visitor.region = kind
             visitor.region_kind, visitor.region_name, visitor.region_camera = kind, name, camera_id
+            visitor.ever_in = True
             return True, came_back
 
     def may_leave(self, visitor: Visitor, camera_id: str, out_of_range: bool, now: float | None = None) -> bool:
@@ -589,7 +660,9 @@ class VisitorRegistry:
             day = time.localtime(now).tm_yday
             new_day = day != self._day
             self._day = day
-            for vid in [k for k, v in self._inside.items() if new_day or now - v.last_any > self._keep(v)]:
+            closed_shop = now >= closing_time(now)
+            for vid in [k for k, v in self._inside.items()
+                        if new_day or now - v.last_any > self._keep(v) or (v.staff and closed_shop)]:
                 v = self._inside.pop(vid)
                 v.left = True
                 if not v.outside:
@@ -598,9 +671,78 @@ class VisitorRegistry:
                 self._together = {pair for pair in self._together if pair <= self._inside.keys()}
         return closed
 
+    # ---------- areas seen by 2+ cameras at once ----------
+    def area_authority(self, visitor: Visitor, camera_id: str, quality: float, kind: str, now: float) -> bool:
+        """This camera sees the visitor in area `kind` with a view this good (0-1).
+        True when no other camera saw them in the last AREA_FUSE_SECONDS with a
+        clearly better view, i.e. this camera may decide their area now. Two cameras
+        whose views overlap no longer fight over one person (the camera that sees
+        the feet, close and near the middle of its picture, wins)."""
+        with self._lock:
+            visitor.area_obs[camera_id] = (now, quality, kind)
+            best = max((q for c, (t, q, _) in visitor.area_obs.items()
+                        if c != camera_id and now - t <= AREA_FUSE_SECONDS), default=-1.0)
+            return quality >= best - 0.05
+
+    # ---------- staff ----------
+    def staff_visitor(self, staff_id: str, exclude: str | None = None) -> Visitor | None:
+        """The visitor (remembered today) who is this staff, if any."""
+        with self._lock:
+            for v in self._inside.values():
+                if not v.left and v.staff and v.staff_id == staff_id and v.visit_id != exclude:
+                    return v
+        return None
+
+    def staff_on_floor(self, now: float, seen_seconds: float = 3.0) -> set[str]:
+        """staff_ids a camera sees right now."""
+        with self._lock:
+            return {v.staff_id for v in self._inside.values() if v.staff and not v.left and v.staff_id
+                    and v.seen_on and now - max(v.seen_on.values()) <= seen_seconds}
+
+    def hidden_staff(self, now: float, seen_seconds: float = 3.0, exclude: str | None = None) -> list[Visitor]:
+        """Staff remembered today whom no camera sees right now (on a break, in the store room)."""
+        with self._lock:
+            return [v for v in self._inside.values() if v.staff and not v.left and v.visit_id != exclude
+                    and (not v.seen_on or now - max(v.seen_on.values()) > seen_seconds)]
+
+    def merge(self, dup: Visitor, keep: Visitor) -> None:
+        """`dup` is `keep` (e.g. a staff back after a break got a new track_id at first):
+        every camera following `dup` follows `keep` from now on; `dup` ends."""
+        if dup is keep:
+            return
+        with self._lock:
+            dup.merged_into = keep
+            dup.left = True
+            self._inside.pop(dup.visit_id, None)
+            for c, lk in dup.looks.items():
+                keep.add_look(lk, c)
+            for c, t in dup.seen_on.items():
+                keep.seen_on[c] = max(t, keep.seen_on.get(c, 0.0))
+            keep.last_seen = max(keep.last_seen, dup.last_seen)
+            if dup.floor_at > keep.floor_at:
+                keep.floor, keep.floor_at = dup.floor, dup.floor_at
+            keep.estimate.merge(dup.estimate)
+            keep.ever_in = keep.ever_in or dup.ever_in
+            if not dup.outside:
+                keep.outside = False
+
+    def plan_gaps(self, now: float | None = None, window: float = 600.0) -> list[tuple[str, str, float, int]]:
+        """Camera pairs on the shop plan: (camera, camera, median metres apart, samples) for
+        one person seen by both at the same moment in the last `window` seconds. Above
+        ~0.5 m: one of the two cameras is placed / tilted a little wrong on the map."""
+        now = time.time() if now is None else now
+        out = []
+        with self._lock:
+            for (a, b), gaps in self._gaps.items():
+                recent = sorted(d for t, d in gaps if now - t <= window)
+                if len(recent) >= 10:
+                    out.append((a, b, recent[len(recent) // 2], len(recent)))
+        return out
+
     # ---------- hidden people coming back ----------
     def reclaim(self, look: Look | None, floor: tuple[float, float] | None, exclude: set[str],
-                now: float | None = None, camera_id: str | None = None) -> Visitor | None:
+                now: float | None = None, camera_id: str | None = None,
+                limit: float | None = None) -> Visitor | None:
         """Someone appeared INSIDE the shop (not walking in from outside) and no
         visitor matched closely: they may be a visitor who was hidden behind an
         obstacle, or out of every camera's picture, for less than KEEP_SECONDS
@@ -608,18 +750,19 @@ class VisitorRegistry:
         hidden visitor who looks most alike (looser match), so their track_id
         stays the same. None when nobody is hidden or nobody looks alike."""
         now = time.time() if now is None else now
+        limit = LOOSE_DISTANCE if limit is None else limit
         best, best_s = None, None
         with self._lock:
             for v in self._inside.values():
                 if v.left or v.outside or v.visit_id in exclude:
                     continue  # people who went Out come back through the entrance, not from hiding
                 last = v.last_any
-                if now - last < RECLAIM_AFTER_SECONDS or now - last > self.keep_seconds:
+                if now - last < RECLAIM_AFTER_SECONDS or now - last > self._keep(v):
                     continue  # seen right now (not hidden), or already ended
                 ok, app = look_distance(look, v, camera_id)
                 if not ok:
                     continue  # nothing to recognise them by: a new person
-                if app is None or app > LOOSE_DISTANCE:
+                if app is None or app > limit:
                     continue  # another face / body / attire / height
                 moved = math.dist(floor, v.floor) if floor is not None and v.floor is not None else None
                 if moved is not None and moved > HIDDEN_MOVE_METRES + HIDDEN_MOVE_MPS * (now - last):
@@ -666,11 +809,14 @@ class VisitorRegistry:
             self._apart = set(pairs)
 
     def count(self) -> int:
-        """People inside the shop (not those who went Out and are only remembered)."""
+        """Customers inside the shop now: not gone Out, not staff, seen by a camera in
+        the last INSIDE_NOW_SECONDS."""
         with self._lock:
-            return sum(1 for v in self._inside.values() if not v.outside and not v.left)
+            now = time.time()
+            return sum(1 for v in self._inside.values() if not v.outside and not v.left and not v.staff
+                       and v.seen_on and now - max(v.seen_on.values()) <= INSIDE_NOW_SECONDS)
 
-    def inside_now(self, seen_seconds: float = KEEP_SECONDS, now: float | None = None) -> dict:
+    def inside_now(self, seen_seconds: float = INSIDE_NOW_SECONDS, now: float | None = None) -> dict:
         """People inside the shop right now, as the 4 cameras see them: visitors
         seen by ANY camera in the last few seconds. One visitor = one person, so
         someone seen by 2 cameras at once (overlapping views) is counted once."""
@@ -678,8 +824,8 @@ class VisitorRegistry:
         out = {"all": 0, "male": 0, "female": 0, "unknown": 0}
         with self._lock:
             for v in self._inside.values():
-                if v.left or v.outside or not v.seen_on or now - max(v.seen_on.values()) > seen_seconds:
-                    continue  # went Out, ended, or not seen right now
+                if v.left or v.outside or v.staff or not v.seen_on or now - max(v.seen_on.values()) > seen_seconds:
+                    continue  # went Out, ended, staff, or not seen lately
                 gender = v.estimate.visit_fields()["est_gender"] if v.estimate.samples else "Unknown"
                 out["all"] += 1
                 out[{"Male": "male", "Female": "female"}.get(gender, "unknown")] += 1

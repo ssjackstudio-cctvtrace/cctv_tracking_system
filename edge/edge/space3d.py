@@ -305,6 +305,36 @@ class Space:
         return self._bend(float(u / w / self.aspect), float(v / w))
 
     # ---------- regions ----------
+    def region_near(self, foot: Point, feet: list[Point], margin: float) -> Region | None:
+        """Area of the picture outlines for a person whose feet are at `foot`
+        (between the feet) and `feet` (the two bottom corners of the box).
+        Touching an area's line counts: the feet point inside an outline first;
+        then a foot corner inside one; then the outline whose line is within
+        `margin` (share of the picture height) of the feet point, nearest first.
+        Several outlines: the one the feet point is deepest inside, never simply
+        the first one listed (the old rule put people standing on the line
+        between two areas into whichever area was listed first)."""
+        drawn = [r for r in self.regions if len(r.image) >= 3]
+        if not drawn:
+            return None
+        scaled = lambda q: (q[0] * self.aspect, q[1])  # noqa: E731  (square units: x and y alike)
+        f = scaled(foot)
+
+        def depth(r: Region) -> float:  # < 0 inside, > 0 outside
+            from .plan import signed_distance  # noqa: PLC0415
+
+            return signed_distance(tuple(scaled(q) for q in r.image), f)
+
+        scored = sorted(((depth(r), i, r) for i, r in enumerate(drawn)), key=lambda s: (s[0], s[1]))
+        if scored[0][0] <= 0:
+            return scored[0][2]
+        for q in feet:
+            hits = [r for r in drawn if inside(list(r.image), q)]
+            if hits:
+                return min(hits, key=depth)
+        d, _, r = scored[0]
+        return r if d <= margin else None
+
     def region_at(self, foot: Point | None, floor: Point | None, height: float | None) -> Region | None:
         """First region (in the order the admin listed them) the person stands in.
         3D when the camera is calibrated: floor outline in metres, and the body
