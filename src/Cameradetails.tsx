@@ -339,12 +339,12 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
 
   return (
     <section className="cam-timeline">
-      <h2>People Passed By / Walk-in today</h2>
+      <h2>Customers Passed By / Walk-in today</h2>
       <p className="cam-count-note">
-        People per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
+        Customers per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
         {fmtClock(new Date(new Date(today).setHours(0, closeAt, 0, 0)))}
       </p>
-      {error && <p className="cam-error">Could not load the people timeline: {error}</p>}
+      {error && <p className="cam-error">Could not load the customers timeline: {error}</p>}
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
           <CartesianGrid stroke="#e2e8f0" vertical={false} />
@@ -363,15 +363,15 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
             contentStyle={{ borderRadius: 8, borderColor: '#e2e8f0' }}
           />
           <Legend verticalAlign="top" align="right" height={32} iconType="plainline" />
-          <Line type="monotone" dataKey="passedBy" name="People Passed By" stroke={PASSED_BY_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
-          <Line type="monotone" dataKey="in" name="People Walk-in" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="passedBy" name="Customers Passed By" stroke={PASSED_BY_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+          <Line type="monotone" dataKey="in" name="Customers Walk-in" stroke={IN_COLOR} strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
     </section>
   )
 }
 
-// ---------- People records of this camera (labels on the live video) ----------
+// ---------- Customers records of this camera (labels on the live video) ----------
 //   select v.track_id, v.visit_type, ce.direction, v.est_gender, v.est_age,
 //          ce.confidence, v.demographic_score
 //   from cctv_event ce join visit v on ce.visit_id = v.visit_id
@@ -930,15 +930,15 @@ export default function CameraDetails({
       />
 
 
-      {people.error && <p className="cam-error">Could not load people count: {people.error}</p>}
-      <p className="cam-count-note">People counted by this camera today</p>
+      {people.error && <p className="cam-error">Could not load customers count: {people.error}</p>}
+      <p className="cam-count-note">Customers counted by this camera today</p>
       <div className="cam-counts">
         <div className="cam-count-card">
-          <span className="cam-count-label">People Passed By</span>
+          <span className="cam-count-label">Customers Passed By</span>
           <span className="cam-count-value">{people.passedBy}</span>
         </div>
         <div className="cam-count-card">
-          <span className="cam-count-label">People Walk-in</span>
+          <span className="cam-count-label">Customers Walk-in</span>
           <span className="cam-count-value">{people.in}</span>
         </div>
       </div>
