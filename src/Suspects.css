@@ -221,3 +221,8 @@
 .sr-item {
   padding-left: 12px;
 }
+
+/* Date filter above the Guest / Staff / Member tabs (Suspects.tsx) */
+.sp-datefilter {
+  margin: 4px 0 12px;
+}

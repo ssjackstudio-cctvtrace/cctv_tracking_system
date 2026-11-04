@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { Badge } from './Datatable'
 import { TABLES } from './Usetable'
 import StaffReview from './StaffReview'
+import StaffTrack from './StaffTrack'
+import { dayRange, dayWords, fmtDayLong } from './suspectDay'
 import './Suspects.css'
 
 // Suspicious same person (Camera page, below the cameras).
@@ -109,9 +111,47 @@ const todayKey = () => {
   const d = new Date()
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` // Malaysia date (staff_duty.duty_date)
 }
-const todayStart = () => {
-  const d = new Date()
-  return new Date(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T00:00:00`).toISOString()
+// Date filter of Suspicious same person, shown as "3 November 2026"; clicking it opens the calendar
+function SuspectDayFilter({ day, onChange }: { day: string; onChange: (day: string | null) => void }) {
+  const input = useRef<HTMLInputElement>(null)
+  const label = fmtDayLong(day)
+  const open = () => {
+    const el = input.current
+    if (!el) return
+    try {
+      el.showPicker()
+    } catch {
+      el.focus()
+    }
+  }
+  return (
+    <div className="ev-datefilter sp-datefilter">
+      <span className="ev-datefilter-label">Date</span>
+      <button type="button" className="ev-datefilter-button" onClick={open} aria-label={`Date: ${label}. Change date`}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M3 10h18M8 3v4M16 3v4" />
+        </svg>
+        {label}
+      </button>
+      <input
+        ref={input}
+        className="ev-datefilter-input"
+        type="date"
+        tabIndex={-1}
+        aria-hidden="true"
+        value={day}
+        max={todayKey()}
+        required
+        onChange={(e) => onChange(e.target.value && e.target.value !== todayKey() ? e.target.value : null)}
+      />
+      {day !== todayKey() && (
+        <button type="button" className="ds-datefilter-clear" onClick={() => onChange(null)}>
+          Today
+        </button>
+      )}
+    </div>
+  )
 }
 const rowTab = (r: SuspectRow): VisitTab =>
   r.keep?.visit_type === 'Staff' || r.dup?.visit_type === 'Staff'
@@ -163,6 +203,12 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   const [picking, setPicking] = useState<{ track: string; staffId: string } | null>(null)
   const [onDuty, setOnDuty] = useState<Set<string>>(new Set()) // staff_ids ticked "On duty today"
   const [dutyError, setDutyError] = useState('')
+  // Date of the lists (Date filter above the tabs); null = today (follows the clock past midnight)
+  const [pickedDay, setPickedDay] = useState<string | null>(null)
+  const day = pickedDay ?? todayKey()
+  const when = dayWords(day)
+  // bumped after a decision, so Recognised as staff / Track Staff reload at once
+  const [reload, setReload] = useState(0)
 
   // Staff on duty today in this branch (staff_duty)
   useEffect(() => {
@@ -208,9 +254,10 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   // select s.*, vk.*, vd.*, ck.camera_name, cd.camera_name from suspect_match s
   // join visit vk on s.visit_keep = vk.visit_id join visit vd on s.visit_dup = vd.visit_id
   // left join camera ck on s.camera_keep = ck.camera_id left join camera cd on s.camera_dup = cd.camera_id
-  // where vk.branch_id = <selected branch> and s.created_at >= today and s.status = <tab>
-  // Supabase returns at most 1000 rows per request, so read today's pairs page by page
+  // where vk.branch_id = <selected branch> and s.created_at on the selected date and s.status = <tab>
+  // Supabase returns at most 1000 rows per request, so read that day's pairs page by page
   const load = useCallback(async () => {
+    const [start, end] = dayRange(day)
     const all: SuspectRow[] = []
     let failed = ''
     for (let from = 0; from < MAX_ROWS; from += PAGE) {
@@ -225,7 +272,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         )
         .eq('keep.branch_id', branchId)
         .eq('status', status)
-        .gte('created_at', todayStart())
+        .gte('created_at', start)
+        .lt('created_at', end)
         .order('seen_keep', { ascending: true })
         .order('suspect_match_id', { ascending: true })
         .range(from, from + PAGE - 1)
@@ -240,7 +288,13 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
     setError(failed)
     setRows(failed ? [] : all)
     setLoaded(true)
-  }, [branchId, status])
+  }, [branchId, status, day])
+
+  // after a decision in Recognised as staff / Track Staff: reload the pairs and both lists
+  const changed = useCallback(() => {
+    load()
+    setReload((n) => n + 1)
+  }, [load])
 
   useEffect(() => {
     setLoaded(false)
@@ -495,6 +549,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         <b>Leave as Guest</b> or <b>Is Staff</b> (pick the staff); the card moves to that tab, then decide its later
         track_ids.
       </p>
+      <SuspectDayFilter day={day} onChange={setPickedDay} />
       <div className="tabs">
         {VISIT_TABS.map((t) => (
           <button key={t} type="button" className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
@@ -543,12 +598,16 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
       </div>
       {message && <p className="cam-count-note">{message}</p>}
 
-      {/* Every staff recognition of today to check (Staff tab), and the ones made Guests (Guest tab) */}
+      {/* Every staff recognition of the selected date to check (Staff tab), each camera capture of a
+          staff_no track_id (Staff tab, Track Staff), and the ones made Guests (Guest tab) */}
       {status === 'Open' && tab === 'Staff' && (
-        <StaffReview branchId={branchId} staffList={staffList} mode="staff" onChanged={load} />
+        <>
+          <StaffReview branchId={branchId} staffList={staffList} mode="staff" day={day} reload={reload} onChanged={changed} />
+          <StaffTrack branchId={branchId} staffList={staffList} day={day} reload={reload} onChanged={changed} />
+        </>
       )}
       {status === 'Open' && tab === 'Guest' && (
-        <StaffReview branchId={branchId} staffList={staffList} mode="undone" onChanged={load} />
+        <StaffReview branchId={branchId} staffList={staffList} mode="undone" day={day} reload={reload} onChanged={changed} />
       )}
 
       {!loaded ? (
@@ -557,7 +616,7 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
         <p className="ds-error">Failed to load: {error}</p>
       ) : items.length === 0 ? (
         <p className="ds-empty">
-          {status === 'Open' ? 'No suspicious same person today.' : `No ${status.toLowerCase()} pairs today.`}
+          {status === 'Open' ? `No suspicious same person ${when}.` : `No ${status.toLowerCase()} pairs ${when}.`}
         </p>
       ) : (
         <div className="sp-list">
@@ -574,8 +633,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
                       {dutyTick(st)}
                       <span className="sp-muted">
                         {status === 'Open'
-                          ? 'No suspicious same person for this staff today.'
-                          : `No ${status.toLowerCase()} pairs for this staff today.`}
+                          ? `No suspicious same person for this staff ${when}.`
+                          : `No ${status.toLowerCase()} pairs for this staff ${when}.`}
                       </span>
                     </div>
                   </header>

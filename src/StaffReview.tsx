@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { Badge } from './Datatable'
 import { TABLES } from './Usetable'
+import { dayRange, dayWords } from './suspectDay'
 
 // Camera page → Suspicious same person.
 //   Staff tab → "Recognised as staff today": EVERY visit the edge box (or an admin) made a
@@ -37,11 +38,6 @@ type StaffVisit = {
 }
 
 const REFRESH_MS = 30_000
-const pad = (n: number) => String(n).padStart(2, '0')
-const todayStart = () => {
-  const d = new Date()
-  return new Date(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T00:00:00`).toISOString()
-}
 const fmtTime = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }) : '—'
 
@@ -64,11 +60,15 @@ export default function StaffReview({
   branchId,
   staffList,
   mode,
+  day,
+  reload,
   onChanged,
 }: {
   branchId: string
   staffList: StaffOption[]
   mode: 'staff' | 'undone' // Staff tab: today's staff visits; Guest tab: staff visits an admin made Guests
+  day: string // YYYY-MM-DD: the date chosen in the Date filter above the tabs
+  reload: number // bumped by the panel after a decision elsewhere: reload now
   onChanged: () => void // reload the suspicious pairs too (the visit may have moved tab)
 }) {
   const [visits, setVisits] = useState<StaffVisit[]>([])
@@ -80,11 +80,13 @@ export default function StaffReview({
   const [show, setShow] = useState<'check' | 'all'>('check')
 
   const load = useCallback(async () => {
+    const [start, end] = dayRange(day)
     let q = supabase
       .from(TABLES.visit)
       .select(COLUMNS)
       .eq('branch_id', branchId)
-      .gte('cctv_event.event_time', todayStart())
+      .gte('cctv_event.event_time', start)
+      .lt('cctv_event.event_time', end)
       .order('event_time', { referencedTable: 'cctv_event', ascending: true })
       .limit(1, { referencedTable: 'cctv_event' })
       .order('event_time', { referencedTable: 'recognition_event', ascending: false })
@@ -93,7 +95,7 @@ export default function StaffReview({
     q =
       mode === 'staff'
         ? q.eq('visit_type', 'Staff')
-        : q.eq('visit_type', 'Guest').not('edge_track_id', 'is', null).gte('type_confirmed_at', todayStart())
+        : q.eq('visit_type', 'Guest').not('edge_track_id', 'is', null).gte('type_confirmed_at', start).lt('type_confirmed_at', end)
     const { data, error } = await q
     if (error) setError(error.message)
     else {
@@ -108,7 +110,7 @@ export default function StaffReview({
       setVisits(list)
     }
     setLoaded(true)
-  }, [branchId, mode])
+  }, [branchId, mode, day])
 
   useEffect(() => {
     setLoaded(false)
@@ -116,6 +118,15 @@ export default function StaffReview({
     const timer = window.setInterval(load, REFRESH_MS)
     return () => window.clearInterval(timer)
   }, [load])
+
+  // a decision in Track Staff (or the pairs) may have changed these visits too
+  const loadRef = useRef(load)
+  loadRef.current = load
+  useEffect(() => {
+    if (reload) loadRef.current()
+  }, [reload])
+
+  const when = dayWords(day)
 
   const decide = async (v: StaffVisit, type: 'Guest' | 'Staff', staffId?: string | null) => {
     if (type === 'Staff' && !staffId) {
@@ -174,7 +185,7 @@ export default function StaffReview({
   return (
     <div className="sr">
       <div className="sr-head">
-        <h3>{mode === 'staff' ? 'Recognised as staff today' : 'Changed from Staff to Guest today'}</h3>
+        <h3>{mode === 'staff' ? `Recognised as staff ${when}` : `Changed from Staff to Guest ${when}`}</h3>
         {mode === 'staff' && (
           <label className="cam-filter">
             Show
@@ -188,13 +199,13 @@ export default function StaffReview({
       <p className="cam-count-note">
         {mode === 'staff' ? (
           <>
-            Every visit recognised as a staff today, newest first: check each one by its photo. <b>Correct</b> if it
+            Every visit recognised as a staff {when}, newest first: check each one by its photo. <b>Correct</b> if it
             is that staff, <b>Change staff</b> if it is another staff, <b>Leave as Guest</b> if it is a customer (it
             gets a track_id of its own, its events count as a guest, its wrong recognition records are deleted, it
             moves to the Guest tab, and the edge box never makes this person a staff again today).
           </>
         ) : (
-          <>Visits an admin changed from Staff to Guest today. <b>Is Staff</b> undoes a mistake.</>
+          <>Visits an admin changed from Staff to Guest {when}. <b>Is Staff</b> undoes a mistake.</>
         )}
       </p>
       {message && <p className="cam-count-note">{message}</p>}
@@ -207,7 +218,11 @@ export default function StaffReview({
         </p>
       ) : shown.length === 0 ? (
         <p className="ds-empty">
-          {mode === 'staff' ? (show === 'check' ? 'Nothing to check: every staff visit today is checked.' : 'No staff visits today.') : 'None today.'}
+          {mode === 'staff'
+            ? show === 'check'
+              ? `Nothing to check: every staff visit ${when} is checked.`
+              : `No staff visits ${when}.`
+            : `None ${when}.`}
         </p>
       ) : (
         <ul className="sp-dups sr-list">
