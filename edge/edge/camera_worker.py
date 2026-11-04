@@ -49,7 +49,7 @@ PHOTO_EVERY_SECONDS = float(os.getenv("PERSON_PHOTO_EVERY_SECONDS", "10"))  # a 
 PHOTO_BETTER = 1.2  # replaced only by a photo at least 20% better
 PHOTO_MAX_WIDTH = 960  # whole camera picture, landscape, scaled down to this width (pixels)
 PHOTO_BOX = (0, 200, 255)  # BGR orange: the person's box and track_id label
-FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "16"))  # looks (face + whole body) averaged per visitor
+FACE_SAMPLES = int(os.getenv("DEMOGRAPHIC_SAMPLES", "16"))  # looks (face + whole body) averaged per visitor (up to 2x while unsure)
 FACE_EVERY_SECONDS = 0.5  # gap between two looks at the same person
 FACES_PER_FRAME = 1  # people looked at per frame (~0.15 s each on the CPU; keeps counting smooth)
 TRACK_DONE_SECONDS = 10  # person not seen for this long → final gender / age sent
@@ -1633,7 +1633,7 @@ class CameraWorker(threading.Thread):
         h = frame.shape[0]
         due = [
             p for p in people
-            if (p.full or not cut_head(p.box[1], h)) and estimate_of(p).samples < FACE_SAMPLES
+            if (p.full or not cut_head(p.box[1], h)) and estimate_of(p).wants_looks(FACE_SAMPLES)
             and now - self._last_look.get(p.tid, 0.0) >= FACE_EVERY_SECONDS
         ]
         due.sort(key=lambda p: (estimate_of(p).samples, not p.full))
@@ -1645,6 +1645,8 @@ class CameraWorker(threading.Thread):
             with self.registry._lock:
                 for gender_probs, age_probs, weight in found:
                     est.add(gender_probs, age_probs, weight)
+                if found.cues is not None:  # face and hair (beard, long hair, bald, grey / dark hair)
+                    est.add_cues(found.cues)
                 height = v.height if v is not None and v.height is not None else p.height
                 if height is not None:
                     est.height = height

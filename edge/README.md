@@ -441,6 +441,23 @@ Male / Female / Unknown, `est_age`, `demographic_score` 0-100). Each look uses:
   (default 0.6) is how much a body look counts against a face look.
 - **Body height** in metres (cameras with a 3D floor): a short body makes a
   child more likely.
+- **Face and hair** (when the face is visible), so a man is not taken for a
+  woman (or the other way round) and a young person not for an old one (or
+  the other way round):
+  - beard / moustache → male, and not a child
+  - long hair beside the face and below the chin → female (short hair: a
+    little more likely male; a man with long hair and a beard stays male)
+  - bald / shaved top of the head → male, and an adult
+  - grey / white hair → older; dark full hair → unlikely over 60
+  Each is averaged over the looks and only counts once seen on about two clear
+  looks. Colour cues (grey / dark hair, bald) are skipped on black-and-white
+  (night / IR) pictures. Turn them off with `HEAD_CUES=off`.
+
+A side-on face counts less than a face looking at the camera. A visitor whose
+gender or age group is still unsure gets up to twice `DEMOGRAPHIC_SAMPLES`
+looks. `est_age` is worked out within the most likely age group and its two
+neighbours, so a child is not pulled up and an old person not pulled down
+towards the middle.
 
 No face or body picture is saved or sent. The age model works in age
 groups (25-32, 38-43, ...), so `est_age` is a rough estimate. With `--show`
