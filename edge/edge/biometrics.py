@@ -43,16 +43,18 @@ and which body PARTS are in the photo: Head, Upper body, Lower body, Feet.
    again from sides and poses the photos never showed. A sample is only kept
    when it still looks like that person (no drift onto someone else).
 
-5. Same uniform, several staff on one day: all staff wear the same uniform (e.g. a
-   grey polo with a red collar), so their Upper body looks alike and cannot tell
-   WHICH staff it is. At each reload the parts that look alike between ALL staff of
-   the branch (UNIFORM_SAME) are found ("shared"). The uniform still helps to say
-   "this is a staff" (overall score, MATCH), but WHICH staff is decided by the other
-   parts only (hair / head, pants, shoes): the staff that is best on those wins, by
-   MARGIN over the next staff on those parts, and those parts must also look like
-   that staff (DISTINCT_MATCH), so a customer in similar clothes is not taken for a
-   staff. When only shared parts are visible (e.g. sitting at the counter, head cut
-   off) and 2+ staff may be on duty, there is no vote: tracking keeps the person.
+5. WHICH staff: by the Head (hair / face) and the Lower body (pants) only. All
+   staff wear the same uniform top, so the Upper body cannot tell staff apart; it
+   (and the feet) still count in the overall score that says "this looks like a
+   staff" (MATCH), but which staff is decided by BODY_ID_PARTS (default Head and
+   Lower body): the staff that is best on those parts wins, by MARGIN over the next
+   staff on those parts, and those parts must look like that staff (DISTINCT_MATCH,
+   at least one of them matched part by part), so a customer in a similar top is
+   not taken for a staff. Neither part visible (e.g. sitting behind the counter
+   with the head cut off): no vote, tracking keeps the person.
+   Staff are recognised ONLY like this (biometric photos + live samples) or named
+   by an admin on the website (Suspicious same person / Staff review). There is no
+   Staff zone: where someone stands never makes them a staff.
 6. Who may be recognised: only staff of THIS edge box's branch, and when the website
    has ticked "On duty today" for some of them (table staff_duty, Camera page →
    Suspicious same person → Staff tab), only those. Nobody ticked: every Active staff
@@ -125,8 +127,10 @@ LEARN_SAME = float(os.getenv("BODY_LEARN_SAME", "0.62"))  # a live sample must s
 RELOAD_SECONDS = float(os.getenv("BODY_RELOAD_SECONDS", "120"))
 ENROL_SECONDS = float(os.getenv("BODY_ENROL_SECONDS", "30"))
 LOG_MATCHES = _flag("BODY_LOG", "off")
-UNIFORM_SAME = float(os.getenv("BODY_UNIFORM_SAME", "0.85"))  # a part this alike between ALL staff = the uniform
-DISTINCT_MATCH = float(os.getenv("BODY_DISTINCT_MATCH", "0.70"))  # the staff's own (non-uniform) parts must match this
+# Parts that tell WHICH staff it is (the uniform top is the same for everyone): hair / face and pants
+ID_PARTS = frozenset(p.strip() for p in os.getenv("BODY_ID_PARTS", "Head,Lower body").split(",")
+                     if p.strip() in ("Head", "Upper body", "Lower body", "Feet")) or frozenset({"Head", "Lower body"})
+DISTINCT_MATCH = float(os.getenv("BODY_DISTINCT_MATCH", "0.70"))  # the staff's Head / Lower body must match this
 MYT = timezone(timedelta(hours=8))  # staff_duty.duty_date is a Malaysia date
 # One staff is ONE person: a staff already followed by a camera right now (seen in the last
 # STAFF_BUSY_SECONDS) cannot also be someone else in the shop, so a customer who looks like a
@@ -136,7 +140,7 @@ MYT = timezone(timedelta(hours=8))  # staff_duty.duty_date is a Malaysia date
 STAFF_BUSY_SECONDS = float(os.getenv("STAFF_BUSY_SECONDS", "3"))
 # A wrong staff (a customer taken for a staff) is undone: a person recognised by BODY whose
 # looks then keep NOT matching that staff (score below STAFF_REVOKE_SCORE, standing, 3+ parts
-# seen) STAFF_REVOKE_LOOKS times in a row, and who never stayed in the Staff zone, is a Guest again.
+# seen) STAFF_REVOKE_LOOKS times in a row is a Guest again.
 STAFF_REVOKE_SCORE = float(os.getenv("STAFF_REVOKE_SCORE", "0.55"))
 STAFF_REVOKE_LOOKS = int(os.getenv("STAFF_REVOKE_LOOKS", "6"))
 
@@ -400,7 +404,9 @@ class BodyMatcher(threading.Thread):
         self._doubt: dict[str, int] = {}  # visit_id → looks in a row that do not match its staff
         self.edge_device_id = edge_device_id  # its branch's staff only
         self._branch: str | None = None
-        self._shared: frozenset[str] = frozenset()  # parts that look alike between all staff (the uniform)
+        # parts that do NOT tell staff apart (the uniform): every part but BODY_ID_PARTS
+        self._shared: frozenset[str] = frozenset(PARTS) - ID_PARTS
+        self._id_logged = False
         self._duty_note = ""  # last logged "on duty" list / warning
         self.stop_event = threading.Event()
         self.reload_now = threading.Event()
@@ -558,8 +564,8 @@ class BodyMatcher(threading.Thread):
                 [r["body_template_id"] for r in rs], [int(r["body_view_angle"]) for r in rs],
                 [r["model_name"] for r in rs], np.stack([self._vectors[r["body_template_id"]] for r in rs]),
             )
-        # The uniform: parts that look alike between ALL staff of the branch (from their photos)
-        shared = self._shared_parts([p for p in people.values() if p.kind == "Staff"])
+        # Which staff: only BODY_ID_PARTS (Head, Lower body); the rest is the shared uniform
+        shared = frozenset(PARTS) - ID_PARTS
         # Staff on duty today (when any is ticked): the others are not recognised today
         if on_duty:
             people = {k: p for k, p in people.items() if p.kind != "Staff" or p.person_id in on_duty}
@@ -568,10 +574,11 @@ class BodyMatcher(threading.Thread):
         if duty_note != self._duty_note:
             log.info("Body recognition, staff %s", duty_note)
             self._duty_note = duty_note
-        if shared != self._shared:
-            log.info("Staff uniform: %s look alike between all staff, so WHICH staff is decided by %s",
-                     ", ".join(sorted(shared)) or "no part",
-                     ", ".join(p for p in PARTS if p not in shared))
+        if not self._id_logged:
+            log.info("Which staff is decided by %s only (%s = the shared uniform, counts only for "
+                     "\"looks like a staff\")", ", ".join(p for p in PARTS if p not in shared),
+                     ", ".join(p for p in PARTS if p in shared) or "no part")
+            self._id_logged = True
         with self._lock:
             self._shared = shared
             if datetime.now(MYT).date() != self._live_day:  # live samples are for one day (clothes change)
@@ -582,21 +589,6 @@ class BodyMatcher(threading.Thread):
             self._people = list(people.values())
         if len(self._people) != before:
             log.info("Body recognition: %d person(s), %d template(s) loaded", len(self._people), len(rows))
-
-    @staticmethod
-    def _shared_parts(staff: list[_Person]) -> frozenset[str]:
-        """Parts in which EVERY two staff look alike (UNIFORM_SAME): the uniform."""
-        if len(staff) < 2:
-            return frozenset()
-        shared = set()
-        for part in PARTS:
-            mats = [p.parts[part][3] for p in staff if part in p.parts]
-            if len(mats) < 2:
-                continue
-            sims = [float((a @ b.T).max()) for i, a in enumerate(mats) for b in mats[i + 1:]]
-            if min(sims) >= UNIFORM_SAME:
-                shared.add(part)
-        return frozenset(shared)
 
     # ---- one look at one person
     def _score(self, person: _Person, feats: dict[str, np.ndarray], model_name: str) -> dict | None:
@@ -652,12 +644,12 @@ class BodyMatcher(threading.Thread):
         best = results[0]
         margin = best["score"] - (results[1]["score"] if len(results) > 1 else 0.0)
         staff = [r for r in results if r["person"].kind == "Staff"]
-        if shared and best["person"].kind == "Staff" and len(staff) >= 2:
+        if shared and best["person"].kind == "Staff":
             ranked = sorted((r for r in staff if r["distinct"] is not None), key=lambda r: r["distinct"], reverse=True)
-            if len(ranked) < len(staff):
-                return best, 0.0  # only the uniform is visible: cannot tell which staff
+            if len(ranked) < len(staff) or not ranked:
+                return best, 0.0  # Head / Lower body not visible: cannot tell which staff
             best = ranked[0]
-            margin = ranked[0]["distinct"] - ranked[1]["distinct"]
+            margin = ranked[0]["distinct"] - ranked[1]["distinct"] if len(ranked) > 1 else best["distinct"]
         return best, margin
 
     def known(self, visit_id: str) -> bool:
@@ -672,9 +664,10 @@ class BodyMatcher(threading.Thread):
         if best is None:
             return
         p = best["person"]
-        # a staff (uniform shared with other staff): its own parts (hair, pants, shoes) must match too
+        # a staff (uniform shared with other staff): the Head / Lower body must match that staff too
         distinct_ok = (p.kind != "Staff" or not self._shared
-                       or (best["distinct"] is not None and best["distinct"] >= DISTINCT_MATCH))
+                       or (best["distinct"] is not None and best["distinct"] >= DISTINCT_MATCH
+                           and any(part in ID_PARTS for part in best["parts"])))
         ok = (best["score"] >= MATCH and margin >= MARGIN and len(best["parts"]) >= MIN_PARTS and distinct_ok)
         if LOG_MATCHES:
             log.info("Body match %s → %s: %.2f (own parts %s, ahead by %.2f), parts %s, angle %s%s", visitor.track_id,
@@ -749,7 +742,7 @@ class BodyMatcher(threading.Thread):
             bad = mine is None or mine["score"] < STAFF_REVOKE_SCORE
             n = self._doubt.get(visitor.visit_id, 0) + 1 if bad else 0
             self._doubt[visitor.visit_id] = n
-            if n >= STAFF_REVOKE_LOOKS and getattr(visitor, "staff_zone_s", 0.0) < 1.0:
+            if n >= STAFF_REVOKE_LOOKS:
                 self._revoke(visitor, person, mine["score"] if mine else 0.0)
                 return
         # still this person (the tracker did not switch to someone else), and nobody fits better
@@ -840,55 +833,9 @@ class BodyMatcher(threading.Thread):
         log.info("%s no longer looks like staff %s (%d looks in a row): back to Guest %s",
                  person.number, person.label, STAFF_REVOKE_LOOKS, back)
 
-    def zone_staff(self, visitor: Any, camera_id: str) -> None:
-        """A person who stayed in the Staff zone (staff side of the counter) is a staff.
-        Which one: only the on-duty staff their BODY voted for (not followed elsewhere
-        right now). Otherwise a staff without a name, with their own track_id: an admin
-        gives the name on the Camera page (Staff tab → Recognised as staff today).
-        (Before, the box guessed: "the only staff not on the floor", or joined them to
-        a staff who was away. A customer standing at the counter could so become that
-        staff, and every camera then followed them as that staff.)"""
-        if getattr(visitor, "staff", False):
-            return
-        with self._lock:
-            people = [p for p in self._people if p.kind == "Staff"]
-            st = self._visits.get(visitor.visit_id) or {"votes": {}, "best": {}}
-            if st.get("no_staff"):
-                return  # an admin said: not a staff
-            votes = {k: v for k, v in st["votes"].items() if k[0] == "Staff" and k not in st.get("blocked", ())}
-            best_of = dict(st["best"])
-        now = time.time()
-        busy = self.registry.staff_on_floor(now, STAFF_BUSY_SECONDS) if self.registry is not None else set()
-        free = [p for p in people if p.person_id not in busy]
-        pick = None
-        if votes:
-            key = max(votes, key=lambda k: (votes[k][0], votes[k][1]))
-            pick = next((p for p in free if p.person_id == key[1]), None)
-        into = None
-        if pick is not None and self.registry is not None:
-            other = self.registry.staff_visitor(pick.person_id, exclude=visitor.visit_id)
-            into = other if other is not None and self._same_look(visitor, other) is True else None
-        with self._lock:
-            st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
-            st["done"] = ("Staff", pick.person_id) if pick is not None else ("Staff", "")
-        if pick is not None:
-            top = best_of.get(("Staff", pick.person_id)) or {"camera_id": camera_id}
-            self._recognised(visitor, pick, {**top, "camera_id": camera_id},
-                             float((top.get("score") if isinstance(top, dict) else None) or 0.9),
-                             into=into, how="Staff zone")
-            return
-        self.mark_staff(visitor, None, None, "Staff zone")
-        self.update("visit", {"visit_type": "Staff", "member_id": None}, camera_id=camera_id,
-                    visit_id=f"eq.{visitor.visit_id}")
-        self.insert("recognition_event", {
-            "camera_id": camera_id, "visit_id": visitor.visit_id, "match_score": 90.0, "result": "Matched",
-            "method": "Staff zone", "event_time": _now(),
-        })
-        log.info("%s stayed in the Staff zone: a staff (name to be given on the Camera page)", visitor.track_id)
-
     def admin_not_staff(self, visitor: Any) -> None:
         """An admin said this visit is NOT a staff (Camera page → Leave as Guest): it is
-        never recognised as a staff again (by body or the Staff zone) while remembered."""
+        never recognised as a staff again (by body) while remembered."""
         with self._lock:
             st = self._visits.setdefault(visitor.visit_id, {"votes": {}, "best": {}, "done": None})
             st["done"], st["no_staff"] = None, True

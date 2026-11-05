@@ -15,7 +15,6 @@ import { MATCH_SELECT_FULL, matchedName, matchedNo, recognisedBy, type Recogniti
 import type { Branch, Camera, EdgeDevice, Point } from './types'
 import { LiveVideo, type LiveBox, type LiveFrame, type LiveState } from './Livevideo'
 import { AreasEditor, drawPersonBox3d, drawSpace, spaceLines } from './Areaseditor'
-import { FloorMap } from './Floormap'
 import { REGION_COLORS, floorOrAuto, readFloorAreas, type Calibration, type FloorAreas, type RegionKind } from './space3d'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
 import './Camera.css'
@@ -809,10 +808,8 @@ export default function CameraDetails({
     return { ...savedAreas, calibration, regions: savedAreas.regions.map((r) => ({ ...r, floor: null })) }
   }, [savedAreas])
   const space = useMemo(() => spaceLines(floorAreas), [floorAreas])
-  // The Areas editor works on the newest saved floor (also when the Floor map saved it)
+  // The Areas editor works on the newest saved floor
   const editorCamera = useMemo(() => ({ ...camera, floor_areas: savedAreas }), [camera, savedAreas])
-  // Newest live picture (people, obstacles), for the Shop Floor Map
-  const liveFrame = useRef<LiveFrame | null>(null)
   // Full-body people seen on the live video (feet + top of head), for "Auto-fit tilt from people"
   const peopleSeen = useRef<{ foot: Point; head: Point }[]>([])
   const lastSample = useRef(0)
@@ -825,9 +822,8 @@ export default function CameraDetails({
   const [recordDay, setRecordDay] = useState(todayKey)
 
   // Live view: the shop areas (Purchasing / Counter / Traffic), then each
-  // person (3D box + label), and the store metrics (the floor map is below the video)
+  // person (3D box + label), and the store metrics
   const draw = (ctx: CanvasRenderingContext2D, frame: LiveFrame) => {
-    liveFrame.current = frame
     if (Date.now() - lastSample.current > 500) {
       lastSample.current = Date.now()
       for (const b of frame.boxes) {
@@ -919,14 +915,6 @@ export default function CameraDetails({
         liveReady={liveMsg.state === 'live'}
         onSaved={setFloorAreas}
         people={peopleSeen}
-      />
-
-      <FloorMap
-        camera={camera}
-        branchName={edge?.branch?.branch_name}
-        areas={savedAreas}
-        live={liveFrame}
-        onSaved={setFloorAreas}
       />
 
 

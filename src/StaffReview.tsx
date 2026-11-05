@@ -7,7 +7,7 @@ import { dayRange, dayWords } from './suspectDay'
 // Camera page → Suspicious same person.
 //   Staff tab → "Recognised as staff today": EVERY visit the edge box (or an admin) made a
 //   Staff today, not only the ones in a suspicious pair, newest first, with its photo, how it
-//   was recognised (Body / Staff zone / Admin) and how sure. For each:
+//   was recognised (Body = biometric photos / Admin) and how sure. For each:
 //     Correct          it is that staff (stamps visit.type_confirmed_at: reviewed)
 //     Change staff     it is ANOTHER staff: pick the name (staff_no – full_name)
 //     Leave as Guest   it is a customer: the visit becomes a Guest with a track_id of its
@@ -16,7 +16,7 @@ import { dayRange, dayWords } from './suspectDay'
 //                      are deleted (supabase/staff_review_guest.sql). It moves to the Guest
 //                      tab; the edge box stops treating that person as a staff within a
 //                      minute and never makes them a staff again today.
-//     A staff without a name (recognised by the Staff zone only): Give staff name.
+//     A staff without a name (made before the Staff zone was removed): Give staff name.
 //   Guest tab → "Changed from Staff to Guest today": the visits an admin made Guests, with
 //   Is Staff to undo a mistake.
 // All decisions go through public.set_first_track_type (supabase/staff_review.sql).
@@ -214,7 +214,7 @@ export default function StaffReview({
       ) : error ? (
         <p className="ds-error">
           Failed to load: {error}
-          {/edge_track_id|method/.test(error) && ' (run supabase/staff_review.sql and plan_areas.sql)'}
+          {/edge_track_id|method/.test(error) && ' (run supabase/staff_review.sql)'}
         </p>
       ) : shown.length === 0 ? (
         <p className="ds-empty">

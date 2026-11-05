@@ -230,7 +230,6 @@ class StaffMemory:
                     # not a staff: back to the guest track_id the website gave back
                     v.staff, v.staff_id, v.staff_no, v.staff_how = False, None, None, None
                     v.track_id = r.get("track_id") or v.guest_track_id or v.track_id
-                    v.staff_zone_s = 0.0
                     undone += 1
                 elif r["visit_type"] == "Staff" and r.get("staff_id") and r.get("staff_id") != v.staff_id:
                     if not v.staff:

@@ -23,7 +23,7 @@ export type LiveBox = {
   est?: boolean // feet hidden: floor spot worked out from the head and body height
 }
 export type LiveObstacle = { id: string; label: string; b: [number, number, number, number] }
-// obstacles: furniture / mannequins the edge box found on the floor (Floor map)
+// obstacles: furniture / mannequins the edge box found on the floor (only when OBSTACLE_SECONDS > 0)
 export type LiveFrame = {
   f: number
   w: number

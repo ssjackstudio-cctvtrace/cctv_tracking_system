@@ -201,10 +201,9 @@ the walkway is Passed By again (the stay in the shop ends).
 its height) before it is followed; one that has not moved after `STATIC_SECONDS`
 (default 8) is an object (mannequin, bag stand) and is ignored on that camera.
 
-**Which person at which place.** With all cameras placed on the shop plan (Camera
-page → Adjust 3D floor → Placed on the shop plan, with each camera's real X / Y and
-Facing), a person lost at one spot can only be matched to someone standing within
-walking distance (`PERSON_SPEED_MPS` x the seconds since) of that spot.
+**No shared floor between cameras.** Each camera has its own floor and areas
+(there is no shop plan any more), so people are matched across cameras by their
+face, clothes and body only.
 
 All 4 cameras send their video over the same Wi-Fi router to this one box,
 so the box sees every camera at once and keeps ONE list of the people it
@@ -256,12 +255,9 @@ How the box knows it is the same person:
    person re-identification YoutuReID from OpenCV Zoo). Without them, attire
    and height are used. Tune with `REID_MAX_DISTANCE` (lower = stricter) and
    the `REID_*` values in `.env`.
-2. **Floor position** (optional) — cameras marked "Placed on the shop plan"
-   in Adjust 3D floor share one floor: a person seen by two of them stands on
-   the same floor spot (within `SAME_PLACE_METRES`, default 0.9 m). When the
-   face is surely the same, up to `FLOOR_FACE_METRES` (default 2.0 m) apart is
-   still the same person, so a small calibration error between two cameras
-   never gives one person a second track_id.
+2. **Floor position** — not used across cameras any more (each camera has its
+   own floor; the shared shop plan was removed because its small calibration
+   errors moved people into the wrong area).
 3. Someone already followed as a different person in the same picture is
    never a match (two people side by side).
 4. **Overlap handoff** — one person seen from 2 camera angles often does not
@@ -299,7 +295,7 @@ The tracker keeps a hidden person's number for 150 frames (about 10 s)
 | People bent over the counter / partly behind a table not detected | `CONFIDENCE=0.40` threw their boxes away before the tracker saw them | `CONFIDENCE=0.15` + ByteTrack second round keeps existing people; new people still need 0.45 |
 | Same person gets a new ID on the next camera | clothes colours change with the light, and the colour check vetoed the match; a 2–3 s gap between cameras fell between handoff and reclaim | gray-world colour balance (`REID_EVEN_LIGHT`), colours never veto when face/body agree, `OVERLAP_SECONDS=3`, `RECLAIM_AFTER_SECONDS=1` |
 | A trolley / bag pushed by someone becomes a "person" | it moves, so the move check passed | `PERSON_CONF_PEAK`, `MAX_BODY_WIDTH` |
-| Floor spot jumps when legs disappear behind displays | box bottom is not the feet | floor spot from the head and body height (`est` in the live video: "Feet hidden · spot from head"); saved obstacles (Floor map) |
+| Floor spot jumps when legs disappear behind displays | box bottom is not the feet | floor spot from the head and the Z poles (`est` in the live video: "Feet hidden · spot from head"); blind spots drawn with each area |
 
 ### Models on the box
 
@@ -329,30 +325,52 @@ were in, and no In / Out is counted from that box. Shop areas are flat
 outlines drawn on each camera's picture (Camera page → Shop areas): a person is
 in an area when their confirmed feet point is inside its outline.
 
-## Shop areas (3D) and track_region
+## Shop areas and track_region
 
-Camera page → camera → **Shop areas (3D)** (saved in `camera.floor_areas`):
+Camera page → camera → **Shop Areas** (saved in `camera.floor_areas`). Each
+camera has its OWN floor and areas, drawn on its own picture; there is no shop
+floor plan and no Staff zone any more.
 
-1. **3D floor — automatic.** Every camera hangs at the same fixed height,
-   `CAMERA_HEIGHT` = **3.25 m**. Until you adjust it, each camera uses an
-   automatic floor (usual tilt 25°, Tapo C230 lens: 75° across, 41° up-down,
-   88° corner to corner = lens width 63.6° at the centre + lens curve −0.52).
-   The Tapo lens is wide and round, so a flat floor looks bent at the sides
-   of the picture; the lens curve straightens it before anything is measured.
-   To fit it to a camera: open the camera page with the live video playing
-   while people walk past, click **Adjust 3D floor** → **Auto-fit tilt from
-   people** (the tilt that makes everyone's feet on the floor and head about
-   1.65 m up), then fine-tune the sliders until the 1 m grid lies flat on the
-   floor and follows the tile lines, also at the sides (Lens curve). Save.
-   No measuring in the shop is needed.
-2. **+ Add area**: click the corners of the area on the floor (counter, each
-   Point of Purchase display, the Traffic walkway outside...), give it any
-   name and a kind, and a height range (Z). Areas must not overlap. Edit or
-   delete it any time.
+1. **Adjust 3D floor — X / Y / Z polylines.** The sliders (camera height, tilt,
+   Tapo lens) give a first guess; **Auto-fit tilt from people** helps. Then
+   **Make X / Y / Z lines** lays the guess out as polylines on the picture:
+   - **X lines (red)** — floor lines along X, one row of dots each;
+   - **Y lines (green)** — floor lines along Y, one column of dots each;
+   - **Z poles (blue)** — a dot on the floor and dots 1 m and 2 m above it.
+   Drag every dot onto the real floor: X / Y lines on straight floor lines (tile
+   joints, the foot of a wall or the counter), even where the round lens bends
+   them at the picture edges; Z poles on something of known height (a shelf, a
+   door frame, a staff of known height standing there), one near and one far.
+   **+ / −** adds or removes X lines, Y lines and Z poles; **Line spacing** sets
+   the metres between lines (e.g. 0.6 m for 60 cm tiles). Save.
+   The box then turns any picture point into a floor spot through these
+   dragged cells (a wrong height, tilt or lens no longer matters), and the Z
+   poles turn the TOP OF THE HEAD into a floor spot when the feet are hidden
+   (`edge/space3d.py`, `FloorMesh`). Tested with dots placed ~0.5% of the
+   picture off by hand: the floor spot from the head is within ~10 cm
+   (median), ~20 cm for 95% of people.
+2. **+ Add area**: click the corners of the floor you can SEE in the area
+   (Counter, Purchasing / Point of Purchase displays, the Traffic walkway). Drag
+   a dot to move it, right-click to remove it. Then **+ Blind spot** for floor of
+   this area that is HIDDEN behind the counter, a table or a display, where
+   people still walk or stand (drawn dotted, like the floor behind ABT-02's
+   counter). Kinds: **Counter (In)**, **Purchasing (In)**, **Traffic (Passed
+   By)**. Areas must not overlap.
+
+How a person's area is decided (`camera_worker._person` / `_locate`):
+- feet seen on the floor → that point;
+- the box ends INSIDE a blind spot → the box ends on the furniture, not on the
+  floor: the feet are worked out from the top of the head and the Z poles
+  (`est` in the live video: "Feet hidden · spot from head"), and that point
+  lands in the blind spot → the blind spot's area (e.g. Counter);
+- the area whose outline (seen floor or blind spot) the point is in; touching
+  a line counts (`REGION_MARGIN_PICTURE`); anywhere else is Out of Range.
+Someone behind the counter (box ending in a Counter blind spot) is never taken
+for an object when they sit still.
 
 The box then knows, for every full-body person, their floor spot X / Y, their
 height Z and the area they are in (shown live on the camera details page, with
-a top-view floor map). Every `cctv_event` row has a `direction` and a
+their 3D box). Every `cctv_event` row has a `direction` and a
 `track_region` (where the person was):
 
 | Event | direction | track_region |
@@ -464,54 +482,6 @@ groups (25-32, 38-43, ...), so `est_age` is a rough estimate. With `--show`
 the window prints it next to each person, e.g. `7 F 29`.
 Turn it off with `DEMOGRAPHICS=off` in `.env`.
 
-## Shop Floor Map (Camera details page)
-
-Below Shop Areas, a top view of the shop (for Bukit Tinggi: the furniture plan
-layout, 7.314 m × 5.89 m, glass front on the diagonal, the Traffic walkway in
-front). It shows every camera of the edge box, where it hangs and which way it
-looks, each camera's areas laid onto the floor, the people on the selected
-camera, and obstacles. **Adjust on map**: drag the camera, set Facing / Tilt,
-or drag the corners of its areas (the corner moves on the picture too), then
-**Save to camera** (this places the camera on the shop plan, so all cameras
-share one floor and a person seen by 2 cameras lands on one spot).
-**Save found obstacles** stores the tables / counter / mannequins the box found
-(`floor_areas.obstacles`); a person whose box ends on one has their floor spot
-worked out from their head. The live video shows Store metrics (Passed By,
-Walk-in, Inside now) in its corner instead of the small floor map.
-
-### Shop areas on the plan (one outline per area for all cameras)
-
-Areas drawn on a camera's PICTURE are seen in perspective: a line on the floor
-of a tilted, round-lens picture lands a little elsewhere on the real floor, and
-each camera drew its own. Where 2 cameras overlap, one person could be in
-Counter on ABT-02 and in Purchasing on ABT-04 at the same moment, or "Out of
-Range" in a gap between two areas while still inside. So the areas are now
-drawn ONCE on the shop plan, in metres, top view (`branch.plan_areas`,
-`supabase/plan_areas.sql`): **Edit areas on plan** → drag corners (click the
-small dot on a line to add a corner, double-click a corner to remove it), set
-each area's kind, **Save areas on plan**. Kinds: Purchasing, Counter (In),
-Traffic (walkway: Passed By), **Staff** (staff-only side of the counter:
-recorded as Counter; anyone there for `STAFF_ZONE_SECONDS` is a staff).
-
-This is still 2D (the floor), not 3D: people stand on the floor, so their
-FEET on the floor decide the area. The camera's height (3.25 m) and tilt are
-only used to turn the feet in the picture into a floor spot; the area itself
-needs no height. A camera uses the plan areas once it is **placed on the plan**
-(Adjust on map → Save to camera); until then it uses the areas on its picture.
-How the box decides (`edge/plan.py`, `camera_worker._locate`):
-1. inside an outline → that area (Staff zone before Counter, small before large);
-2. within the plan's margin (default 0.25 m) of an area's line → that area
-   (touching the line counts);
-3. inside the shop walls but in no area → Purchasing (a gap never makes an Out);
-4. else Out of Range, and Out only after `OUT_CONFIRM_SECONDS`.
-When 2+ cameras see the person, the camera with the best view (feet seen, big,
-near the middle of its picture) decides (`AREA_FUSE_SECONDS`). People further
-than `WATCH_MARGIN` metres from the shop and walkway (other shops, the far side
-of the mall) are not followed at all (`WATCH_AREA`). Every 5 minutes the log
-says how far apart each pair of cameras puts the same person
-(`shop plan: ABT-02 and ABT-04 put the same person 0.84 m apart`): above
-~0.5 m, adjust one of them on the map (X / Y / Facing / Tilt).
-
 ### Memory, staff and track_ids (TRACK_KEEP / PASSER_KEEP / staff all day)
 
 - Customers inside: remembered 15 min after the last camera saw them
@@ -520,12 +490,16 @@ says how far apart each pair of cameras puts the same person
 - Staff: remembered the whole operating day, until `SHOP_CLOSE` /
   `SHOP_CLOSE_FRI_SAT` (Malaysia time). A staff back from a break who first
   gets a new track_id is joined to their track_id for the day as soon as the
-  body recognition (or the Staff zone) knows them.
+  body recognition knows them.
 - One staff = one person: a staff followed by a camera right now can never
   also be another person (a customer in similar clothes), `STAFF_BUSY_SECONDS`.
 - A wrong staff is undone: recognised by body, then `STAFF_REVOKE_LOOKS` looks
   in a row that do not match that staff → Guest again (recognition_event
-  result Not Matched). `recognition_event.method` says Body / Staff zone.
+  result Not Matched). `recognition_event.method` says Body / Admin.
+- **No Staff zone.** Anybody may step behind the counter, so where someone
+  stands never makes them a staff. A staff is recognised only by body
+  (biometric photos, see below) or named by an admin (Suspicious same person /
+  Staff review). Run `supabase/remove_plan_staff_zone.sql` once.
 - "Inside now" counts customers seen in the last `INSIDE_NOW_SECONDS`, not
   staff, and not people unseen for minutes.
 - A person who appears in the middle of the shop (not from the walkway) gets
@@ -556,6 +530,15 @@ partly hidden people than yolo11n. Copy the folder to the box and set
 `MODEL=./yolo11s_rknn_model` (lower `DECODE_MAX_FPS` to 10 if the live video lags).
 
 ## Staff recognition by body (360°)
+
+**Which staff: Head + Lower body.** All staff wear the same uniform top, so the
+Upper body cannot tell staff apart. The overall look (all parts, `BODY_MATCH`)
+says "this is a staff"; WHICH staff is decided only by `BODY_ID_PARTS`
+(default `Head,Lower body` = hair / face and pants): the staff best on those
+parts wins by `BODY_MARGIN`, and those parts must match that staff
+(`BODY_DISTINCT_MATCH`, at least one part matched). With only the uniform
+visible (sitting, head cut off) there is no vote. Upload biometric photos that
+show the hair and the pants clearly, from several sides.
 
 The cameras hang high up, so faces are rarely clear. Staff (and members) are
 recognised by their BODY instead, from any angle (`edge/biometrics.py`,

@@ -268,14 +268,12 @@ class Visitor:
     photo_q: float = 0.0  # how good the uploaded photo is (bigger, sharper, face visible = better)
     photo_at: float = 0.0  # when it was last taken
     ever_in: bool = False  # walked into the shop at least once (else: only passed by → PASSER_KEEP_SECONDS)
-    # Staff (biometrics.BodyMatcher, or the Staff zone of the shop plan): remembered all day
+    # Staff (biometrics.BodyMatcher by body, or named by an admin): remembered all day
     staff: bool = False
     staff_id: str | None = None
     staff_no: str | None = None
-    staff_how: str | None = None  # "Body" / "Staff zone"
+    staff_how: str | None = None  # "Body" / "Admin" / "Saved"
     guest_track_id: str | None = None  # track_id before it became the staff_no (to undo a wrong staff)
-    staff_zone_s: float = 0.0  # seconds seen standing in the Staff zone
-    staff_zone_at: float = 0.0
     merged_into: "Visitor | None" = None  # this track_id turned out to be another visitor (staff back again)
     # area seen by each camera now: camera_id → (time, how good the view is, track_region)
     area_obs: dict[str, tuple[float, float, str]] = field(default_factory=dict)
