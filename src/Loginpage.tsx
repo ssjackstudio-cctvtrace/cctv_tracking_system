@@ -38,8 +38,8 @@ export default function LoginPage({ onSignIn, notice }: Props) {
         <div className="lg-brand">
           <Logo />
           <div>
-            <div className="lg-brand-name">JackStudio</div>
-            <div className="lg-brand-sub">Retail System Tracking</div>
+            <div className="lg-brand-name">Physical Retail</div>
+            <div className="lg-brand-sub">Tracking System</div>
           </div>
         </div>
 
