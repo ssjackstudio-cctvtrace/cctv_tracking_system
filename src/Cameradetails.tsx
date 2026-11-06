@@ -192,21 +192,21 @@ export function CameraScreen({
 }
 
 // People Passed By / Walk-in for ONE camera (the selected camera), counted
-// from CCTV_EVENT since midnight today: Passed By = direction 'Passed By'
+// from CCTV_EVENT on one day (day = YYYY-MM-DD, local time): Passed By = direction 'Passed By'
 // (walked onto the Traffic walkway), Walk-in = direction 'In'. People, not
 // rows: one person (visit = one track_id) is counted once, even when this
 // camera recorded them more than once. Staff (visit.visit_type 'Staff') are
 // not counted. reloadKey changes when the edge box says a new row was saved,
-// so the numbers change at once.
-function usePeopleCount(cameraId: string, reloadKey = 0) {
+// so the numbers change at once. enabled = false skips the queries (counts stay 0).
+function usePeopleCount(cameraId: string, reloadKey = 0, day: string = todayKey(), enabled = true) {
   const [counts, setCounts] = useState({ passedBy: 0, in: 0 })
   const [error, setError] = useState('')
 
   useEffect(() => {
+    if (!enabled) return
     let cancelled = false
     const load = async () => {
-      const startOfToday = new Date()
-      startOfToday.setHours(0, 0, 0, 0)
+      const [dayStart, dayEnd] = dayRange(day)
       const visitsWith = async (directions: string[]) => {
         const ids = new Set<string>()
         for (let from = 0; from < 20000; from += 1000) {
@@ -216,7 +216,8 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
             .eq('camera_id', cameraId)
             .neq('visit.visit_type', 'Staff')
             .in('direction', directions)
-            .gte('event_time', startOfToday.toISOString())
+            .gte('event_time', dayStart)
+            .lt('event_time', dayEnd)
             .range(from, from + 999)
           if (error) return { count: 0, error }
           const rows = (data ?? []) as { visit_id: string }[]
@@ -240,21 +241,21 @@ function usePeopleCount(cameraId: string, reloadKey = 0) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [cameraId, reloadKey])
+  }, [cameraId, reloadKey, day, enabled])
 
   return { ...counts, error }
 }
 
-// ---------- People Passed By / Walk-in timeline (today, 30-minute steps) ----------
+// ---------- People Passed By / Walk-in timeline (one day, 30-minute steps) ----------
 // Opening hours: 10:00 AM – 10:30 PM on Friday and Saturday, 10:00 AM – 10:00 PM other days.
 // Each person (visit_id) is counted once per direction, in the 30 minutes of
-// their first Passed By / In row from this camera today, like the cards above
+// their first Passed By / In row from this camera on the selected day, like the cards above
 // (staff not counted).
-const SLOT_MINUTES = 30
+export const SLOT_MINUTES = 30
 
-type TimelineSlot = { start: Date; passedBy: number; in: number }
+export type TimelineSlot = { start: Date; passedBy: number; in: number }
 
-function usePeopleTimeline(cameraId: string, reloadKey = 0) {
+function usePeopleTimeline(cameraId: string, reloadKey = 0, day: string = todayKey()) {
   const [slots, setSlots] = useState<TimelineSlot[]>([])
   const [error, setError] = useState('')
 
@@ -262,10 +263,11 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
     let cancelled = false
     const load = async () => {
       const now = new Date()
-      const open = new Date(now)
+      const dayDate = new Date(`${day}T00:00:00`)
+      const open = new Date(dayDate)
       open.setHours(0, OPEN_MINUTES, 0, 0)
-      const close = new Date(now)
-      close.setHours(0, closeMinutes(now), 0, 0)
+      const close = new Date(dayDate)
+      close.setHours(0, closeMinutes(dayDate), 0, 0)
       const rows: { visit_id: string; direction: string; event_time: string }[] = []
       for (let from = 0; from < 20000; from += 1000) {
         const { data, error } = await supabase
@@ -286,7 +288,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
         rows.push(...((data ?? []) as typeof rows))
         if ((data ?? []).length < 1000) break
       }
-      const count = (closeMinutes(now) - OPEN_MINUTES) / SLOT_MINUTES
+      const count = (closeMinutes(dayDate) - OPEN_MINUTES) / SLOT_MINUTES
       const next: TimelineSlot[] = Array.from({ length: count }, (_, i) => ({
         start: new Date(open.getTime() + i * SLOT_MINUTES * 60_000),
         passedBy: 0,
@@ -301,7 +303,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
         if (i >= 0 && i < count) next[i][dir] += 1
       }
       setError('')
-      // Only up to now: the rest of the day has not happened yet
+      // Only up to now: the rest of the day has not happened yet (a past day shows every slot)
       setSlots(next.filter((s) => s.start <= now))
     }
     load()
@@ -310,7 +312,7 @@ function usePeopleTimeline(cameraId: string, reloadKey = 0) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [cameraId, reloadKey])
+  }, [cameraId, reloadKey, day])
 
   return { slots, error }
 }
@@ -322,10 +324,33 @@ const fmtClock = (d: Date) => d.toLocaleTimeString('en-US', { hour: '2-digit', m
 const fmtHour = (m: number) =>
   `${((Math.floor(m / 60) + 11) % 12) + 1}${m % 60 ? `:${String(m % 60).padStart(2, '0')}` : ''}${m < 12 * 60 ? 'am' : 'pm'}`
 
-function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: number }) {
-  const { slots, error } = usePeopleTimeline(cameraId, reloadKey)
-  const today = new Date()
-  const closeAt = closeMinutes(today)
+function PeopleTimeline({ cameraId, reloadKey, day }: { cameraId: string; reloadKey: number; day: string }) {
+  const { slots, error } = usePeopleTimeline(cameraId, reloadKey, day)
+  return (
+    <CustomersLineChart
+      title={`Customers Passed By / Walk-in ${day === todayKey() ? 'today' : `on ${fmtDay(day)}`}`}
+      day={day}
+      slots={slots}
+      error={error}
+    />
+  )
+}
+
+// Line graph of Customers Passed By / Walk-in per 30 minutes of one day (day = YYYY-MM-DD),
+// opening to closing time. Used by the Camera Details page and the Dashboard.
+export function CustomersLineChart({
+  title,
+  day,
+  slots,
+  error,
+}: {
+  title: string
+  day: string
+  slots: TimelineSlot[]
+  error: string
+}) {
+  const dayDate = new Date(`${day}T00:00:00`)
+  const closeAt = closeMinutes(dayDate)
   // Each point sits in the middle of its 30 minutes
   const data = slots.map((s) => ({
     minute: s.start.getHours() * 60 + s.start.getMinutes() + SLOT_MINUTES / 2,
@@ -338,10 +363,10 @@ function PeopleTimeline({ cameraId, reloadKey }: { cameraId: string; reloadKey: 
 
   return (
     <section className="cam-timeline">
-      <h2>Customers Passed By / Walk-in today</h2>
+      <h2>{title}</h2>
       <p className="cam-count-note">
-        Customers per 30 minutes, {fmtClock(new Date(new Date(today).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
-        {fmtClock(new Date(new Date(today).setHours(0, closeAt, 0, 0)))}
+        Customers per 30 minutes, {fmtClock(new Date(new Date(dayDate).setHours(0, OPEN_MINUTES, 0, 0)))} –{' '}
+        {fmtClock(new Date(new Date(dayDate).setHours(0, closeAt, 0, 0)))}
       </p>
       {error && <p className="cam-error">Could not load the customers timeline: {error}</p>}
       <ResponsiveContainer width="100%" height={280}>
@@ -792,7 +817,13 @@ export default function CameraDetails({
   }, [])
   useEffect(() => () => clearTimeout(debounce.current), [])
 
-  const people = usePeopleCount(camera.camera_id, savedTick)
+  // Date of "Customers Counted by this camera on [date]" (cards + line graph); starts on today
+  const [countDay, setCountDay] = useState(todayKey)
+  const countIsToday = countDay === todayKey()
+  const dayPeople = usePeopleCount(camera.camera_id, savedTick, countDay)
+  // Store metrics on the live video always show today (only read separately when another date is picked)
+  const todayPeople = usePeopleCount(camera.camera_id, savedTick, todayKey(), !countIsToday)
+  const people = countIsToday ? dayPeople : todayPeople
   const records = useTrackRecords(camera.camera_id, savedTick)
   const { info, error: infoError } = useCameraInfo(camera.camera_id)
   const cam = info ?? { ...camera, edge_device: null } // until the query answers
@@ -918,20 +949,23 @@ export default function CameraDetails({
       />
 
 
-      {people.error && <p className="cam-error">Could not load customers count: {people.error}</p>}
-      <p className="cam-count-note">Customers counted by this camera today</p>
+      <div className="cam-counts-filter">
+        <RecordDayFilter day={countDay} onChange={setCountDay} />
+      </div>
+      {dayPeople.error && <p className="cam-error">Could not load customers count: {dayPeople.error}</p>}
+      <p className="cam-count-note">Customers Counted by this camera on {fmtDay(countDay)}</p>
       <div className="cam-counts">
         <div className="cam-count-card">
           <span className="cam-count-label">Customers Passed By</span>
-          <span className="cam-count-value">{people.passedBy}</span>
+          <span className="cam-count-value">{dayPeople.passedBy}</span>
         </div>
         <div className="cam-count-card">
           <span className="cam-count-label">Customers Walk-in</span>
-          <span className="cam-count-value">{people.in}</span>
+          <span className="cam-count-value">{dayPeople.in}</span>
         </div>
       </div>
 
-      <PeopleTimeline cameraId={camera.camera_id} reloadKey={savedTick} />
+      <PeopleTimeline cameraId={camera.camera_id} reloadKey={savedTick} day={countDay} />
 
       <section className="cam-records">
         <h2>Latest records from this camera</h2>

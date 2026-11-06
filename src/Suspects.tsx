@@ -111,6 +111,14 @@ const todayKey = () => {
   const d = new Date()
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` // Malaysia date (staff_duty.duty_date)
 }
+// Suspicious pairs are kept for 7 days (supabase/suspect_match_cleanup.sql deletes older ones),
+// so the date filter goes back at most 7 days: from 7 days ago to today
+const SUSPECT_KEEP_DAYS = 7
+const oldestDayKey = () => {
+  const d = new Date()
+  d.setDate(d.getDate() - SUSPECT_KEEP_DAYS)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
 // Date filter of Suspicious same person, shown as "3 November 2026"; clicking it opens the calendar
 function SuspectDayFilter({ day, onChange }: { day: string; onChange: (day: string | null) => void }) {
   const input = useRef<HTMLInputElement>(null)
@@ -141,9 +149,15 @@ function SuspectDayFilter({ day, onChange }: { day: string; onChange: (day: stri
         tabIndex={-1}
         aria-hidden="true"
         value={day}
+        min={oldestDayKey()}
         max={todayKey()}
         required
-        onChange={(e) => onChange(e.target.value && e.target.value !== todayKey() ? e.target.value : null)}
+        onChange={(e) => {
+          const v = e.target.value
+          // only 7 days ago to today (typed dates outside are pulled back into the range)
+          if (!v || v >= todayKey()) onChange(null)
+          else onChange(v < oldestDayKey() ? oldestDayKey() : v)
+        }}
       />
       {day !== todayKey() && (
         <button type="button" className="ds-datefilter-clear" onClick={() => onChange(null)}>
@@ -205,7 +219,8 @@ export default function SuspectPanel({ branchId }: { branchId: string }) {
   const [dutyError, setDutyError] = useState('')
   // Date of the lists (Date filter above the tabs); null = today (follows the clock past midnight)
   const [pickedDay, setPickedDay] = useState<string | null>(null)
-  const day = pickedDay ?? todayKey()
+  // (a picked date that has since fallen out of the last 7 days moves to the oldest day kept)
+  const day = pickedDay === null ? todayKey() : pickedDay < oldestDayKey() ? oldestDayKey() : pickedDay
   const when = dayWords(day)
   // bumped after a decision, so Recognised as staff / Track Staff reload at once
   const [reload, setReload] = useState(0)

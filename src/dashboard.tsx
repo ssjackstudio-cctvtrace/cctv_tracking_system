@@ -17,6 +17,7 @@ import TransactionsPage from './Transactionspage'
 import DataTable, { Badge } from './Datatable'
 import NewBranchPage from './Newbranchpage'
 import { OPEN_MINUTES, closeMinutes } from './shopHours'
+import { CustomersLineChart, SLOT_MINUTES, type TimelineSlot } from './Cameradetails'
 import logoUrl from './assets/logo.png'
 import './dashboard.css'
 
@@ -290,6 +291,43 @@ export function countPeople(events: PersonEvent[]) {
   return { in: walkIn, passedBy, longest, averageStay, stayCount: stays.length, regionLongest }
 }
 
+// Line graph of the Dashboard: Passed By / Walk-in per 30 minutes of one day (day = YYYY-MM-DD),
+// opening to closing time. Same rule as the Passed By / Walk-in cards (countPeople): customers only,
+// opening hours, Passed By = a Passed By event in Traffic, Walk-in = an In event in Counter / Purchasing;
+// each track_id counted once per direction, in the 30 minutes of its first such event.
+// So the points of each line add up to the number on its card.
+function customerSlots(events: PersonEvent[], day: string): TimelineSlot[] {
+  const now = new Date()
+  const dayDate = new Date(`${day}T00:00:00`)
+  const open = new Date(dayDate)
+  open.setHours(0, OPEN_MINUTES, 0, 0)
+  const count = (closeMinutes(dayDate) - OPEN_MINUTES) / SLOT_MINUTES
+  const slots: TimelineSlot[] = Array.from({ length: count }, (_, i) => ({
+    start: new Date(open.getTime() + i * SLOT_MINUTES * 60_000),
+    passedBy: 0,
+    in: 0,
+  }))
+  const seen = { passedBy: new Set<string>(), in: new Set<string>() }
+  for (const e of events) {
+    // events come oldest first
+    if (!inOpenHours(e.event_time) || !isCounted(e.visit?.visit_type)) continue
+    const dir =
+      e.direction === 'Passed By' && e.track_region === 'Traffic'
+        ? 'passedBy'
+        : e.direction === 'In' && (e.track_region === 'Counter' || e.track_region === 'Purchasing')
+          ? 'in'
+          : null
+    if (!dir) continue
+    const key = e.visit?.track_id ?? e.visit_id
+    if (seen[dir].has(key)) continue
+    seen[dir].add(key)
+    const i = Math.floor((new Date(e.event_time).getTime() - open.getTime()) / (SLOT_MINUTES * 60_000))
+    if (i >= 0 && i < count) slots[i][dir] += 1
+  }
+  // Only up to now: the rest of today has not happened yet (a past day shows every slot)
+  return slots.filter((s) => s.start <= now)
+}
+
 // 4354 s → "1 hr 12 min 34 sec", 754 s → "12 min 34 sec", 45 s → "45 sec"
 const fmtStay = (seconds: number) => {
   const h = Math.floor(seconds / 3600)
@@ -542,6 +580,8 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
   const [longest, setLongest] = useState<Stay[] | null>(null)
   const [regionLongest, setRegionLongest] = useState<RegionStay[] | null>(null)
   const [averageStay, setAverageStay] = useState<{ seconds: number | null; count: number } | null>(null)
+  // Passed By / Walk-in per 30 minutes (line graph below the 3 cards)
+  const [timeline, setTimeline] = useState<{ slots: TimelineSlot[]; error: string }>({ slots: [], error: '' })
   const [events, setEvents] = useState<LatestEvent[]>([])
   const [recognitions, setRecognitions] = useState<LatestRecognition[]>([])
   const [eventTab, setEventTab] = useState<EventTab>('cctv')
@@ -586,8 +626,12 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
 
     Promise.all([
       loadPersonEvents(branch, range).then(
-        (rows) => ({ people: countPeople(rows), error: null }),
-        (err: unknown) => ({ people: null, error: { message: err instanceof Error ? err.message : String(err) } }),
+        (rows) => ({ people: countPeople(rows), slots: customerSlots(rows, day), error: null }),
+        (err: unknown) => ({
+          people: null,
+          slots: [] as TimelineSlot[],
+          error: { message: err instanceof Error ? err.message : String(err) },
+        }),
       ),
       dealedCount(branch, range),
       latestEvents(branch, range),
@@ -611,6 +655,7 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
       setLongest(p ? p.longest : null)
       setRegionLongest(p ? p.regionLongest : null)
       setAverageStay(p ? { seconds: p.averageStay, count: p.stayCount } : null)
+      setTimeline({ slots: peopleRes.slots, error: peopleRes.error?.message ?? '' })
       setEvents(evRes.error ? [] : ((evRes.data ?? []) as unknown as LatestEvent[]))
       setRecognitions(recRes.error ? [] : ((recRes.data ?? []) as unknown as LatestRecognition[]))
       setLoading(false)
@@ -709,6 +754,15 @@ function Overview({ onMoreEvents }: { onMoreEvents: (tab: EventTab, day: string)
           </div>
         ))}
       </section>
+
+      {/* Below the 3 cards: under the row of 3 when the sidebar is expanded, under the full-width
+          Transactions Dealed card when it is collapsed (the cards are then 2 + 1) */}
+      <CustomersLineChart
+        title={`Customers Counted by this camera on ${fmtDate(new Date(`${day}T00:00:00`))}`}
+        day={day}
+        slots={timeline.slots}
+        error={timeline.error}
+      />
 
       <div className="ds-stay-pair">
         <LongestStay
